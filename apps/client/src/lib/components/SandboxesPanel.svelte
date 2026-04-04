@@ -178,6 +178,7 @@
 		createdAt: number | null;
 		metaLabel: string;
 		metaValue: string;
+		canReset: boolean;
 		searchText: string;
 	};
 
@@ -194,6 +195,7 @@
 			createdAt: sandbox.created_at,
 			metaLabel: sandbox.owner_username ? "Owner" : "",
 			metaValue: sandbox.owner_username ?? "",
+			canReset: true,
 			searchText: [sandbox.name, sandbox.image, sandbox.owner_username ?? "", sandbox.container_id].join(" ").toLowerCase()
 		}));
 
@@ -214,6 +216,7 @@
 				createdAt: container.created ?? null,
 				metaLabel: composeProject ? "Compose" : "Type",
 				metaValue,
+				canReset: composeProject.length > 0 || ((container.labels["open-sandbox.kind"] ?? "") === "direct" && (container.labels["open-sandbox.managed_id"] ?? "").length > 0),
 				searchText: [primaryName, container.image, metaValue, container.id, ...(container.names ?? [])].join(" ").toLowerCase()
 			};
 		});
@@ -306,7 +309,7 @@
 						metaLabel={workload.metaLabel}
 						metaValue={workload.metaValue}
 						isSelected={false}
-						showReset={true}
+						showReset={workload.canReset}
 						deleteLabel={workload.kind === "sandbox" ? "Delete" : "Remove"}
 						deleteTitle={workload.kind === "sandbox" ? "Delete sandbox" : "Remove container"}
 						onOpen={() => workload.kind === "sandbox" ? onOpen(workload.id) : onOpenContainer(workload.id)}

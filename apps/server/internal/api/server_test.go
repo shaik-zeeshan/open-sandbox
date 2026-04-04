@@ -1134,6 +1134,38 @@ func TestPrepareComposeProjectLocksManagedDirectories(t *testing.T) {
 	}
 }
 
+func TestAuthorizeComposeProjectAccessRejectsForeignOwner(t *testing.T) {
+	s := newTestServer(&mockDocker{})
+	s.workspaceRoot = t.TempDir()
+	projectDir := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", "demo")
+	if err := ensurePrivateDir(projectDir); err != nil {
+		t.Fatalf("expected compose project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "docker-compose.yml"), []byte("services:\n  app:\n    image: alpine:3.20\n"), 0o600); err != nil {
+		t.Fatalf("expected compose file: %v", err)
+	}
+	if err := s.writeComposeProjectOwnerMetadata(projectDir, AuthIdentity{UserID: "owner-1", Username: "alice"}); err != nil {
+		t.Fatalf("expected owner metadata to be written: %v", err)
+	}
+
+	project := s.composeProjectContextForName("demo")
+	shouldWriteOwner, err := s.authorizeComposeProjectAccess(AuthIdentity{UserID: "owner-2", Username: "bob", Role: roleMember}, project)
+	if err == nil {
+		t.Fatal("expected foreign owner access to be rejected")
+	}
+	if shouldWriteOwner {
+		t.Fatal("expected foreign owner access to avoid owner writes")
+	}
+
+	owner, hasOwner, err := s.readComposeProjectOwnerMetadata(projectDir)
+	if err != nil {
+		t.Fatalf("expected owner metadata to remain readable: %v", err)
+	}
+	if !hasOwner || owner.UserID != "owner-1" {
+		t.Fatalf("expected original owner metadata to remain intact: %+v", owner)
+	}
+}
+
 func TestCreateSandboxEndpoint(t *testing.T) {
 	createdSandbox := store.Sandbox{}
 	m := &mockDocker{

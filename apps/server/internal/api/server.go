@@ -582,13 +582,16 @@ func (s *Server) composeUp(c *gin.Context) {
 		return
 	}
 
+	existingProject := s.composeProjectContextForName(composeProjectName(req.ProjectName, req.Content))
+	shouldWriteOwner, err := s.authorizeComposeProjectAccess(identity, existingProject)
+	if err != nil {
+		writeError(c, http.StatusNotFound, err)
+		return
+	}
+
 	project, err := s.prepareComposeProject(req)
 	if err != nil {
 		writeError(c, http.StatusBadRequest, err)
-		return
-	}
-	if err := s.writeComposeProjectOwnerMetadata(project.ProjectDir, identity); err != nil {
-		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -657,6 +660,13 @@ func (s *Server) composeUp(c *gin.Context) {
 		flusher.Flush()
 		return
 	}
+	if shouldWriteOwner {
+		if err := s.writeComposeProjectOwnerMetadata(project.ProjectDir, identity); err != nil {
+			emitSSE(c, mu, "error", err.Error())
+			flusher.Flush()
+			return
+		}
+	}
 
 	emitSSE(c, mu, "done", "compose up completed")
 	flusher.Flush()
@@ -677,6 +687,18 @@ func (s *Server) composeDown(c *gin.Context) {
 	var req ComposeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c, http.StatusBadRequest, err)
+		return
+	}
+
+	identity, ok := authIdentityFromContext(c)
+	if !ok {
+		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
+		return
+	}
+
+	existingProject := s.composeProjectContextForName(composeProjectName(req.ProjectName, req.Content))
+	if _, err := s.authorizeComposeProjectAccess(identity, existingProject); err != nil {
+		writeError(c, http.StatusNotFound, err)
 		return
 	}
 
@@ -711,6 +733,18 @@ func (s *Server) composeStatus(c *gin.Context) {
 	var req ComposeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c, http.StatusBadRequest, err)
+		return
+	}
+
+	identity, ok := authIdentityFromContext(c)
+	if !ok {
+		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
+		return
+	}
+
+	existingProject := s.composeProjectContextForName(composeProjectName(req.ProjectName, req.Content))
+	if _, err := s.authorizeComposeProjectAccess(identity, existingProject); err != nil {
+		writeError(c, http.StatusNotFound, err)
 		return
 	}
 
@@ -1280,6 +1314,36 @@ func (s *Server) existingComposeProject(projectName string) (composeProjectConte
 	return composeProjectContext{ProjectName: sanitized, ProjectDir: projectDir, ComposeFile: composeFile}, nil
 }
 
+func (s *Server) composeProjectContextForName(projectName string) composeProjectContext {
+	return composeProjectContext{
+		ProjectName: projectName,
+		ProjectDir:  filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", projectName),
+		ComposeFile: filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", projectName, "docker-compose.yml"),
+	}
+}
+
+func (s *Server) authorizeComposeProjectAccess(identity AuthIdentity, project composeProjectContext) (bool, error) {
+	owner, hasOwner, err := s.readComposeProjectOwnerMetadata(project.ProjectDir)
+	if err != nil {
+		return false, err
+	}
+	if hasOwner {
+		if identity.IsAdmin() || owner.UserID == identity.UserID {
+			return false, nil
+		}
+		return false, errors.New("compose project not found")
+	}
+	if _, err := os.Stat(project.ComposeFile); err == nil {
+		if identity.IsAdmin() {
+			return false, nil
+		}
+		return false, errors.New("compose project not found")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("inspect compose project: %w", err)
+	}
+	return true, nil
+}
+
 func composeProjectName(raw string, content string) string {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed != "" {
@@ -1336,6 +1400,17 @@ func writeManagedComposeFile(projectDir string, content string) (string, error) 
 }
 
 func (s *Server) writeComposeProjectOwnerMetadata(projectDir string, identity AuthIdentity) error {
+	owner, hasOwner, err := s.readComposeProjectOwnerMetadata(projectDir)
+	if err != nil {
+		return err
+	}
+	if hasOwner {
+		if owner.UserID != identity.UserID {
+			return errors.New("compose project owner mismatch")
+		}
+		return nil
+	}
+
 	ownerFile := filepath.Join(projectDir, composeOwnerMetadataFile)
 	payload, err := json.Marshal(managedOwnerMetadata{UserID: identity.UserID, Username: identity.Username})
 	if err != nil {
@@ -1345,6 +1420,22 @@ func (s *Server) writeComposeProjectOwnerMetadata(projectDir string, identity Au
 		return fmt.Errorf("write compose owner metadata: %w", err)
 	}
 	return nil
+}
+
+func (s *Server) readComposeProjectOwnerMetadata(projectDir string) (managedOwnerMetadata, bool, error) {
+	ownerFile := filepath.Join(projectDir, composeOwnerMetadataFile)
+	payload, err := os.ReadFile(ownerFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return managedOwnerMetadata{}, false, nil
+		}
+		return managedOwnerMetadata{}, false, fmt.Errorf("read compose owner metadata: %w", err)
+	}
+	var owner managedOwnerMetadata
+	if err := json.Unmarshal(payload, &owner); err != nil {
+		return managedOwnerMetadata{}, false, fmt.Errorf("decode compose owner metadata: %w", err)
+	}
+	return owner, true, nil
 }
 
 func (s *Server) directContainerSpecRoot() string {

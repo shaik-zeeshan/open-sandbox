@@ -131,7 +131,13 @@
 	const workloadCreatedAt = $derived(sandbox?.created_at ?? 0);
 	const st = $derived(statusInfo(workloadStatus));
 	const ports = $derived(previewLinks(activeContainer?.ports));
-	const canReset = $derived(true);
+	const canReset = $derived.by(() => {
+		if (workloadKind === "sandbox") {
+			return true;
+		}
+		const labels = activeContainer?.labels ?? {};
+		return (labels["com.docker.compose.project"] ?? "").length > 0 || ((labels["open-sandbox.kind"] ?? "") === "direct" && (labels["open-sandbox.managed_id"] ?? "").length > 0);
+	});
 	const canBrowseFiles = $derived(backingContainerId.length > 0);
 
 	const formatDate = (unixSeconds: number): string =>
@@ -302,6 +308,9 @@
 					await Promise.resolve(onRefresh());
 					await loadPath(workspaceDirValue);
 				} else {
+					if (!canReset) {
+						throw new Error("Reset is only available for managed direct containers and compose workloads.");
+					}
 					const result = await runApiEffect(resetContainer(config, targetId));
 					onContainerReplaced(result.container_id);
 					notice = "Container reset.";
