@@ -1,0 +1,545 @@
+basePath: /
+definitions:
+  api.BuildImageRequest:
+    properties:
+      build_args:
+        additionalProperties:
+          type: string
+        type: object
+      context_files:
+        additionalProperties:
+          type: string
+        type: object
+      context_path:
+        type: string
+      dockerfile:
+        type: string
+      dockerfile_content:
+        type: string
+      tag:
+        type: string
+    required:
+    - tag
+    type: object
+  api.ComposeRequest:
+    properties:
+      content:
+        type: string
+      project_name:
+        type: string
+      remove_orphans:
+        type: boolean
+      services:
+        items:
+          type: string
+        type: array
+      volumes:
+        type: boolean
+    required:
+    - content
+    type: object
+  api.ComposeResponse:
+    properties:
+      stderr:
+        type: string
+      stdout:
+        type: string
+    type: object
+  api.ComposeStatusResponse:
+    properties:
+      raw:
+        type: string
+      services: {}
+    type: object
+  api.CreateContainerRequest:
+    properties:
+      auto_remove:
+        type: boolean
+      binds:
+        items:
+          type: string
+        type: array
+      cmd:
+        items:
+          type: string
+        type: array
+      env:
+        items:
+          type: string
+        type: array
+      image:
+        type: string
+      name:
+        type: string
+      start:
+        type: boolean
+      tty:
+        type: boolean
+      user:
+        type: string
+      workdir:
+        type: string
+    required:
+    - image
+    type: object
+  api.CreateContainerResponse:
+    properties:
+      container_id:
+        type: string
+      started:
+        type: boolean
+      warnings:
+        items:
+          type: string
+        type: array
+    type: object
+  api.ErrorResponse:
+    properties:
+      error:
+        type: string
+      reason:
+        type: string
+      stderr:
+        type: string
+    type: object
+  api.ExecRequest:
+    properties:
+      cmd:
+        items:
+          type: string
+        type: array
+      detach:
+        type: boolean
+      env:
+        items:
+          type: string
+        type: array
+      tty:
+        type: boolean
+      user:
+        type: string
+      workdir:
+        type: string
+    required:
+    - cmd
+    type: object
+  api.ExecResponse:
+    properties:
+      detached:
+        type: boolean
+      exec_id:
+        type: string
+      exit_code:
+        type: integer
+      stderr:
+        type: string
+      stdout:
+        type: string
+    type: object
+  api.GitCloneRequest:
+    properties:
+      branch:
+        type: string
+      container_id:
+        type: string
+      repo_url:
+        type: string
+      target_path:
+        type: string
+    required:
+    - container_id
+    - repo_url
+    - target_path
+    type: object
+  api.ImageSummary:
+    properties:
+      created:
+        type: integer
+      id:
+        type: string
+      repo_tags:
+        items:
+          type: string
+        type: array
+      size:
+        type: integer
+    type: object
+  api.PullImageRequest:
+    properties:
+      image:
+        type: string
+      tag:
+        type: string
+    required:
+    - image
+    type: object
+  api.RemoveImageResponse:
+    properties:
+      deleted:
+        items:
+          $ref: '#/definitions/image.DeleteResponse'
+        type: array
+    type: object
+  image.DeleteResponse:
+    properties:
+      Deleted:
+        description: The image ID of an image that was deleted
+        type: string
+      Untagged:
+        description: The image ID of an image that was untagged
+        type: string
+    type: object
+info:
+  contact: {}
+  description: Open Sandbox manages local Docker-based agentic coding environments.
+  title: Open Sandbox API
+  version: "1.0"
+paths:
+  /api/compose/down:
+    post:
+      consumes:
+      - application/json
+      description: Runs docker compose down
+      parameters:
+      - description: Compose request
+        in: body
+        name: payload
+        required: true
+        schema:
+          $ref: '#/definitions/api.ComposeRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.ComposeResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      summary: Docker Compose down
+      tags:
+      - compose
+  /api/compose/status:
+    post:
+      consumes:
+      - application/json
+      description: Runs docker compose ps --format json
+      parameters:
+      - description: Compose request
+        in: body
+        name: payload
+        required: true
+        schema:
+          $ref: '#/definitions/api.ComposeRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.ComposeStatusResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      summary: Docker Compose status
+      tags:
+      - compose
+  /api/compose/up:
+    post:
+      consumes:
+      - application/json
+      description: Runs docker compose up -d
+      parameters:
+      - description: Compose request
+        in: body
+        name: payload
+        required: true
+        schema:
+          $ref: '#/definitions/api.ComposeRequest'
+      produces:
+      - text/event-stream
+      responses:
+        "200":
+          description: SSE stream
+          schema:
+            type: string
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      summary: Docker Compose up
+      tags:
+      - compose
+  /api/containers/{id}/exec:
+    post:
+      consumes:
+      - application/json
+      description: Runs a command inside a running container
+      parameters:
+      - description: Container ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Exec request
+        in: body
+        name: payload
+        required: true
+        schema:
+          $ref: '#/definitions/api.ExecRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.ExecResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      summary: Execute command in container
+      tags:
+      - containers
+  /api/containers/{id}/logs:
+    get:
+      description: Streams stdout/stderr logs over SSE
+      parameters:
+      - description: Container ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - default: true
+        description: Follow logs
+        in: query
+        name: follow
+        type: boolean
+      - default: "100"
+        description: Tail lines
+        in: query
+        name: tail
+        type: string
+      produces:
+      - text/event-stream
+      responses:
+        "200":
+          description: SSE stream
+          schema:
+            type: string
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      summary: Stream container logs
+      tags:
+      - containers
+  /api/containers/create:
+    post:
+      consumes:
+      - application/json
+      description: Creates a Docker container and optionally starts it. If the image
+        is missing locally, it is pulled automatically and create is retried.
+      parameters:
+      - description: Create container request
+        in: body
+        name: payload
+        required: true
+        schema:
+          $ref: '#/definitions/api.CreateContainerRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.CreateContainerResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      summary: Create container directly
+      tags:
+      - containers
+  /api/git/clone:
+    post:
+      consumes:
+      - application/json
+      description: Executes git clone inside a running container
+      parameters:
+      - description: Clone request
+        in: body
+        name: payload
+        required: true
+        schema:
+          $ref: '#/definitions/api.GitCloneRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.ExecResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      summary: Clone git repository inside container
+      tags:
+      - git
+  /api/images:
+    get:
+      description: Returns all local images
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/api.ImageSummary'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      summary: List local Docker images
+      tags:
+      - images
+  /api/images/{id}:
+    delete:
+      description: Removes image by ID or tag
+      parameters:
+      - description: Image ID or tag
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Force remove
+        in: query
+        name: force
+        type: boolean
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.RemoveImageResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      summary: Remove Docker image
+      tags:
+      - images
+  /api/images/build:
+    post:
+      consumes:
+      - application/json
+      description: Builds an image from a local context path and Dockerfile
+      parameters:
+      - description: Build request
+        in: body
+        name: payload
+        required: true
+        schema:
+          $ref: '#/definitions/api.BuildImageRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      summary: Build Docker image
+      tags:
+      - images
+  /api/images/pull:
+    post:
+      consumes:
+      - application/json
+      description: Pulls an image from registry
+      parameters:
+      - description: Pull request
+        in: body
+        name: payload
+        required: true
+        schema:
+          $ref: '#/definitions/api.PullImageRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      summary: Pull Docker image
+      tags:
+      - images
+  /health:
+    get:
+      description: Returns service status
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Health check
+      tags:
+      - system
+securityDefinitions:
+  BearerAuth:
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"

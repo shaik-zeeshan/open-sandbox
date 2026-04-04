@@ -1,0 +1,992 @@
+<script lang="ts">
+	import { onDestroy, onMount, tick } from "svelte";
+	import SandboxTerminal from "$lib/components/SandboxTerminal.svelte";
+	import {
+		deleteSandbox,
+		formatApiFailure,
+		readSandboxFile,
+		resetSandbox,
+		resolveApiUrl,
+		restartSandbox,
+		runApiEffect,
+		saveSandboxFile,
+		stopSandbox,
+		uploadSandboxFile,
+		type ApiConfig,
+		type ContainerSummary,
+		type FileReadResponse,
+		type PortSummary,
+		type Sandbox
+	} from "$lib/api";
+
+	type WorkspaceTab = "overview" | "terminal" | "files" | "logs";
+
+	let {
+		sandbox,
+		container,
+		config,
+		onBack,
+		onRefresh,
+		onDeleted
+	} = $props<{
+		sandbox: Sandbox;
+		container: ContainerSummary | null;
+		config: ApiConfig;
+		onBack: () => void;
+		onRefresh: () => void;
+		onDeleted: () => void;
+	}>();
+
+	let activeTab = $state<WorkspaceTab>("overview");
+	let errorMessage = $state("");
+	let notice = $state("");
+
+	const defaultUploadPath = (workspaceDir: string): string => {
+		const normalized = workspaceDir === "/" ? "" : workspaceDir.replace(/\/+$/, "");
+		return `${normalized}/upload.txt`;
+	};
+
+	// Files
+	let browsePath = $state<string>("/");
+	let filePayload = $state<FileReadResponse | null>(null);
+	let readLoading = $state(false);
+	let saveLoading = $state(false);
+	let editorContent = $state("");
+	let uploadPath = $state<string>(defaultUploadPath("/"));
+	let uploadFile = $state<File | null>(null);
+	let uploadLoading = $state(false);
+
+	// Logs
+	let logTail = $state("100");
+	let logFollow = $state(true);
+	let logEntries = $state<Array<{ stream: string; line: string }>>([]);
+	let logsViewport = $state<HTMLDivElement | null>(null);
+	let logsAbortController: AbortController | null = null;
+	let streaming = $state(false);
+
+	// Actions
+	let actionLoading = $state<string | null>(null);
+
+	const directoryEntries = $derived(filePayload?.kind === "directory" ? filePayload.entries ?? [] : []);
+
+	const previewLinks = (ports?: PortSummary[]): string[] =>
+		(ports ?? [])
+			.filter((p) => typeof p.public === "number" && p.public > 0 && p.type === "tcp")
+			.map((p) => `http://localhost:${p.public}`);
+
+	const statusInfo = (status: string): { label: string; cls: "ok" | "error" | "idle" } => {
+		const n = status.toLowerCase();
+		if (n.includes("up") || n.includes("running")) return { label: "running", cls: "ok" };
+		if (n.includes("exit") || n.includes("dead") || n.includes("error")) return { label: "stopped", cls: "error" };
+		return { label: "idle", cls: "idle" };
+	};
+
+	const st = $derived(statusInfo(sandbox.status));
+	const ports = $derived(previewLinks(container?.ports));
+
+	const formatDate = (unixSeconds: number): string =>
+		new Date(unixSeconds * 1000).toLocaleString(undefined, {
+			year: "numeric", month: "short", day: "numeric",
+			hour: "2-digit", minute: "2-digit"
+		});
+
+	const parentPath = (value: string): string => {
+		if (value === "/") return "/";
+		const t = value.endsWith("/") ? value.slice(0, -1) : value;
+		const i = t.lastIndexOf("/");
+		return i <= 0 ? "/" : t.slice(0, i);
+	};
+
+	const joinPath = (base: string, child: string): string => {
+		const nb = base.endsWith("/") ? base.slice(0, -1) : base;
+		return `${nb || ""}/${child}`.replace(/\/+/g, "/");
+	};
+
+	$effect(() => {
+		logEntries.length;
+		if (!logsViewport) return;
+		void tick().then(() => {
+			if (logsViewport) logsViewport.scrollTop = logsViewport.scrollHeight;
+		});
+	});
+
+	// Load the workspace dir on mount
+	onMount(() => {
+		const initialWorkspaceDir = sandbox.workspace_dir ?? "/";
+		browsePath = initialWorkspaceDir;
+		uploadPath = defaultUploadPath(initialWorkspaceDir);
+		void loadPath(initialWorkspaceDir);
+	});
+
+	onDestroy(() => { stopLogs(); });
+
+	async function loadPath(pathToLoad: string): Promise<void> {
+		readLoading = true;
+		errorMessage = "";
+		try {
+			filePayload = await readSandboxFile(config, sandbox.id, pathToLoad.trim());
+			browsePath = pathToLoad.trim();
+			editorContent = filePayload.kind === "file" ? filePayload.content ?? "" : "";
+		} catch (error) {
+			errorMessage = formatApiFailure(error);
+		} finally {
+			readLoading = false;
+		}
+	}
+
+	async function submitSaveFile(): Promise<void> {
+		if (filePayload?.kind !== "file") return;
+		saveLoading = true;
+		errorMessage = ""; notice = "";
+		try {
+			await saveSandboxFile(config, sandbox.id, browsePath, editorContent);
+			notice = "File saved.";
+			filePayload = { ...filePayload, content: editorContent };
+		} catch (error) {
+			errorMessage = formatApiFailure(error);
+		} finally {
+			saveLoading = false;
+		}
+	}
+
+	async function submitUploadFile(): Promise<void> {
+		if (uploadFile === null) return;
+		uploadLoading = true;
+		errorMessage = ""; notice = "";
+		try {
+			await uploadSandboxFile(config, sandbox.id, uploadPath.trim(), uploadFile);
+			notice = "File uploaded.";
+			await loadPath(filePayload?.kind === "directory" ? browsePath : parentPath(uploadPath));
+		} catch (error) {
+			errorMessage = formatApiFailure(error);
+		} finally {
+			uploadLoading = false;
+		}
+	}
+
+	function stopLogs(): void {
+		if (logsAbortController) { logsAbortController.abort(); logsAbortController = null; }
+		streaming = false;
+	}
+
+	async function startLogs(): Promise<void> {
+		stopLogs();
+		logEntries = [];
+		errorMessage = "";
+		const controller = new AbortController();
+		logsAbortController = controller;
+		streaming = true;
+		try {
+			const url = resolveApiUrl(config, `/api/sandboxes/${encodeURIComponent(sandbox.id)}/logs`, {
+				follow: logFollow,
+				tail: logTail.trim() || "100"
+			});
+			const headers = new Headers();
+			const token = config.token?.trim() ?? "";
+			if (token.length) headers.set("Authorization", `Bearer ${token}`);
+			const response = await fetch(url, { credentials: "include", headers, signal: controller.signal });
+			if (response.status === 401) window.dispatchEvent(new CustomEvent("open-sandbox:auth-error"));
+			if (!response.ok || !response.body) throw new Error(`Unable to stream logs: HTTP ${response.status}`);
+			const reader = response.body.getReader();
+			const decoder = new TextDecoder();
+			let buffer = "";
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				buffer += decoder.decode(value, { stream: true });
+				const normalized = buffer.replace(/\r\n/g, "\n");
+				const chunks = normalized.split("\n\n");
+				buffer = chunks.pop() ?? "";
+				for (const chunk of chunks) parseSseBlock(chunk);
+			}
+			if (buffer.trim()) parseSseBlock(buffer);
+		} catch (error) {
+			if (!(error instanceof DOMException && error.name === "AbortError")) {
+				errorMessage = error instanceof Error ? error.message : "Failed to stream logs.";
+			}
+		} finally {
+			if (logsAbortController === controller) logsAbortController = null;
+			streaming = false;
+		}
+	}
+
+	function parseSseBlock(block: string): void {
+		const lines = block.split("\n").map((l) => l.trimEnd()).filter(Boolean);
+		if (!lines.length) return;
+		let eventName = "info";
+		const data: string[] = [];
+		for (const line of lines) {
+			if (line.startsWith("event:")) { eventName = line.slice(6).trim() || "info"; continue; }
+			if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+		}
+		const message = data.join("\n");
+		if (message.length) logEntries = [...logEntries.slice(-399), { stream: eventName, line: message }];
+	}
+
+	async function handleAction(action: "restart" | "reset" | "stop" | "delete"): Promise<void> {
+		actionLoading = action;
+		errorMessage = ""; notice = "";
+		try {
+			if (action === "restart") { await runApiEffect(restartSandbox(config, sandbox.id)); notice = "Restarted."; onRefresh(); }
+			else if (action === "reset") { await runApiEffect(resetSandbox(config, sandbox.id)); notice = "Reset to clean workspace."; onRefresh(); await loadPath(sandbox.workspace_dir ?? "/"); }
+			else if (action === "stop") { await runApiEffect(stopSandbox(config, sandbox.id)); notice = "Stopped."; onRefresh(); }
+			else if (action === "delete") { await runApiEffect(deleteSandbox(config, sandbox.id)); onDeleted(); }
+		} catch (error) {
+			errorMessage = formatApiFailure(error);
+		} finally {
+			actionLoading = null;
+		}
+	}
+
+	const tabs: Array<{ id: WorkspaceTab; label: string }> = [
+		{ id: "overview", label: "Overview" },
+		{ id: "terminal", label: "Terminal" },
+		{ id: "files",    label: "Files"    },
+		{ id: "logs",     label: "Logs"     }
+	];
+</script>
+
+<div class="workspace anim-fade-up">
+	<!-- ── Workspace header ───────────────────────────────────────────────────── -->
+	<header class="ws-header">
+		<div class="ws-header-left">
+			<button class="back-btn" type="button" onclick={onBack} aria-label="Back to sandbox list">
+				<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<polyline points="15 18 9 12 15 6"/>
+				</svg>
+			</button>
+			<div class="ws-identity">
+				<div class="ws-status-dot ws-status-dot--{st.cls}"></div>
+				<h1 class="ws-title">{sandbox.name}</h1>
+				<span class="ws-status-badge ws-status-badge--{st.cls}">{st.label}</span>
+			</div>
+		</div>
+
+		<div class="ws-header-right">
+			{#if ports.length > 0}
+				<div class="port-links">
+					{#each ports as port}
+						<a class="port-link" href={port} target="_blank" rel="noreferrer">
+							<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+								<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+								<polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+							</svg>
+							:{port.split(":").pop()}
+						</a>
+					{/each}
+				</div>
+			{/if}
+			<div class="ws-actions">
+				<button class="action-btn" type="button" onclick={() => void handleAction("restart")} disabled={actionLoading !== null}>
+					{actionLoading === "restart" ? "..." : "Restart"}
+				</button>
+				<button class="action-btn" type="button" onclick={() => void handleAction("stop")} disabled={actionLoading !== null}>
+					{actionLoading === "stop" ? "..." : "Stop"}
+				</button>
+				<button class="action-btn" type="button" onclick={() => void handleAction("reset")} disabled={actionLoading !== null}>
+					{actionLoading === "reset" ? "..." : "Reset"}
+				</button>
+				<button class="action-btn action-btn--danger" type="button" onclick={() => void handleAction("delete")} disabled={actionLoading !== null}>
+					{actionLoading === "delete" ? "..." : "Delete"}
+				</button>
+			</div>
+		</div>
+	</header>
+
+	<!-- ── Tab bar ────────────────────────────────────────────────────────────── -->
+	<div class="tab-bar">
+		{#each tabs as tab}
+			<button
+				type="button"
+				class="tab-btn {activeTab === tab.id ? 'tab-btn--active' : ''}"
+				onclick={() => activeTab = tab.id}
+			>
+				{tab.label}
+				{#if tab.id === "logs" && streaming}
+					<span class="tab-live-dot"></span>
+				{/if}
+			</button>
+		{/each}
+	</div>
+
+	<!-- ── Alerts ─────────────────────────────────────────────────────────────── -->
+	{#if errorMessage}
+		<div class="alert-wrap">
+			<p class="alert-error anim-fade-up">{errorMessage}</p>
+		</div>
+	{/if}
+	{#if notice}
+		<div class="alert-wrap">
+			<p class="alert-ok anim-fade-up">{notice}</p>
+		</div>
+	{/if}
+
+	<!-- ── Tab content ────────────────────────────────────────────────────────── -->
+	<div class="tab-content">
+
+		<!-- Overview -->
+		{#if activeTab === "overview"}
+			<div class="overview anim-fade-up">
+				<!-- Meta grid -->
+				<div class="meta-grid">
+					<div class="meta-card">
+						<span class="meta-label">Image</span>
+						<span class="meta-value">{sandbox.image}</span>
+					</div>
+					<div class="meta-card">
+						<span class="meta-label">Container ID</span>
+						<span class="meta-value mono">{sandbox.container_id.slice(0, 16)}</span>
+					</div>
+					<div class="meta-card">
+						<span class="meta-label">Workspace</span>
+						<span class="meta-value mono">{sandbox.workspace_dir}</span>
+					</div>
+					<div class="meta-card">
+						<span class="meta-label">Created</span>
+						<span class="meta-value">{formatDate(sandbox.created_at)}</span>
+					</div>
+					{#if ports.length > 0}
+						<div class="meta-card meta-card--wide">
+							<span class="meta-label">Exposed ports</span>
+							<div class="port-chips">
+								{#each ports as port}
+									<a class="port-chip" href={port} target="_blank" rel="noreferrer">{port}</a>
+								{/each}
+							</div>
+						</div>
+					{/if}
+				</div>
+
+				<!-- Quick actions -->
+				<div class="quick-actions">
+					<button class="quick-btn" type="button" onclick={() => activeTab = "terminal"}>
+						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+							<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
+						</svg>
+						<span class="quick-btn-label">Open Terminal</span>
+						<span class="quick-btn-sub">Run commands in this sandbox</span>
+					</button>
+					<button class="quick-btn" type="button" onclick={() => activeTab = "files"}>
+						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+							<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/>
+						</svg>
+						<span class="quick-btn-label">Browse Files</span>
+						<span class="quick-btn-sub">Read, edit and upload files</span>
+					</button>
+					<button class="quick-btn" type="button" onclick={() => { activeTab = "logs"; void startLogs(); }}>
+						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+							<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+						</svg>
+						<span class="quick-btn-label">Stream Logs</span>
+						<span class="quick-btn-sub">Live container output</span>
+					</button>
+				</div>
+			</div>
+		{/if}
+
+		<!-- Terminal -->
+		{#if activeTab === "terminal"}
+			<SandboxTerminal sandboxId={sandbox.id} workspaceDir={sandbox.workspace_dir} {config} />
+		{/if}
+
+		<!-- Files -->
+		{#if activeTab === "files"}
+			<div class="files-view anim-fade-up">
+				<div class="files-layout">
+					<!-- Left: browser -->
+					<div class="files-browser panel">
+						<div class="panel-header">
+							<span class="panel-title">
+								{filePayload?.kind === "file" ? browsePath.split("/").pop() : browsePath}
+							</span>
+							<div class="browser-nav">
+								<button class="btn-ghost btn-xs" type="button"
+									onclick={() => void loadPath(parentPath(browsePath))}
+									disabled={browsePath === "/"}>
+									<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+									Up
+								</button>
+							</div>
+						</div>
+						<!-- Path input -->
+						<form class="path-form" onsubmit={(e) => { e.preventDefault(); void loadPath(browsePath); }}>
+							<input class="field path-field" bind:value={browsePath} required />
+							<button class="btn-ghost btn-xs" type="submit" disabled={readLoading}>
+								{readLoading ? "..." : "Go"}
+							</button>
+						</form>
+
+						{#if filePayload?.kind === "directory"}
+							<div class="entry-list">
+								{#if directoryEntries.length === 0}
+									<p class="entry-empty">Empty directory</p>
+								{:else}
+									{#each directoryEntries as entry (entry.path)}
+										<button class="entry-row" type="button" onclick={() => void loadPath(entry.path)}>
+											<span class="entry-icon">
+												{#if entry.kind === "directory"}
+													<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+												{:else}
+													<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+												{/if}
+											</span>
+											<span class="entry-name">{entry.name}</span>
+											{#if entry.kind === "file" && entry.size}
+												<span class="entry-size">{entry.size}B</span>
+											{/if}
+										</button>
+									{/each}
+								{/if}
+							</div>
+						{:else if filePayload?.kind === "file"}
+							<div class="file-actions">
+								<button class="btn-primary btn-xs" type="button" onclick={() => void submitSaveFile()} disabled={saveLoading}>
+									{saveLoading ? "Saving..." : "Save file"}
+								</button>
+								<button class="btn-ghost btn-xs" type="button" onclick={() => void loadPath(parentPath(browsePath))}>
+									Back to dir
+								</button>
+							</div>
+							<textarea class="editor-textarea" bind:value={editorContent} spellcheck={false}></textarea>
+						{:else}
+							<p class="entry-empty">Loading...</p>
+						{/if}
+					</div>
+
+					<!-- Right: upload panel -->
+					<div class="files-upload panel">
+						<div class="panel-header">
+							<span class="panel-title">Upload</span>
+						</div>
+						<div class="panel-body upload-body">
+							<label class="field-col">
+								<span class="section-label">Destination</span>
+								<input class="field" bind:value={uploadPath} />
+							</label>
+							<label class="file-pick-label">
+								<input type="file" class="file-pick-hidden" onchange={(e) => {
+									const el = e.currentTarget as HTMLInputElement;
+									uploadFile = el.files?.[0] ?? null;
+								}} />
+								<span class="file-pick-display">
+									<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+									{uploadFile ? uploadFile.name : "Choose file"}
+								</span>
+							</label>
+							<button class="btn-primary btn-sm" type="button"
+								onclick={() => void submitUploadFile()}
+								disabled={uploadLoading || uploadFile === null}>
+								{uploadLoading ? "Uploading..." : "Upload"}
+							</button>
+						</div>
+					</div>
+				</div>
+			</div>
+		{/if}
+
+		<!-- Logs -->
+		{#if activeTab === "logs"}
+			<div class="logs-view anim-fade-up">
+				<div class="logs-toolbar">
+					<label class="field-col field-col-sm">
+						<span class="section-label">Tail</span>
+						<input class="field" bind:value={logTail} />
+					</label>
+					<label class="checkbox-label">
+						<input type="checkbox" bind:checked={logFollow} />
+						Follow
+					</label>
+					<div class="logs-btns">
+						<button class="btn-primary btn-sm" type="button" onclick={() => void startLogs()} disabled={streaming}>
+							{streaming ? "Streaming..." : "Start"}
+						</button>
+						<button class="btn-ghost btn-sm" type="button" onclick={stopLogs} disabled={!streaming}>Stop</button>
+						{#if logEntries.length > 0}
+							<button class="btn-ghost btn-sm" type="button" onclick={() => logEntries = []}>Clear</button>
+						{/if}
+					</div>
+					{#if streaming}
+						<div class="live-pill">
+							<span class="live-dot"></span>
+							Live
+						</div>
+					{/if}
+				</div>
+
+				<div class="panel logs-panel">
+					<div class="panel-header">
+						<span class="panel-title">Output</span>
+						{#if logEntries.length > 0}
+							<span class="log-count">{logEntries.length} lines</span>
+						{/if}
+					</div>
+					<div bind:this={logsViewport} class="log-viewport">
+						{#if logEntries.length === 0}
+							<span class="log-empty">No output yet. Press Start above.</span>
+						{:else}
+							{#each logEntries as entry, i (`${entry.stream}-${i}`)}
+								<div class="log-line log-line--{entry.stream}">
+									<span class="log-stream">[{entry.stream}]</span>
+									<span class="log-text">{entry.line}</span>
+								</div>
+							{/each}
+						{/if}
+					</div>
+				</div>
+			</div>
+		{/if}
+
+	</div>
+</div>
+
+<style>
+	.workspace {
+		display: flex;
+		flex-direction: column;
+		height: 100%;
+		min-height: 100vh;
+	}
+
+	/* ── Header ──────────────────────────────────────────────────────────────── */
+	.ws-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 1rem;
+		padding: 0.875rem 1.5rem;
+		border-bottom: 1px solid var(--border-dim);
+		background: var(--bg-surface);
+		flex-shrink: 0;
+		flex-wrap: wrap;
+	}
+	.ws-header-left {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		min-width: 0;
+	}
+	.back-btn {
+		display: grid;
+		place-items: center;
+		width: 28px;
+		height: 28px;
+		background: transparent;
+		border: 1px solid var(--border-mid);
+		border-radius: 4px;
+		color: var(--text-muted);
+		cursor: pointer;
+		flex-shrink: 0;
+		transition: color 0.12s, border-color 0.12s, background 0.12s;
+	}
+	.back-btn:hover {
+		color: var(--text-primary);
+		border-color: var(--border-hi);
+		background: var(--accent-dim);
+	}
+	.ws-identity {
+		display: flex;
+		align-items: center;
+		gap: 0.55rem;
+		min-width: 0;
+	}
+	.ws-status-dot {
+		width: 7px;
+		height: 7px;
+		border-radius: 50%;
+		flex-shrink: 0;
+	}
+	.ws-status-dot--ok    { background: var(--status-ok); box-shadow: 0 0 7px rgba(74,222,128,0.5); }
+	.ws-status-dot--error { background: var(--status-error); }
+	.ws-status-dot--idle  { background: var(--status-idle); }
+
+	.ws-title {
+		font-family: var(--font-display);
+		font-size: 1.25rem;
+		font-weight: 400;
+		font-style: italic;
+		color: var(--text-primary);
+		margin: 0;
+		letter-spacing: -0.01em;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.ws-status-badge {
+		font-family: var(--font-mono);
+		font-size: 0.58rem;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		padding: 0.12rem 0.45rem;
+		border-radius: 3px;
+		border: 1px solid transparent;
+		flex-shrink: 0;
+	}
+	.ws-status-badge--ok    { color: var(--status-ok); border-color: var(--status-ok-border); background: var(--status-ok-bg); }
+	.ws-status-badge--error { color: var(--status-error); border-color: var(--status-error-border); background: var(--status-error-bg); }
+	.ws-status-badge--idle  { color: var(--text-muted); border-color: var(--border-dim); }
+
+	.ws-header-right {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		flex-shrink: 0;
+	}
+	.port-links {
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
+	}
+	.port-link {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.3rem;
+		font-family: var(--font-mono);
+		font-size: 0.62rem;
+		color: var(--text-secondary);
+		background: var(--bg-raised);
+		border: 1px solid var(--border-mid);
+		border-radius: 3px;
+		padding: 0.18rem 0.5rem;
+		text-decoration: none;
+		transition: color 0.12s, border-color 0.12s;
+	}
+	.port-link:hover { color: var(--text-primary); border-color: var(--border-hi); }
+
+	.ws-actions {
+		display: flex;
+		align-items: center;
+		gap: 0.3rem;
+	}
+	.action-btn {
+		background: transparent;
+		border: 1px solid var(--border-dim);
+		border-radius: 3px;
+		color: var(--text-muted);
+		font-family: var(--font-mono);
+		font-size: 0.62rem;
+		padding: 0.25rem 0.55rem;
+		cursor: pointer;
+		transition: color 0.12s, border-color 0.12s, background 0.12s;
+		white-space: nowrap;
+	}
+	.action-btn:hover:not(:disabled) {
+		color: var(--text-primary);
+		border-color: var(--border-hi);
+		background: var(--accent-dim);
+	}
+	.action-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+	.action-btn--danger:hover:not(:disabled) {
+		color: var(--status-error);
+		border-color: var(--status-error-border);
+		background: var(--status-error-bg);
+	}
+
+	/* ── Tab bar ─────────────────────────────────────────────────────────────── */
+	.tab-bar {
+		display: flex;
+		align-items: center;
+		gap: 0;
+		padding: 0 1.5rem;
+		border-bottom: 1px solid var(--border-dim);
+		background: var(--bg-surface);
+		flex-shrink: 0;
+	}
+	.tab-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+		padding: 0.7rem 1rem;
+		background: transparent;
+		border: none;
+		border-bottom: 2px solid transparent;
+		color: var(--text-muted);
+		font-family: var(--font-mono);
+		font-size: 0.7rem;
+		cursor: pointer;
+		transition: color 0.12s, border-color 0.12s;
+		white-space: nowrap;
+		margin-bottom: -1px;
+	}
+	.tab-btn:hover:not(.tab-btn--active) { color: var(--text-secondary); }
+	.tab-btn--active {
+		color: var(--text-primary);
+		border-bottom-color: var(--text-primary);
+	}
+	.tab-live-dot {
+		width: 5px;
+		height: 5px;
+		border-radius: 50%;
+		background: var(--status-error);
+		animation: blink 0.9s step-end infinite;
+	}
+	@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
+	/* ── Alerts ──────────────────────────────────────────────────────────────── */
+	.alert-wrap {
+		padding: 0.75rem 1.5rem 0;
+		flex-shrink: 0;
+	}
+
+	/* ── Tab content ─────────────────────────────────────────────────────────── */
+	.tab-content {
+		flex: 1;
+		overflow-y: auto;
+		padding: 1.5rem;
+	}
+
+	/* ── Overview ────────────────────────────────────────────────────────────── */
+	.overview {
+		display: flex;
+		flex-direction: column;
+		gap: 1.5rem;
+	}
+	.meta-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+		gap: 0.75rem;
+	}
+	.meta-card {
+		background: var(--bg-surface);
+		border: 1px solid var(--border-dim);
+		border-radius: var(--radius-lg);
+		padding: 0.875rem 1rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.4rem;
+	}
+	.meta-card--wide { grid-column: span 2; }
+	.meta-label {
+		font-family: var(--font-mono);
+		font-size: 0.6rem;
+		text-transform: uppercase;
+		letter-spacing: 0.07em;
+		color: var(--text-muted);
+	}
+	.meta-value {
+		font-family: var(--font-mono);
+		font-size: 0.72rem;
+		color: var(--text-primary);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.meta-value.mono { font-family: var(--font-mono); }
+
+	.port-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+	.port-chip {
+		font-family: var(--font-mono);
+		font-size: 0.65rem;
+		color: var(--text-secondary);
+		background: var(--bg-raised);
+		border: 1px solid var(--border-mid);
+		border-radius: 3px;
+		padding: 0.15rem 0.5rem;
+		text-decoration: none;
+		transition: color 0.12s;
+	}
+	.port-chip:hover { color: var(--text-primary); }
+
+	.quick-actions {
+		display: grid;
+		grid-template-columns: repeat(3, 1fr);
+		gap: 0.75rem;
+	}
+	.quick-btn {
+		background: var(--bg-surface);
+		border: 1px solid var(--border-dim);
+		border-radius: var(--radius-lg);
+		padding: 1.25rem;
+		cursor: pointer;
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 0.5rem;
+		text-align: left;
+		color: var(--text-muted);
+		transition: border-color 0.15s, background 0.15s, transform 0.15s var(--ease-snappy);
+	}
+	.quick-btn:hover {
+		border-color: var(--border-hi);
+		background: var(--bg-raised);
+		transform: translateY(-1px);
+		color: var(--text-secondary);
+	}
+	.quick-btn-label {
+		font-family: var(--font-mono);
+		font-size: 0.78rem;
+		color: var(--text-primary);
+		font-weight: 500;
+	}
+	.quick-btn-sub {
+		font-family: var(--font-mono);
+		font-size: 0.65rem;
+		color: var(--text-muted);
+	}
+
+	/* ── Files ───────────────────────────────────────────────────────────────── */
+	.files-layout {
+		display: grid;
+		grid-template-columns: 1fr 260px;
+		gap: 1rem;
+		align-items: start;
+	}
+	.browser-nav { display: flex; gap: 0.35rem; }
+	.path-form {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		padding: 0.5rem 0.875rem;
+		border-bottom: 1px solid var(--border-dim);
+		background: var(--bg-overlay);
+	}
+	.path-field { flex: 1; font-size: 0.65rem; }
+	.entry-list { overflow: hidden; }
+	.entry-row {
+		width: 100%;
+		display: flex;
+		align-items: center;
+		gap: 0.55rem;
+		padding: 0.48rem 0.875rem;
+		background: transparent;
+		border: 0;
+		border-bottom: 1px solid var(--border-dim);
+		color: var(--text-primary);
+		text-align: left;
+		cursor: pointer;
+		transition: background 0.1s;
+		font-family: var(--font-mono);
+		font-size: 0.7rem;
+	}
+	.entry-row:last-child { border-bottom: 0; }
+	.entry-row:hover { background: var(--bg-raised); }
+	.entry-icon { color: var(--text-muted); display: flex; flex-shrink: 0; }
+	.entry-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.entry-size { font-size: 0.58rem; color: var(--text-muted); flex-shrink: 0; }
+	.entry-empty {
+		padding: 1.5rem 0.875rem;
+		margin: 0;
+		font-family: var(--font-mono);
+		font-size: 0.68rem;
+		color: var(--text-muted);
+	}
+	.file-actions {
+		display: flex;
+		gap: 0.4rem;
+		padding: 0.5rem 0.875rem;
+		border-bottom: 1px solid var(--border-dim);
+		background: var(--bg-overlay);
+	}
+	.editor-textarea {
+		display: block;
+		width: 100%;
+		min-height: 28rem;
+		font-family: var(--font-mono);
+		font-size: 0.68rem;
+		line-height: 1.65;
+		background: #040404;
+		border: none;
+		border-top: 1px solid var(--border-dim);
+		color: var(--text-primary);
+		padding: 0.875rem;
+		resize: vertical;
+		outline: none;
+		caret-color: var(--text-primary);
+	}
+	.upload-body {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+	}
+	.field-col { display: flex; flex-direction: column; gap: 0.3rem; }
+	.field-col-sm { max-width: 120px; }
+	.file-pick-label { display: block; cursor: pointer; }
+	.file-pick-hidden { display: none; }
+	.file-pick-display {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		background: var(--bg-raised);
+		border: 1px solid var(--border-mid);
+		border-radius: var(--radius-sm);
+		color: var(--text-secondary);
+		font-family: var(--font-mono);
+		font-size: 0.68rem;
+		padding: 0.4rem 0.6rem;
+		transition: border-color 0.12s, color 0.12s;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.file-pick-label:hover .file-pick-display {
+		border-color: var(--border-hi);
+		color: var(--text-primary);
+	}
+
+	/* ── Logs ────────────────────────────────────────────────────────────────── */
+	.logs-view {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+	}
+	.logs-toolbar {
+		display: flex;
+		align-items: center;
+		gap: 1rem;
+		flex-wrap: wrap;
+	}
+	.logs-btns { display: flex; gap: 0.4rem; }
+	.live-pill {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+		font-family: var(--font-mono);
+		font-size: 0.62rem;
+		color: var(--status-error);
+		background: var(--status-error-bg);
+		border: 1px solid var(--status-error-border);
+		border-radius: 3px;
+		padding: 0.18rem 0.55rem;
+	}
+	.live-dot {
+		width: 5px;
+		height: 5px;
+		border-radius: 50%;
+		background: var(--status-error);
+		animation: blink 0.9s step-end infinite;
+	}
+	.log-count {
+		font-family: var(--font-mono);
+		font-size: 0.6rem;
+		color: var(--text-muted);
+	}
+	.log-viewport {
+		background: #040404;
+		height: 36rem;
+		overflow-y: auto;
+		padding: 0.875rem;
+		font-family: var(--font-mono);
+		font-size: 0.68rem;
+		line-height: 1.7;
+	}
+	.log-empty { color: var(--text-muted); }
+	.log-line { display: flex; gap: 0.55rem; }
+	.log-stream { flex-shrink: 0; color: var(--text-muted); min-width: 4.5rem; font-size: 0.6rem; }
+	.log-line--stdout .log-text { color: var(--code-stdout); }
+	.log-line--stderr .log-text { color: var(--code-stderr); }
+	.log-line--done   .log-text { color: var(--text-secondary); }
+	.log-line--info   .log-text { color: var(--text-muted); }
+
+	/* ── Responsive ──────────────────────────────────────────────────────────── */
+	@media (max-width: 960px) {
+		.quick-actions { grid-template-columns: 1fr 1fr; }
+		.files-layout { grid-template-columns: 1fr; }
+		.meta-card--wide { grid-column: span 1; }
+	}
+	@media (max-width: 640px) {
+		.ws-header { padding: 0.75rem 1rem; }
+		.tab-content { padding: 1rem; }
+		.tab-bar { padding: 0 1rem; }
+		.quick-actions { grid-template-columns: 1fr; }
+		.ws-header-right { flex-wrap: wrap; }
+	}
+</style>
