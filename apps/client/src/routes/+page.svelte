@@ -63,6 +63,8 @@
 	// ── View routing ───────────────────────────────────────────────────────────
 	type ActiveWorkload = { kind: "sandbox" | "container"; id: string } | null;
 	let activeWorkload = $state<ActiveWorkload>(null);
+	let pendingContainerActivationId = $state<string | null>(null);
+	let activeRuntimeContainerSnapshot = $state<ContainerSummary | null>(null);
 
 	const activeSandbox = $derived.by(() => {
 		const currentActive = activeWorkload;
@@ -78,9 +80,31 @@
 		}
 		return containers.find((c) => c.id === currentActive.id) ?? null;
 	});
+	const activeVisibleRuntimeContainer = $derived.by(() => {
+		const currentActive = activeWorkload;
+		if (currentActive === null || currentActive.kind !== "container") {
+			return null;
+		}
+		return activeRuntimeContainer ?? activeRuntimeContainerSnapshot;
+	});
 	const activeContainer = $derived(
-		activeRuntimeContainer ?? (activeSandbox ? (containers.find(c => c.id === activeSandbox.container_id) ?? null) : null)
+		activeVisibleRuntimeContainer ?? (activeSandbox ? (containers.find(c => c.id === activeSandbox.container_id) ?? null) : null)
 	);
+
+	$effect(() => {
+		const currentActive = activeWorkload;
+		if (currentActive === null || currentActive.kind !== "container") {
+			activeRuntimeContainerSnapshot = null;
+			pendingContainerActivationId = null;
+			return;
+		}
+		if (activeRuntimeContainer !== null) {
+			activeRuntimeContainerSnapshot = activeRuntimeContainer;
+			if (pendingContainerActivationId === activeRuntimeContainer.id) {
+				pendingContainerActivationId = null;
+			}
+		}
+	});
 
 	// ── Create form ────────────────────────────────────────────────────────────
 	let showCreateForm = $state(false);
@@ -214,6 +238,8 @@
 		loginPassword = "";
 		loginError = "";
 		activeWorkload = null;
+		pendingContainerActivationId = null;
+		activeRuntimeContainerSnapshot = null;
 		sandboxes = [];
 		containers = [];
 		images = [];
@@ -298,7 +324,10 @@
 				activeWorkload = null;
 			}
 			if (currentActive?.kind === "container" && !ct.some((c) => c.id === currentActive.id)) {
-				activeWorkload = null;
+				if (pendingContainerActivationId !== currentActive.id) {
+					activeWorkload = null;
+					activeRuntimeContainerSnapshot = null;
+				}
 			}
 		} catch (err) {
 			dataError = formatApiFailure(err);
@@ -517,6 +546,7 @@
 			const currentActive = activeWorkload;
 			if (currentActive?.kind === "container" && currentActive.id === id) {
 				activeWorkload = { kind: "container", id: result.container_id };
+				pendingContainerActivationId = result.container_id;
 			}
 			dataNotice = "Container reset.";
 			await refreshData();
@@ -553,7 +583,11 @@
 		try {
 			await runApiEffect(removeContainer(clientState.config, id));
 			const currentActive = activeWorkload;
-			if (currentActive?.kind === "container" && currentActive.id === id) activeWorkload = null;
+			if (currentActive?.kind === "container" && currentActive.id === id) {
+				activeWorkload = null;
+				pendingContainerActivationId = null;
+				activeRuntimeContainerSnapshot = null;
+			}
 			dataNotice = "Container removed.";
 			await refreshData();
 		}
@@ -567,11 +601,14 @@
 
 	function openContainer(id: string): void {
 		activeWorkload = { kind: "container", id };
+		activeRuntimeContainerSnapshot = containers.find((c) => c.id === id) ?? null;
+		pendingContainerActivationId = null;
 		dataError = ""; dataNotice = "";
 	}
 
 	function replaceActiveContainer(id: string): void {
 		activeWorkload = { kind: "container", id };
+		pendingContainerActivationId = id;
 		dataError = "";
 	}
 
@@ -642,17 +679,17 @@
 		currentUsername={clientState.username}
 		currentRole={clientState.role}
 	>
-		{#if activeSandbox || activeRuntimeContainer}
+		{#if activeSandbox || activeVisibleRuntimeContainer}
 			<!-- ── Sandbox Workspace ── -->
 			<SandboxWorkspace
 				sandbox={activeSandbox}
 				container={activeContainer}
-				runtimeContainer={activeRuntimeContainer}
+				runtimeContainer={activeVisibleRuntimeContainer}
 				config={clientState.config}
-				onBack={() => { activeWorkload = null; }}
+				onBack={() => { activeWorkload = null; pendingContainerActivationId = null; activeRuntimeContainerSnapshot = null; }}
 				onRefresh={() => refreshData()}
 				onContainerReplaced={(id) => replaceActiveContainer(id)}
-				onDeleted={() => { activeWorkload = null; void refreshData(); }}
+				onDeleted={() => { activeWorkload = null; pendingContainerActivationId = null; activeRuntimeContainerSnapshot = null; void refreshData(); }}
 			/>
 		{:else}
 			<!-- ── Sandbox List ── -->

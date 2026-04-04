@@ -594,6 +594,12 @@ func (s *Server) composeUp(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, err)
 		return
 	}
+	if shouldWriteOwner {
+		if err := s.writeComposeProjectOwnerMetadata(project.ProjectDir, identity); err != nil {
+			writeError(c, http.StatusInternalServerError, err)
+			return
+		}
+	}
 
 	args := buildComposeArgs(project, req, "up", "-d")
 	flusher, ok := c.Writer.(http.Flusher)
@@ -659,13 +665,6 @@ func (s *Server) composeUp(c *gin.Context) {
 		emitSSE(c, mu, "error", err.Error())
 		flusher.Flush()
 		return
-	}
-	if shouldWriteOwner {
-		if err := s.writeComposeProjectOwnerMetadata(project.ProjectDir, identity); err != nil {
-			emitSSE(c, mu, "error", err.Error())
-			flusher.Flush()
-			return
-		}
 	}
 
 	emitSSE(c, mu, "done", "compose up completed")

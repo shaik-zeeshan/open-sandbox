@@ -572,6 +572,44 @@ func TestComposeStatusRequiresContent(t *testing.T) {
 	}
 }
 
+func TestComposeUpReservesOwnerBeforeCommandSucceeds(t *testing.T) {
+	dockerBinDir := t.TempDir()
+	dockerScript := filepath.Join(dockerBinDir, "docker")
+	if err := os.WriteFile(dockerScript, []byte("#!/bin/sh\nprintf 'compose failed\n' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("expected fake docker script: %v", err)
+	}
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", dockerBinDir+string(os.PathListSeparator)+oldPath)
+
+	s := newTestServer(&mockDocker{})
+	s.workspaceRoot = t.TempDir()
+	req := httptest.NewRequest(http.MethodPost, "/api/compose/up", bytes.NewBufferString(`{
+		"content":"services:\n  app:\n    image: alpine:3.20\n",
+		"project_name":"demo"
+	}`))
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	projectDir := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", "demo")
+	owner, hasOwner, err := s.readComposeProjectOwnerMetadata(projectDir)
+	if err != nil {
+		t.Fatalf("expected compose owner metadata after failed run: %v", err)
+	}
+	if !hasOwner || owner.UserID != "member-1" {
+		t.Fatalf("expected failed first compose run to reserve ownership, got %+v", owner)
+	}
+	shouldWriteOwner, err := s.authorizeComposeProjectAccess(AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}, s.composeProjectContextForName("demo"))
+	if err != nil {
+		t.Fatalf("expected same owner to be allowed to retry after failed run: %v", err)
+	}
+	if shouldWriteOwner {
+		t.Fatal("expected retry access to reuse existing owner metadata")
+	}
+}
+
 func TestComposeDownIncludesOptionalFlags(t *testing.T) {
 	original := commandRunnerInDir
 	defer func() { commandRunnerInDir = original }()
