@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onDestroy, onMount, tick } from "svelte";
 	import SandboxTerminal from "$lib/components/SandboxTerminal.svelte";
+	import AnsiToHtml from "ansi-to-html";
 	import {
 		deleteSandbox,
 		formatApiFailure,
@@ -56,16 +57,42 @@
 	let uploadFile = $state<File | null>(null);
 	let uploadLoading = $state(false);
 
+	const ansiConverter = new AnsiToHtml({
+		fg: "rgba(255,255,255,0.85)",
+		bg: "#040404",
+		escapeXML: true,
+		newline: false,
+		stream: false
+	});
+
+	function ansiToHtml(text: string): string {
+		try { return ansiConverter.toHtml(text); }
+		catch { return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+	}
+
 	// Logs
 	let logTail = $state("100");
 	let logFollow = $state(true);
-	let logEntries = $state<Array<{ stream: string; line: string }>>([]);
+	let logEntries = $state<Array<{ stream: string; line: string; html: string }>>([]);
 	let logsViewport = $state<HTMLDivElement | null>(null);
 	let logsAbortController: AbortController | null = null;
 	let streaming = $state(false);
 
 	// Actions
 	let actionLoading = $state<string | null>(null);
+	let deleteConfirm = $state(false);
+	let deleteConfirmTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function requestDelete(): void {
+		if (deleteConfirm) {
+			if (deleteConfirmTimer) { clearTimeout(deleteConfirmTimer); deleteConfirmTimer = null; }
+			void handleAction("delete");
+		} else {
+			deleteConfirm = true;
+			if (deleteConfirmTimer) clearTimeout(deleteConfirmTimer);
+			deleteConfirmTimer = setTimeout(() => { deleteConfirm = false; deleteConfirmTimer = null; }, 3000);
+		}
+	}
 
 	const directoryEntries = $derived(filePayload?.kind === "directory" ? filePayload.entries ?? [] : []);
 
@@ -220,7 +247,7 @@
 			if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
 		}
 		const message = data.join("\n");
-		if (message.length) logEntries = [...logEntries.slice(-399), { stream: eventName, line: message }];
+		if (message.length) logEntries = [...logEntries.slice(-399), { stream: eventName, line: message, html: ansiToHtml(message) }];
 	}
 
 	async function handleAction(action: "restart" | "reset" | "stop" | "delete"): Promise<void> {
@@ -286,8 +313,14 @@
 				<button class="action-btn" type="button" onclick={() => void handleAction("reset")} disabled={actionLoading !== null}>
 					{actionLoading === "reset" ? "..." : "Reset"}
 				</button>
-				<button class="action-btn action-btn--danger" type="button" onclick={() => void handleAction("delete")} disabled={actionLoading !== null}>
-					{actionLoading === "delete" ? "..." : "Delete"}
+				<button
+					class="action-btn action-btn--danger"
+					class:action-btn--confirming={deleteConfirm}
+					type="button"
+					onclick={requestDelete}
+					disabled={actionLoading !== null}
+				>
+					{actionLoading === "delete" ? "..." : deleteConfirm ? "Confirm?" : "Delete"}
 				</button>
 			</div>
 		</div>
@@ -527,7 +560,7 @@
 							{#each logEntries as entry, i (`${entry.stream}-${i}`)}
 								<div class="log-line log-line--{entry.stream}">
 									<span class="log-stream">[{entry.stream}]</span>
-									<span class="log-text">{entry.line}</span>
+									<span class="log-text">{@html entry.html}</span>
 								</div>
 							{/each}
 						{/if}
@@ -679,6 +712,17 @@
 		color: var(--status-error);
 		border-color: var(--status-error-border);
 		background: var(--status-error-bg);
+	}
+	.action-btn--confirming {
+		color: var(--status-error) !important;
+		border-color: var(--status-error-border) !important;
+		background: var(--status-error-bg) !important;
+		animation: pulse-confirm 0.25s var(--ease-spring);
+	}
+	@keyframes pulse-confirm {
+		0%   { transform: scale(1); }
+		50%  { transform: scale(1.06); }
+		100% { transform: scale(1); }
 	}
 
 	/* ── Tab bar ─────────────────────────────────────────────────────────────── */
@@ -930,11 +974,15 @@
 	}
 	.logs-toolbar {
 		display: flex;
-		align-items: center;
-		gap: 1rem;
+		align-items: flex-end;
+		gap: 0.875rem;
 		flex-wrap: wrap;
+		padding: 0.875rem 1rem;
+		background: var(--bg-raised);
+		border: 1px solid var(--border-dim);
+		border-radius: var(--radius-md);
 	}
-	.logs-btns { display: flex; gap: 0.4rem; }
+	.logs-btns { display: flex; gap: 0.4rem; align-items: center; }
 	.live-pill {
 		display: inline-flex;
 		align-items: center;
@@ -961,16 +1009,45 @@
 	}
 	.log-viewport {
 		background: #040404;
+		border: 1px solid var(--border-dim);
+		border-radius: var(--radius-md);
 		height: 36rem;
 		overflow-y: auto;
-		padding: 0.875rem;
+		padding: 0.875rem 1rem;
 		font-family: var(--font-mono);
 		font-size: 0.68rem;
 		line-height: 1.7;
 	}
-	.log-empty { color: var(--text-muted); }
-	.log-line { display: flex; gap: 0.55rem; }
-	.log-stream { flex-shrink: 0; color: var(--text-muted); min-width: 4.5rem; font-size: 0.6rem; }
+	.log-empty {
+		color: var(--text-muted);
+		font-family: var(--font-mono);
+		font-size: 0.68rem;
+	}
+	.log-line {
+		display: flex;
+		gap: 0.6rem;
+		padding: 0.05rem 0;
+	}
+	.log-line:hover {
+		background: rgba(255,255,255,0.02);
+	}
+	.log-stream {
+		flex-shrink: 0;
+		color: var(--text-muted);
+		min-width: 4rem;
+		font-size: 0.6rem;
+		opacity: 0.6;
+		user-select: none;
+	}
+	.log-text {
+		word-break: break-all;
+		white-space: pre-wrap;
+		flex: 1;
+	}
+	/* ANSI color classes from ansi-to-html */
+	:global(.log-text .ansi-bold) { font-weight: bold; }
+	:global(.log-text .ansi-italic) { font-style: italic; }
+	:global(.log-text .ansi-underline) { text-decoration: underline; }
 	.log-line--stdout .log-text { color: var(--code-stdout); }
 	.log-line--stderr .log-text { color: var(--code-stderr); }
 	.log-line--done   .log-text { color: var(--text-secondary); }

@@ -1,11 +1,13 @@
 <script lang="ts">
 	import { onMount } from "svelte";
-	import Sidebar from "$lib/components/Sidebar.svelte";
+	import { browser } from "$app/environment";
+	import PageShell from "$lib/components/PageShell.svelte";
 	import SandboxesPanel from "$lib/components/SandboxesPanel.svelte";
 	import SandboxWorkspace from "$lib/components/SandboxWorkspace.svelte";
 	import {
 		bootstrap,
 		buildImageStream,
+		composeUpStream,
 		createSandbox,
 		deleteSandbox,
 		formatApiFailure,
@@ -31,7 +33,10 @@
 	import { beginAuthCheck, clearAuth, clientState, setAuthSession, setBaseUrl } from "$lib/stores.svelte";
 
 	type HealthState = "unknown" | "checking" | "ok" | "error";
-	type CreateMethod = "existing" | "pull" | "build-context" | "build-inline";
+	type CreateMethod = "existing" | "pull" | "build-context" | "build-inline" | "compose";
+
+	// ── Sidebar collapse ───────────────────────────────────────────────────────
+	// (managed in PageShell, but we need nothing here for +page.svelte)
 
 	// ── Auth ───────────────────────────────────────────────────────────────────
 	let health = $state<HealthState>("unknown");
@@ -75,11 +80,11 @@
 	let createPullSearchLoading = $state(false);
 	let createPullSearchError = $state("");
 	let createBuildContextPath = $state("");
-	let createBuildDockerfile = $state("");
 	let createBuildTag = $state("");
-	let createInlineDockerfile = $state("");
 	let createInlineTag = $state("");
 	let createInlineContent = $state("");
+	let createComposeContent = $state("");
+	let createComposeProjectName = $state("");
 	let createRepoUrl = $state("");
 	let createBranch = $state("");
 	let createPorts = $state("");
@@ -222,8 +227,8 @@
 		}
 	}
 
-	async function runImageSearch(): Promise<void> {
-		const query = createPullSearchQuery.trim();
+	async function runImageSearch(queryOverride?: string): Promise<void> {
+		const query = (queryOverride ?? createPullSearchQuery).trim();
 		createPullSearchError = "";
 		if (query.length === 0) {
 			createPullSearchResults = [];
@@ -325,80 +330,109 @@
 					appendCreateLog(`Image ready: ${pulled.image}`);
 					break;
 				}
-				case "build-context": {
-					const contextPath = createBuildContextPath.trim();
-					const dockerfile = createBuildDockerfile.trim() || "Dockerfile";
-					const tag = createBuildTag.trim();
-					if (contextPath.length === 0) {
-						throw new Error("Context path is required for image build.");
-					}
-					if (tag.length === 0) {
-						throw new Error("Image tag is required for image build.");
-					}
-
-					resolvedImage = tag;
-					createStep = "Building image";
-					appendCreateLog(`Building ${tag} from ${contextPath}`);
-					let buildError = "";
-					await buildImageStream(clientState.config, {
-						context_path: contextPath,
-						dockerfile,
-						tag
-					}, (event) => {
-						if ((event.event === "stdout" || event.event === "stderr") && event.data.length > 0) {
-							appendCreateLog(event.data);
-						}
-						if (event.event === "error") {
-							buildError = event.data.trim();
-						}
-						if (event.event === "done" && event.data.trim().length > 0) {
-							appendCreateLog(`Image ready: ${event.data.trim()}`);
-						}
-					});
-					if (buildError.length > 0) {
-						throw new Error(buildError);
-					}
-					break;
+			case "build-context": {
+				const contextPath = createBuildContextPath.trim();
+				const tag = createBuildTag.trim();
+				if (contextPath.length === 0) {
+					throw new Error("Context path is required for image build.");
 				}
-				case "build-inline": {
-					const dockerfile = createInlineDockerfile.trim() || "Dockerfile";
-					const dockerfileContent = createInlineContent.trim();
-					const tag = createInlineTag.trim();
-					if (dockerfileContent.length === 0) {
-						throw new Error("Dockerfile content is required.");
-					}
-					if (tag.length === 0) {
-						throw new Error("Image tag is required for inline build.");
-					}
-
-					resolvedImage = tag;
-					createStep = "Building image";
-					appendCreateLog(`Building ${tag} from inline Dockerfile`);
-					let buildError = "";
-					await buildImageStream(clientState.config, {
-						dockerfile,
-						dockerfile_content: dockerfileContent,
-						tag
-					}, (event) => {
-						if ((event.event === "stdout" || event.event === "stderr") && event.data.length > 0) {
-							appendCreateLog(event.data);
-						}
-						if (event.event === "error") {
-							buildError = event.data.trim();
-						}
-						if (event.event === "done" && event.data.trim().length > 0) {
-							appendCreateLog(`Image ready: ${event.data.trim()}`);
-						}
-					});
-					if (buildError.length > 0) {
-						throw new Error(buildError);
-					}
-					break;
+				if (tag.length === 0) {
+					throw new Error("Image tag is required for image build.");
 				}
+
+				resolvedImage = tag;
+				createStep = "Building image";
+				appendCreateLog(`Building ${tag} from ${contextPath}`);
+				let buildError = "";
+				await buildImageStream(clientState.config, {
+					context_path: contextPath,
+					dockerfile: "Dockerfile",
+					tag
+				}, (event) => {
+					if ((event.event === "stdout" || event.event === "stderr") && event.data.length > 0) {
+						appendCreateLog(event.data);
+					}
+					if (event.event === "error") {
+						buildError = event.data.trim();
+					}
+					if (event.event === "done" && event.data.trim().length > 0) {
+						appendCreateLog(`Image ready: ${event.data.trim()}`);
+					}
+				});
+				if (buildError.length > 0) {
+					throw new Error(buildError);
+				}
+				break;
 			}
+			case "build-inline": {
+				const dockerfileContent = createInlineContent.trim();
+				const tag = createInlineTag.trim();
+				if (dockerfileContent.length === 0) {
+					throw new Error("Dockerfile content is required.");
+				}
+				if (tag.length === 0) {
+					throw new Error("Image tag is required for inline build.");
+				}
 
-			createResolvedImage = resolvedImage;
-			createStep = "Creating sandbox";
+				resolvedImage = tag;
+				createStep = "Building image";
+				appendCreateLog(`Building ${tag} from inline Dockerfile`);
+				let buildError = "";
+				await buildImageStream(clientState.config, {
+					dockerfile: "Dockerfile",
+					dockerfile_content: dockerfileContent,
+					tag
+				}, (event) => {
+					if ((event.event === "stdout" || event.event === "stderr") && event.data.length > 0) {
+						appendCreateLog(event.data);
+					}
+					if (event.event === "error") {
+						buildError = event.data.trim();
+					}
+					if (event.event === "done" && event.data.trim().length > 0) {
+						appendCreateLog(`Image ready: ${event.data.trim()}`);
+					}
+				});
+				if (buildError.length > 0) {
+					throw new Error(buildError);
+				}
+				break;
+			}
+			case "compose": {
+				const content = createComposeContent.trim();
+				const projectName = createComposeProjectName.trim() || undefined;
+				if (content.length === 0) {
+					throw new Error("docker-compose.yml content is required.");
+				}
+
+				createStep = "Running compose";
+				appendCreateLog(`Starting docker compose${projectName ? ` (project: ${projectName})` : ""}...`);
+				let composeError = "";
+				await composeUpStream(clientState.config, {
+					content,
+					project_name: projectName
+				}, (event) => {
+					if ((event.event === "stdout" || event.event === "stderr") && event.data.length > 0) {
+						appendCreateLog(event.data);
+					}
+					if (event.event === "error") {
+						composeError = event.data.trim();
+					}
+				});
+				if (composeError.length > 0) {
+					throw new Error(composeError);
+				}
+				createStep = "Done";
+				appendCreateLog("Compose up complete.");
+				showCreateForm = false;
+				await refreshData();
+				// Don't navigate into a sandbox — compose doesn't create one
+				return;
+			}
+		}
+
+		createResolvedImage = resolvedImage;
+		createStep = "Creating sandbox";
 			appendCreateLog(`Creating sandbox ${sandboxName} from ${resolvedImage}`);
 			const created = await runApiEffect(createSandbox(clientState.config, {
 				name: sandboxName,
@@ -534,84 +568,71 @@
 
 {:else}
 	<!-- ── Dashboard Shell ──────────────────────────────────────────────────── -->
-	<div class="dashboard-shell">
-			<Sidebar
+	<PageShell
+		{health}
+		{healthMessage}
+		onPing={() => void checkHealth()}
+		onSignOut={() => { void signOut(); }}
+		currentUsername={clientState.username}
+		currentRole={clientState.role}
+	>
+		{#if activeSandbox}
+			<!-- ── Sandbox Workspace ── -->
+			<SandboxWorkspace
+				sandbox={activeSandbox}
+				container={activeContainer}
+				config={clientState.config}
+				onBack={() => { activeSandboxId = null; }}
+				onRefresh={() => void refreshData()}
+				onDeleted={() => { activeSandboxId = null; void refreshData(); }}
+			/>
+		{:else}
+			<!-- ── Sandbox List ── -->
+			<SandboxesPanel
 				{sandboxes}
 				{containers}
-			selectedSandboxId={activeSandboxId ?? ""}
-			onSelectSandbox={(id) => openSandbox(id)}
-			onNewSandbox={() => { activeSandboxId = null; showCreateForm = true; }}
-			{health}
-			{healthMessage}
-			onPing={() => void checkHealth()}
-				onSignOut={() => { void signOut(); }}
-				currentUsername={clientState.username}
-				currentRole={clientState.role}
-				currentSection="sandboxes"
-				baseUrl={clientState.baseUrl}
-				onBaseUrlChange={(url) => setBaseUrl(url)}
+				{images}
 				loading={dataLoading}
-		/>
-
-		<main class="dashboard-main">
-			{#if activeSandbox}
-				<!-- ── Sandbox Workspace ── -->
-				<SandboxWorkspace
-					sandbox={activeSandbox}
-					container={activeContainer}
-					config={clientState.config}
-					onBack={() => { activeSandboxId = null; }}
-					onRefresh={() => void refreshData()}
-					onDeleted={() => { activeSandboxId = null; void refreshData(); }}
-				/>
-			{:else}
-				<!-- ── Sandbox List ── -->
-				<SandboxesPanel
-					{sandboxes}
-					{containers}
-					{images}
-					loading={dataLoading}
-					errorMessage={dataError}
-					notice={dataNotice}
-					onOpen={(id) => openSandbox(id)}
-					onRestart={(id) => void handleRestart(id)}
-					onReset={(id) => void handleReset(id)}
-					onStop={(id) => void handleStop(id)}
-					onDelete={(id) => void handleDelete(id)}
-					onRefresh={() => void refreshData()}
-					{showCreateForm}
-					bind:createName
-					bind:createMethod
-					bind:createExistingImage
-					bind:createPullImage
-					bind:createPullTag
-					bind:createPullSearchQuery
-					{createPullSearchResults}
-					bind:createPullSelectedImage
-					{createPullSearchLoading}
-					{createPullSearchError}
-					bind:createBuildContextPath
-					bind:createBuildDockerfile
-					bind:createBuildTag
-					bind:createInlineDockerfile
-					bind:createInlineTag
-					bind:createInlineContent
-					bind:createRepoUrl
-					bind:createBranch
-					bind:createPorts
-					{createLoading}
-					{createStep}
-					{createLogs}
-					{createResolvedImage}
-					onToggleCreate={toggleCreateForm}
-					onSearchImages={() => void runImageSearch()}
-					onSelectPullImage={selectPullSearchImage}
-					onCreateSubmit={() => void submitCreate()}
-					onApplyPreset={(name, image) => applyPreset(name, image)}
-				/>
-			{/if}
-		</main>
-	</div>
+				errorMessage={dataError}
+				notice={dataNotice}
+				onOpen={(id) => openSandbox(id)}
+				onRestart={(id) => void handleRestart(id)}
+				onReset={(id) => void handleReset(id)}
+				onStop={(id) => void handleStop(id)}
+				onDelete={(id) => void handleDelete(id)}
+				onRefresh={() => void refreshData()}
+				{showCreateForm}
+				bind:createName
+				bind:createMethod
+				bind:createExistingImage
+				bind:createPullImage
+				bind:createPullTag
+				bind:createPullSearchQuery
+				{createPullSearchResults}
+				bind:createPullSelectedImage
+				{createPullSearchLoading}
+				{createPullSearchError}
+				bind:createBuildContextPath
+				bind:createBuildTag
+				bind:createInlineTag
+				bind:createInlineContent
+				bind:createComposeContent
+				bind:createComposeProjectName
+				bind:createRepoUrl
+				bind:createBranch
+				bind:createPorts
+				{createLoading}
+				{createStep}
+				{createLogs}
+				{createResolvedImage}
+				onToggleCreate={toggleCreateForm}
+				onSearchImages={(q) => void runImageSearch(q)}
+				onSelectPullImage={selectPullSearchImage}
+				onCreateSubmit={() => void submitCreate()}
+				onApplyPreset={(name, image) => applyPreset(name, image)}
+			/>
+		{/if}
+	</PageShell>
 {/if}
 
 <style>
@@ -690,21 +711,5 @@
 	.auth-health-dot.health-checking { background: var(--status-warn); }
 	.auth-health-text { font-family: var(--font-mono); font-size: 0.6rem; color: var(--text-muted); }
 
-	/* ── Dashboard Shell ─────────────────────────────────────────────────────── */
-	.dashboard-shell {
-		display: flex;
-		min-height: 100vh;
-		align-items: stretch;
-	}
-	.dashboard-main {
-		flex: 1;
-		min-width: 0;
-		overflow-y: auto;
-		height: 100vh;
-	}
 
-	@media (max-width: 768px) {
-		.dashboard-shell { flex-direction: column; }
-		.dashboard-main { height: auto; }
-	}
 </style>

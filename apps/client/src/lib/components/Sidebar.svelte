@@ -1,48 +1,25 @@
 <script lang="ts">
-	import type { ContainerSummary, Sandbox } from "$lib/api";
+	import { page } from "$app/stores";
 
 	type HealthState = "unknown" | "checking" | "ok" | "error";
 
 	let {
-		sandboxes,
-		containers,
-		selectedSandboxId,
-		onSelectSandbox,
-		onNewSandbox,
 		health,
 		healthMessage,
 		onPing,
 		onSignOut,
 		currentUsername,
 		currentRole,
-		currentSection = "sandboxes",
-		baseUrl,
-		onBaseUrlChange,
-		loading
+		collapsed = $bindable(false)
 	} = $props<{
-		sandboxes: Sandbox[];
-		containers: ContainerSummary[];
-		selectedSandboxId: string;
-		onSelectSandbox: (id: string) => void;
-		onNewSandbox: () => void;
 		health: HealthState;
 		healthMessage: string;
 		onPing: () => void;
 		onSignOut: () => void;
 		currentUsername: string;
 		currentRole: string;
-		currentSection?: "sandboxes" | "users";
-		baseUrl: string;
-		onBaseUrlChange: (url: string) => void;
-		loading: boolean;
+		collapsed?: boolean;
 	}>();
-
-	const statusOf = (sandbox: Sandbox): "ok" | "error" | "idle" => {
-		const n = sandbox.status.toLowerCase();
-		if (n.includes("up") || n.includes("running")) return "ok";
-		if (n.includes("exit") || n.includes("dead") || n.includes("error")) return "error";
-		return "idle";
-	};
 
 	const healthColor: Record<HealthState, string> = {
 		ok:       "var(--status-ok)",
@@ -52,111 +29,142 @@
 	};
 	const getHealthColor = (h: HealthState): string => healthColor[h];
 
-	const runningCount = $derived(sandboxes.filter((s: Sandbox) => statusOf(s) === "ok").length);
 	const showAdminNav = $derived(currentRole === "admin");
+	const userInitial = $derived(currentUsername ? currentUsername[0].toUpperCase() : "?");
+
+	const currentPath = $derived($page.url.pathname);
+
+	function toggleCollapsed() {
+		collapsed = !collapsed;
+		try { localStorage.setItem("sidebar-collapsed", String(collapsed)); } catch {}
+	}
+
+	const navItems = $derived([
+		{
+			id: "sandboxes",
+			label: "Sandboxes",
+			href: "/",
+			adminOnly: false,
+			icon: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>`
+		},
+		{
+			id: "users",
+			label: "Users",
+			href: "/users",
+			adminOnly: true,
+			icon: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`
+		},
+		{
+			id: "settings",
+			label: "Settings",
+			href: "/settings",
+			adminOnly: false,
+			icon: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`
+		}
+	].filter(item => !item.adminOnly || showAdminNav));
+
+	const isActive = (href: string): boolean => {
+		if (href === "/") return currentPath === "/";
+		return currentPath.startsWith(href);
+	};
 </script>
 
-<aside class="sidebar anim-slide-left">
-	<!-- Brand -->
+<aside class="sidebar anim-slide-left" class:sidebar--collapsed={collapsed}>
+	<!-- Brand + toggle -->
 	<div class="sidebar-brand">
-		<div class="brand-icon">
-			<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-				<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
-				<polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
-				<line x1="12" y1="22.08" x2="12" y2="12"/>
-			</svg>
-		</div>
-		<span class="brand-name">open<span class="brand-dash">—</span>sandbox</span>
-	</div>
-
-	<!-- Sandboxes list -->
-	<div class="sandbox-list-header">
-		<span class="list-label">Sandboxes</span>
-		<div class="list-header-right">
-			{#if sandboxes.length > 0}
-				<span class="running-count">{runningCount} running</span>
-			{/if}
-			<button class="new-btn" type="button" onclick={onNewSandbox} title="New sandbox">
-				<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-					<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+		{#if !collapsed}
+			<div class="brand-icon">
+				<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+					<polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+					<line x1="12" y1="22.08" x2="12" y2="12"/>
 				</svg>
-			</button>
-		</div>
+			</div>
+			<span class="brand-name">open<span class="brand-dash">—</span>sandbox</span>
+		{:else}
+			<div class="brand-icon brand-icon--lg">
+				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+					<polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+					<line x1="12" y1="22.08" x2="12" y2="12"/>
+				</svg>
+			</div>
+		{/if}
+		<button class="collapse-btn" type="button" onclick={toggleCollapsed} title={collapsed ? "Expand sidebar" : "Collapse sidebar"}>
+			{#if collapsed}
+				<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<polyline points="9 18 15 12 9 6"/>
+				</svg>
+			{:else}
+				<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<polyline points="15 18 9 12 15 6"/>
+				</svg>
+			{/if}
+		</button>
 	</div>
 
-	<nav class="sandbox-nav">
-		{#if loading && sandboxes.length === 0}
-			<div class="sidebar-loading">
-				<div class="loading-dots">
-					<span></span><span></span><span></span>
-				</div>
-			</div>
-		{:else if sandboxes.length === 0}
-			<div class="sidebar-empty">
-				<p class="sidebar-empty-text">No sandboxes yet</p>
-				<button class="sidebar-empty-cta" type="button" onclick={onNewSandbox}>
-					Create one
-				</button>
-			</div>
-		{:else}
-			{#each sandboxes as sandbox (sandbox.id)}
-				{@const st = statusOf(sandbox)}
-				<button
-					type="button"
-					class="sandbox-item {selectedSandboxId === sandbox.id ? 'sandbox-item--active' : ''}"
-					onclick={() => onSelectSandbox(sandbox.id)}
-				>
-					<span class="sandbox-item-dot sandbox-item-dot--{st}"></span>
-					<span class="sandbox-item-name">{sandbox.name}</span>
-					<span class="sandbox-item-image">{sandbox.image.split(":")[0]}</span>
-				</button>
-			{/each}
-		{/if}
+	<!-- Navigation -->
+	<nav class="sidebar-nav">
+		{#each navItems as item}
+			<a
+				class="nav-link"
+				class:nav-link--active={isActive(item.href)}
+				href={item.href}
+				title={collapsed ? item.label : undefined}
+			>
+				<span class="nav-icon">{@html item.icon}</span>
+				{#if !collapsed}
+					<span class="nav-label">{item.label}</span>
+				{/if}
+			</a>
+		{/each}
 	</nav>
 
 	<div class="sidebar-spacer"></div>
 
-	{#if showAdminNav}
-		<div class="sidebar-section-nav">
-			<a class="section-link {currentSection === 'sandboxes' ? 'section-link--active' : ''}" href="/">
-				Sandboxes
-			</a>
-			<a class="section-link {currentSection === 'users' ? 'section-link--active' : ''}" href="/users">
-				Users
-			</a>
-		</div>
-	{/if}
-
-	<!-- Endpoint -->
-	<div class="sidebar-endpoint">
-		<span class="endpoint-label">Endpoint</span>
-		<input
-			class="endpoint-input"
-			value={baseUrl}
-			oninput={(e) => onBaseUrlChange((e.currentTarget as HTMLInputElement).value)}
-			spellcheck={false}
-		/>
+	<!-- Health indicator (icon only when collapsed) -->
+	<div class="health-section" class:health-section--collapsed={collapsed}>
+		<span class="health-dot" style="background: {getHealthColor(health)}"></span>
+		{#if !collapsed}
+			<span class="health-text">{healthMessage}</span>
+			<button class="ping-btn" type="button" onclick={onPing}>Ping</button>
+		{:else}
+			<button class="ping-btn ping-btn--icon" type="button" onclick={onPing} title="Ping server">
+				<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 9.13 19.79 19.79 0 0 1 1.61 0.52 2 2 0 0 1 3.62 0h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 7.91a16 16 0 0 0 6.11 6.11l.97-.97a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/>
+				</svg>
+			</button>
+		{/if}
 	</div>
 
 	<!-- Footer -->
 	<div class="sidebar-footer">
-		<div class="sidebar-user">
-			<span class="sidebar-user-name">{currentUsername}</span>
-			<span class="sidebar-user-role">{currentRole}</span>
-		</div>
-		<div class="health-row">
-			<span class="health-dot" style="background: {getHealthColor(health)}"></span>
-			<span class="health-text">{healthMessage}</span>
-			<button class="ping-btn" type="button" onclick={onPing}>Ping</button>
-		</div>
-		<button class="signout-btn" type="button" onclick={onSignOut}>
-			<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-				<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
-				<polyline points="16 17 21 12 16 7"/>
-				<line x1="21" y1="12" x2="9" y2="12"/>
-			</svg>
-			Sign out
-		</button>
+		{#if !collapsed}
+			<div class="user-card">
+				<div class="user-avatar">{userInitial}</div>
+				<div class="user-info">
+					<span class="user-name">{currentUsername}</span>
+					<span class="user-role">{currentRole}</span>
+				</div>
+			</div>
+			<button class="signout-btn" type="button" onclick={onSignOut}>
+				<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+					<polyline points="16 17 21 12 16 7"/>
+					<line x1="21" y1="12" x2="9" y2="12"/>
+				</svg>
+				Sign out
+			</button>
+		{:else}
+			<div class="user-avatar-solo" title={currentUsername}>{userInitial}</div>
+			<button class="signout-btn--icon" type="button" onclick={onSignOut} title="Sign out">
+				<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+					<polyline points="16 17 21 12 16 7"/>
+					<line x1="21" y1="12" x2="9" y2="12"/>
+				</svg>
+			</button>
+		{/if}
 	</div>
 </aside>
 
@@ -174,6 +182,13 @@
 		flex-direction: column;
 		overflow: hidden;
 		flex-shrink: 0;
+		transition: width 0.22s var(--ease-snappy), min-width 0.22s var(--ease-snappy), max-width 0.22s var(--ease-snappy);
+	}
+
+	.sidebar--collapsed {
+		width: 52px;
+		min-width: 52px;
+		max-width: 52px;
 	}
 
 	/* Brand */
@@ -181,10 +196,19 @@
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
-		padding: 0.875rem 0.875rem 0.75rem;
+		padding: 0.75rem 0.75rem 0.625rem;
 		border-bottom: 1px solid var(--border-dim);
 		flex-shrink: 0;
+		min-height: 48px;
 	}
+
+	.sidebar--collapsed .sidebar-brand {
+		justify-content: center;
+		padding: 0.75rem 0;
+		gap: 0;
+		flex-direction: column;
+	}
+
 	.brand-icon {
 		display: grid;
 		place-items: center;
@@ -196,6 +220,12 @@
 		color: var(--text-secondary);
 		flex-shrink: 0;
 	}
+
+	.brand-icon--lg {
+		width: 28px;
+		height: 28px;
+	}
+
 	.brand-name {
 		font-family: var(--font-mono);
 		font-size: 0.7rem;
@@ -203,268 +233,118 @@
 		color: var(--text-primary);
 		letter-spacing: -0.01em;
 		white-space: nowrap;
+		flex: 1;
+		overflow: hidden;
+		opacity: 1;
+		transition: opacity 0.15s;
 	}
+
 	.brand-dash { color: var(--text-muted); margin: 0 0.05em; }
 
-	/* Sandbox list header */
-	.sandbox-list-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 0.75rem 0.875rem 0.4rem;
-		flex-shrink: 0;
-	}
-	.list-label {
-		font-family: var(--font-mono);
-		font-size: 0.58rem;
-		text-transform: uppercase;
-		letter-spacing: 0.08em;
-		color: var(--text-muted);
-	}
-	.list-header-right {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-	}
-	.running-count {
-		font-family: var(--font-mono);
-		font-size: 0.58rem;
-		color: var(--status-ok);
-		opacity: 0.8;
-	}
-	.new-btn {
+	.collapse-btn {
 		display: grid;
 		place-items: center;
-		width: 20px;
-		height: 20px;
+		width: 22px;
+		height: 22px;
 		background: transparent;
-		border: 1px solid var(--border-mid);
-		border-radius: 3px;
+		border: 1px solid var(--border-dim);
+		border-radius: 4px;
 		color: var(--text-muted);
 		cursor: pointer;
+		flex-shrink: 0;
 		transition: color 0.12s, border-color 0.12s, background 0.12s;
 	}
-	.new-btn:hover {
+
+	.collapse-btn:hover {
 		color: var(--text-primary);
 		border-color: var(--border-hi);
 		background: var(--accent-dim);
 	}
 
-	/* Sandbox nav list */
-	.sandbox-nav {
-		flex: 1;
-		overflow-y: auto;
-		padding: 0.25rem 0.5rem;
-		display: flex;
-		flex-direction: column;
-		gap: 0.125rem;
+	.sidebar--collapsed .collapse-btn {
+		margin-top: 0.35rem;
+		width: 28px;
+		height: 22px;
 	}
-	.sidebar-loading {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		padding: 1.5rem;
-	}
-	.loading-dots {
-		display: flex;
-		gap: 0.3rem;
-	}
-	.loading-dots span {
-		width: 4px;
-		height: 4px;
-		border-radius: 50%;
-		background: var(--text-muted);
-		animation: dotPulse 1.2s ease-in-out infinite;
-	}
-	.loading-dots span:nth-child(2) { animation-delay: 0.2s; }
-	.loading-dots span:nth-child(3) { animation-delay: 0.4s; }
-	@keyframes dotPulse {
-		0%, 80%, 100% { opacity: 0.2; transform: scale(0.8); }
-		40%            { opacity: 1;   transform: scale(1);   }
-	}
-	.sidebar-empty {
-		padding: 1.5rem 0.5rem;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 0.5rem;
-		text-align: center;
-	}
-	.sidebar-empty-text {
-		margin: 0;
-		font-family: var(--font-mono);
-		font-size: 0.65rem;
-		color: var(--text-muted);
-	}
-	.sidebar-empty-cta {
-		background: transparent;
-		border: 1px solid var(--border-mid);
-		border-radius: 3px;
-		color: var(--text-secondary);
-		font-family: var(--font-mono);
-		font-size: 0.62rem;
-		padding: 0.2rem 0.6rem;
-		cursor: pointer;
-		transition: color 0.12s, border-color 0.12s;
-	}
-	.sidebar-empty-cta:hover { color: var(--text-primary); border-color: var(--border-hi); }
 
-	.sandbox-item {
-		width: 100%;
+	/* Navigation */
+	.sidebar-nav {
+		display: flex;
+		flex-direction: column;
+		gap: 0.2rem;
+		padding: 0.625rem 0.5rem;
+		flex-shrink: 0;
+	}
+
+	.nav-link {
 		display: flex;
 		align-items: center;
-		gap: 0.5rem;
-		padding: 0.45rem 0.5rem;
-		border-radius: 4px;
+		gap: 0.625rem;
+		padding: 0.5rem 0.625rem;
+		border-radius: var(--radius-sm);
 		border: 1px solid transparent;
-		background: transparent;
-		cursor: pointer;
-		text-align: left;
-		transition: background 0.1s, border-color 0.1s;
-		min-width: 0;
+		color: var(--text-secondary);
+		text-decoration: none;
+		font-family: var(--font-mono);
+		font-size: 0.72rem;
+		transition: color 0.12s, border-color 0.12s, background 0.12s;
+		white-space: nowrap;
+		overflow: hidden;
 	}
-	.sandbox-item:hover:not(.sandbox-item--active) {
+
+	.nav-link:hover:not(.nav-link--active) {
+		color: var(--text-primary);
 		background: var(--accent-dim);
 	}
-	.sandbox-item--active {
+
+	.nav-link--active {
+		color: var(--text-primary);
 		background: var(--bg-raised);
 		border-color: var(--border-mid);
 	}
-	.sandbox-item-dot {
-		width: 6px;
-		height: 6px;
-		border-radius: 50%;
+
+	.nav-icon {
+		display: grid;
+		place-items: center;
 		flex-shrink: 0;
+		width: 16px;
+		height: 16px;
+		color: inherit;
 	}
-	.sandbox-item-dot--ok    { background: var(--status-ok); box-shadow: 0 0 5px rgba(74,222,128,0.4); }
-	.sandbox-item-dot--error { background: var(--status-error); }
-	.sandbox-item-dot--idle  { background: var(--status-idle); }
-	.sandbox-item-name {
-		font-family: var(--font-mono);
-		font-size: 0.7rem;
-		color: var(--text-primary);
+
+	.nav-label {
 		overflow: hidden;
-		text-overflow: ellipsis;
 		white-space: nowrap;
-		flex: 1;
 	}
-	.sandbox-item--active .sandbox-item-name { color: var(--text-primary); }
-	.sandbox-item-image {
-		font-family: var(--font-mono);
-		font-size: 0.58rem;
-		color: var(--text-muted);
-		white-space: nowrap;
-		flex-shrink: 0;
+
+	.sidebar--collapsed .nav-link {
+		justify-content: center;
+		padding: 0.5rem;
+		gap: 0;
 	}
 
 	.sidebar-spacer {
 		flex: 1;
 	}
 
-	.sidebar-section-nav {
-		display: grid;
-		grid-template-columns: repeat(2, minmax(0, 1fr));
-		gap: 0.35rem;
-		padding: 0 0.875rem 0.875rem;
-		flex-shrink: 0;
-	}
-
-	.section-link {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		min-height: 2rem;
-		border: 1px solid var(--border-mid);
-		border-radius: var(--radius-sm);
-		background: transparent;
-		color: var(--text-secondary);
-		font-family: var(--font-mono);
-		font-size: 0.62rem;
-		letter-spacing: 0.05em;
-		text-decoration: none;
-		text-transform: uppercase;
-		transition: color 0.12s, border-color 0.12s, background 0.12s;
-	}
-
-	.section-link:hover {
-		color: var(--text-primary);
-		border-color: var(--border-hi);
-		background: var(--accent-dim);
-	}
-
-	.section-link--active {
-		background: var(--bg-raised);
-		border-color: var(--border-hi);
-		color: var(--text-primary);
-	}
-
-	/* Endpoint */
-	.sidebar-endpoint {
-		padding: 0.625rem 0.875rem;
-		border-top: 1px solid var(--border-dim);
-		flex-shrink: 0;
-	}
-	.endpoint-label {
-		font-family: var(--font-mono);
-		font-size: 0.58rem;
-		text-transform: uppercase;
-		letter-spacing: 0.08em;
-		color: var(--text-muted);
-		display: block;
-		margin-bottom: 0.35rem;
-	}
-	.endpoint-input {
-		width: 100%;
-		background: var(--bg-raised);
-		border: 1px solid var(--border-dim);
-		border-radius: var(--radius-sm);
-		color: var(--text-secondary);
-		font-family: var(--font-mono);
-		font-size: 0.6rem;
-		padding: 0.3rem 0.45rem;
-		outline: none;
-		transition: border-color 0.15s, color 0.15s;
-	}
-	.endpoint-input:focus {
-		border-color: var(--border-focus);
-		color: var(--text-primary);
-	}
-
-	/* Footer */
-	.sidebar-footer {
-		padding: 0.625rem 0.875rem;
-		border-top: 1px solid var(--border-dim);
-		display: flex;
-		flex-direction: column;
-		gap: 0.45rem;
-		flex-shrink: 0;
-	}
-	.sidebar-user {
-		display: flex;
-		flex-direction: column;
-		gap: 0.15rem;
-		padding: 0.65rem 0.7rem;
-		background: var(--bg-raised);
-		border: 1px solid var(--border-dim);
-		border-radius: var(--radius-md);
-	}
-	.sidebar-user-name {
-		font-size: 0.78rem;
-		font-weight: 500;
-		color: var(--text-primary);
-	}
-	.sidebar-user-role {
-		font-family: var(--font-mono);
-		font-size: 0.58rem;
-		text-transform: uppercase;
-		letter-spacing: 0.08em;
-		color: var(--text-muted);
-	}
-	.health-row {
+	/* Health */
+	.health-section {
 		display: flex;
 		align-items: center;
 		gap: 0.4rem;
+		padding: 0.5rem 0.875rem;
+		border-top: 1px solid var(--border-dim);
+		flex-shrink: 0;
 	}
+
+	.health-section--collapsed {
+		justify-content: center;
+		padding: 0.5rem;
+		gap: 0;
+		flex-direction: column;
+		gap: 0.35rem;
+	}
+
 	.health-dot {
 		width: 5px;
 		height: 5px;
@@ -472,6 +352,7 @@
 		flex-shrink: 0;
 		transition: background 0.3s;
 	}
+
 	.health-text {
 		font-family: var(--font-mono);
 		font-size: 0.6rem;
@@ -481,6 +362,7 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
+
 	.ping-btn {
 		background: transparent;
 		border: 1px solid var(--border-dim);
@@ -493,7 +375,95 @@
 		transition: color 0.12s, border-color 0.12s;
 		flex-shrink: 0;
 	}
+
 	.ping-btn:hover { color: var(--text-primary); border-color: var(--border-hi); }
+
+	.ping-btn--icon {
+		display: grid;
+		place-items: center;
+		width: 24px;
+		height: 24px;
+		padding: 0;
+	}
+
+	/* Footer */
+	.sidebar-footer {
+		padding: 0.625rem 0.75rem;
+		border-top: 1px solid var(--border-dim);
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		flex-shrink: 0;
+	}
+
+	.sidebar--collapsed .sidebar-footer {
+		padding: 0.625rem 0;
+		align-items: center;
+	}
+
+	.user-card {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		padding: 0.5rem 0.6rem;
+		background: var(--bg-raised);
+		border: 1px solid var(--border-dim);
+		border-radius: var(--radius-md);
+	}
+
+	.user-avatar {
+		display: grid;
+		place-items: center;
+		width: 26px;
+		height: 26px;
+		border-radius: 50%;
+		background: var(--bg-overlay);
+		border: 1px solid var(--border-mid);
+		font-family: var(--font-mono);
+		font-size: 0.68rem;
+		font-weight: 600;
+		color: var(--text-primary);
+		flex-shrink: 0;
+	}
+
+	.user-avatar-solo {
+		display: grid;
+		place-items: center;
+		width: 30px;
+		height: 30px;
+		border-radius: 50%;
+		background: var(--bg-overlay);
+		border: 1px solid var(--border-mid);
+		font-family: var(--font-mono);
+		font-size: 0.72rem;
+		font-weight: 600;
+		color: var(--text-primary);
+		cursor: default;
+	}
+
+	.user-info {
+		display: flex;
+		flex-direction: column;
+		gap: 0.1rem;
+		min-width: 0;
+	}
+
+	.user-name {
+		font-size: 0.78rem;
+		font-weight: 500;
+		color: var(--text-primary);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.user-role {
+		font-family: var(--font-mono);
+		font-size: 0.58rem;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-muted);
+	}
 
 	.signout-btn {
 		display: flex;
@@ -510,7 +480,27 @@
 		width: 100%;
 		transition: color 0.12s, border-color 0.12s, background 0.12s;
 	}
+
 	.signout-btn:hover {
+		color: var(--status-error);
+		border-color: var(--status-error-border);
+		background: var(--status-error-bg);
+	}
+
+	.signout-btn--icon {
+		display: grid;
+		place-items: center;
+		width: 30px;
+		height: 30px;
+		background: transparent;
+		border: 1px solid var(--border-dim);
+		border-radius: var(--radius-sm);
+		color: var(--text-muted);
+		cursor: pointer;
+		transition: color 0.12s, border-color 0.12s, background 0.12s;
+	}
+
+	.signout-btn--icon:hover {
 		color: var(--status-error);
 		border-color: var(--status-error-border);
 		background: var(--status-error-bg);
