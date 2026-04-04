@@ -21,6 +21,7 @@
 		logout,
 		removeContainer,
 		pullImage,
+		resetContainer,
 		resetSandbox,
 		restartContainer,
 		restartSandbox,
@@ -509,6 +510,19 @@
 		try { await runApiEffect(resetSandbox(clientState.config, id)); dataNotice = "Reset."; await refreshData(); }
 		catch (err) { dataError = formatApiFailure(err); }
 	}
+	async function handleResetContainer(id: string): Promise<void> {
+		dataError = ""; dataNotice = "";
+		try {
+			const result = await runApiEffect(resetContainer(clientState.config, id));
+			const currentActive = activeWorkload;
+			if (currentActive?.kind === "container" && currentActive.id === id) {
+				activeWorkload = { kind: "container", id: result.container_id };
+			}
+			dataNotice = "Container reset.";
+			await refreshData();
+		}
+		catch (err) { dataError = formatApiFailure(err); }
+	}
 	async function handleStop(id: string): Promise<void> {
 		dataError = ""; dataNotice = "";
 		try { await runApiEffect(stopSandbox(clientState.config, id)); dataNotice = "Stopped."; await refreshData(); }
@@ -554,6 +568,11 @@
 	function openContainer(id: string): void {
 		activeWorkload = { kind: "container", id };
 		dataError = ""; dataNotice = "";
+	}
+
+	function replaceActiveContainer(id: string): void {
+		activeWorkload = { kind: "container", id };
+		dataError = "";
 	}
 
 	// Load data after login
@@ -631,7 +650,8 @@
 				runtimeContainer={activeRuntimeContainer}
 				config={clientState.config}
 				onBack={() => { activeWorkload = null; }}
-				onRefresh={() => void refreshData()}
+				onRefresh={() => refreshData()}
+				onContainerReplaced={(id) => replaceActiveContainer(id)}
 				onDeleted={() => { activeWorkload = null; void refreshData(); }}
 			/>
 		{:else}
@@ -647,6 +667,7 @@
 				onOpenContainer={(id) => openContainer(id)}
 				onRestart={(id) => void handleRestart(id)}
 				onReset={(id) => void handleReset(id)}
+				onResetContainer={(id) => void handleResetContainer(id)}
 				onStop={(id) => void handleStop(id)}
 				onDelete={(id) => void handleDelete(id)}
 				onRestartContainer={(id) => void handleRestartContainer(id)}

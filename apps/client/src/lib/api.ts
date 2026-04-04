@@ -773,6 +773,12 @@ export const restartContainer = (
 ): Effect.Effect<{ container_id: string; restarted: boolean }, ApiFailure, HttpClient.HttpClient> =>
 	postJson(config, `/api/containers/${encodeURIComponent(containerId)}/restart`, {});
 
+export const resetContainer = (
+	config: ApiConfig,
+	containerId: string
+): Effect.Effect<{ container_id: string; reset: boolean }, ApiFailure, HttpClient.HttpClient> =>
+	postJson(config, `/api/containers/${encodeURIComponent(containerId)}/reset`, {});
+
 export const removeContainer = (
 	config: ApiConfig,
 	containerId: string,

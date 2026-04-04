@@ -102,6 +102,23 @@ type composeProjectContext struct {
 	ComposeFile string
 }
 
+const (
+	labelOpenSandboxManaged       = "open-sandbox.managed"
+	labelOpenSandboxOwnerID       = "open-sandbox.owner_id"
+	labelOpenSandboxOwnerUsername = "open-sandbox.owner_username"
+	labelOpenSandboxKind          = "open-sandbox.kind"
+	labelOpenSandboxManagedID     = "open-sandbox.managed_id"
+	labelOpenSandboxSandboxID     = "open-sandbox.sandbox_id"
+	managedKindDirect             = "direct"
+	managedKindSandbox            = "sandbox"
+	composeOwnerMetadataFile      = ".owner.json"
+)
+
+type managedOwnerMetadata struct {
+	UserID   string `json:"user_id"`
+	Username string `json:"username"`
+}
+
 type ErrorResponse struct {
 	Error  string `json:"error"`
 	Reason string `json:"reason,omitempty"`
@@ -295,6 +312,7 @@ func (s *Server) registerRoutes() {
 		api.GET("/containers", s.listContainers)
 		api.POST("/containers/create", s.createContainer)
 		api.POST("/containers/:id/restart", s.restartContainer)
+		api.POST("/containers/:id/reset", s.resetContainer)
 		api.POST("/containers/:id/stop", s.stopContainer)
 		api.DELETE("/containers/:id", s.removeContainer)
 		api.POST("/containers/:id/exec", s.execInContainer)
@@ -558,9 +576,19 @@ func (s *Server) composeUp(c *gin.Context) {
 		return
 	}
 
+	identity, ok := authIdentityFromContext(c)
+	if !ok {
+		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
+		return
+	}
+
 	project, err := s.prepareComposeProject(req)
 	if err != nil {
 		writeError(c, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.writeComposeProjectOwnerMetadata(project.ProjectDir, identity); err != nil {
+		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -764,37 +792,22 @@ func (s *Server) createContainer(c *gin.Context) {
 		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
 		return
 	}
-
-	containerConfig := &container.Config{
-		Image:      req.Image,
-		Cmd:        req.Cmd,
-		Env:        req.Env,
-		WorkingDir: req.Workdir,
-		Tty:        req.TTY,
-		User:       req.User,
-		Labels: map[string]string{
-			"open-sandbox.managed":        "true",
-			"open-sandbox.owner_id":       identity.UserID,
-			"open-sandbox.owner_username": identity.Username,
-		},
-	}
-	hostConfig := &container.HostConfig{
-		Binds:      req.Binds,
-		AutoRemove: req.AutoRemove,
+	managedID := newManagedResourceID("ctr")
+	if err := s.writeDirectContainerSpec(managedID, req); err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
 	}
 
-	if len(req.Ports) > 0 {
-		exposedPorts, portBindings, err := nat.ParsePortSpecs(req.Ports)
-		if err != nil {
-			writeError(c, http.StatusBadRequest, fmt.Errorf("parse ports: %w", err))
-			return
-		}
-		containerConfig.ExposedPorts = exposedPorts
-		hostConfig.PortBindings = portBindings
+	containerConfig, hostConfig, err := buildDirectContainerConfigs(req, identity.UserID, identity.Username, managedID)
+	if err != nil {
+		_ = os.Remove(s.directContainerSpecPath(managedID))
+		writeError(c, http.StatusBadRequest, err)
+		return
 	}
 
 	created, err := s.createContainerWithAutoPull(c.Request.Context(), req.Image, containerConfig, hostConfig, req.Name)
 	if err != nil {
+		_ = os.Remove(s.directContainerSpecPath(managedID))
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
@@ -1190,6 +1203,39 @@ func buildComposeArgs(project composeProjectContext, req ComposeRequest, cmd str
 	return args
 }
 
+func buildDirectContainerConfigs(req CreateContainerRequest, ownerID string, ownerUsername string, managedID string) (*container.Config, *container.HostConfig, error) {
+	containerConfig := &container.Config{
+		Image:      req.Image,
+		Cmd:        req.Cmd,
+		Env:        req.Env,
+		WorkingDir: req.Workdir,
+		Tty:        req.TTY,
+		User:       req.User,
+		Labels: map[string]string{
+			labelOpenSandboxManaged:       "true",
+			labelOpenSandboxOwnerID:       ownerID,
+			labelOpenSandboxOwnerUsername: ownerUsername,
+			labelOpenSandboxKind:          managedKindDirect,
+			labelOpenSandboxManagedID:     managedID,
+		},
+	}
+	hostConfig := &container.HostConfig{
+		Binds:      req.Binds,
+		AutoRemove: req.AutoRemove,
+	}
+
+	if len(req.Ports) > 0 {
+		exposedPorts, portBindings, err := nat.ParsePortSpecs(req.Ports)
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse ports: %w", err)
+		}
+		containerConfig.ExposedPorts = exposedPorts
+		hostConfig.PortBindings = portBindings
+	}
+
+	return containerConfig, hostConfig, nil
+}
+
 func (s *Server) prepareComposeProject(req ComposeRequest) (composeProjectContext, error) {
 	composeRoot := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose")
 	if err := os.MkdirAll(composeRoot, 0o700); err != nil {
@@ -1215,6 +1261,23 @@ func (s *Server) prepareComposeProject(req ComposeRequest) (composeProjectContex
 		ProjectDir:  projectDir,
 		ComposeFile: composeFile,
 	}, nil
+}
+
+func (s *Server) existingComposeProject(projectName string) (composeProjectContext, error) {
+	sanitized := sanitizeComposeProjectName(projectName)
+	if sanitized == "" {
+		return composeProjectContext{}, errors.New("compose project name is required")
+	}
+	projectDir := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", sanitized)
+	composeFile := filepath.Join(projectDir, "docker-compose.yml")
+	if _, err := os.Stat(composeFile); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return composeProjectContext{}, fmt.Errorf("compose project %q not found", sanitized)
+		}
+		return composeProjectContext{}, fmt.Errorf("inspect compose project: %w", err)
+	}
+
+	return composeProjectContext{ProjectName: sanitized, ProjectDir: projectDir, ComposeFile: composeFile}, nil
 }
 
 func composeProjectName(raw string, content string) string {
@@ -1270,6 +1333,76 @@ func writeManagedComposeFile(projectDir string, content string) (string, error) 
 	}
 
 	return composeFile, nil
+}
+
+func (s *Server) writeComposeProjectOwnerMetadata(projectDir string, identity AuthIdentity) error {
+	ownerFile := filepath.Join(projectDir, composeOwnerMetadataFile)
+	payload, err := json.Marshal(managedOwnerMetadata{UserID: identity.UserID, Username: identity.Username})
+	if err != nil {
+		return fmt.Errorf("encode compose owner metadata: %w", err)
+	}
+	if err := os.WriteFile(ownerFile, payload, 0o600); err != nil {
+		return fmt.Errorf("write compose owner metadata: %w", err)
+	}
+	return nil
+}
+
+func (s *Server) directContainerSpecRoot() string {
+	return filepath.Join(s.workspaceRoot, ".open-sandbox", "containers")
+}
+
+func (s *Server) directContainerSpecPath(managedID string) string {
+	return filepath.Join(s.directContainerSpecRoot(), managedID+".json")
+}
+
+func (s *Server) writeDirectContainerSpec(managedID string, req CreateContainerRequest) error {
+	if err := ensurePrivateDir(filepath.Join(s.workspaceRoot, ".open-sandbox")); err != nil {
+		return err
+	}
+	if err := ensurePrivateDir(s.directContainerSpecRoot()); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("encode direct container spec: %w", err)
+	}
+	if err := os.WriteFile(s.directContainerSpecPath(managedID), payload, 0o600); err != nil {
+		return fmt.Errorf("write direct container spec: %w", err)
+	}
+	return nil
+}
+
+func (s *Server) readDirectContainerSpec(managedID string) (CreateContainerRequest, error) {
+	payload, err := os.ReadFile(s.directContainerSpecPath(managedID))
+	if err != nil {
+		return CreateContainerRequest{}, fmt.Errorf("read direct container spec: %w", err)
+	}
+	var req CreateContainerRequest
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return CreateContainerRequest{}, fmt.Errorf("decode direct container spec: %w", err)
+	}
+	return req, nil
+}
+
+func ensurePrivateDir(path string) error {
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return fmt.Errorf("create private dir %q: %w", path, err)
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		return fmt.Errorf("chmod private dir %q: %w", path, err)
+	}
+	return nil
+}
+
+func newManagedResourceID(prefix string) string {
+	requestID := newRequestID()
+	if len(requestID) > 12 {
+		requestID = requestID[:12]
+	}
+	if strings.TrimSpace(prefix) == "" {
+		return requestID
+	}
+	return prefix + "-" + requestID
 }
 
 func runCommand(ctx context.Context, name string, args ...string) (string, string, error) {

@@ -9,6 +9,7 @@
 		readSandboxFile,
 		removeContainer,
 		restartContainer,
+		resetContainer,
 		resetSandbox,
 		resolveApiUrl,
 		restartSandbox,
@@ -35,6 +36,7 @@
 		config,
 		onBack,
 		onRefresh,
+		onContainerReplaced,
 		onDeleted
 	} = $props<{
 		sandbox?: Sandbox | null;
@@ -42,7 +44,8 @@
 		runtimeContainer?: ContainerSummary | null;
 		config: ApiConfig;
 		onBack: () => void;
-		onRefresh: () => void;
+		onRefresh: () => Promise<void> | void;
+		onContainerReplaced: (id: string) => void;
 		onDeleted: () => void;
 	}>();
 
@@ -128,7 +131,7 @@
 	const workloadCreatedAt = $derived(sandbox?.created_at ?? 0);
 	const st = $derived(statusInfo(workloadStatus));
 	const ports = $derived(previewLinks(activeContainer?.ports));
-	const canReset = $derived(workloadKind === "sandbox");
+	const canReset = $derived(true);
 	const canBrowseFiles = $derived(backingContainerId.length > 0);
 
 	const formatDate = (unixSeconds: number): string =>
@@ -291,15 +294,21 @@
 					await runApiEffect(restartContainer(config, targetId));
 				}
 				notice = "Restarted.";
-				onRefresh();
+				await Promise.resolve(onRefresh());
 			} else if (action === "reset") {
-				if (workloadKind !== "sandbox") {
-					throw new Error("Reset is only available for managed sandboxes.");
+				if (workloadKind === "sandbox") {
+					await runApiEffect(resetSandbox(config, targetId));
+					notice = "Reset to clean workspace.";
+					await Promise.resolve(onRefresh());
+					await loadPath(workspaceDirValue);
+				} else {
+					const result = await runApiEffect(resetContainer(config, targetId));
+					onContainerReplaced(result.container_id);
+					notice = "Container reset.";
+					await Promise.resolve(onRefresh());
+					await tick();
+					await loadPath(browsePath);
 				}
-				await runApiEffect(resetSandbox(config, targetId));
-				notice = "Reset to clean workspace.";
-				onRefresh();
-				await loadPath(workspaceDirValue);
 			} else if (action === "stop") {
 				if (workloadKind === "sandbox") {
 					await runApiEffect(stopSandbox(config, targetId));
@@ -307,7 +316,7 @@
 					await runApiEffect(stopContainer(config, targetId));
 				}
 				notice = "Stopped.";
-				onRefresh();
+				await Promise.resolve(onRefresh());
 			} else if (action === "delete") {
 				if (workloadKind === "sandbox") {
 					await runApiEffect(deleteSandbox(config, targetId));

@@ -1,10 +1,9 @@
 <script lang="ts">
 	import SandboxCard from "./SandboxCard.svelte";
-	import RuntimeContainerCard from "./RuntimeContainerCard.svelte";
 	import Combobox from "./Combobox.svelte";
 	import CodeEditor from "./CodeEditor.svelte";
 	import PortsEditor from "./PortsEditor.svelte";
-	import type { ContainerSummary, ImageSearchResult, ImageSummary, Sandbox } from "$lib/api";
+	import type { ContainerSummary, ImageSearchResult, ImageSummary, PortSummary, Sandbox } from "$lib/api";
 
 	type CreateMethod = "existing" | "pull" | "build-context" | "build-inline" | "compose";
 
@@ -18,6 +17,7 @@
 		onOpen,
 		onRestart,
 		onReset,
+		onResetContainer,
 		onStop,
 		onDelete,
 		onOpenContainer,
@@ -64,6 +64,7 @@
 		onOpen: (id: string) => void;
 		onRestart: (id: string) => void;
 		onReset: (id: string) => void;
+		onResetContainer: (id: string) => void;
 		onStop: (id: string) => void;
 		onDelete: (id: string) => void;
 		onOpenContainer: (id: string) => void;
@@ -161,21 +162,96 @@
 
 	// ANSI stripping for pipeline log display (display only, not storage)
 	const stripAnsi = (str: string): string => str.replace(/\x1b\[[0-9;]*[mGKHF]/g, "");
+	let workloadSearch = $state("");
 	const sandboxContainerIDs = $derived(new Set(sandboxes.map((sandbox: Sandbox) => sandbox.container_id)));
 	const runtimeContainers = $derived(containers.filter((container: ContainerSummary) => !sandboxContainerIDs.has(container.id)));
-	const workloadCount = $derived(sandboxes.length + runtimeContainers.length);
+
+	type WorkloadCardItem = {
+		key: string;
+		kind: "sandbox" | "container";
+		id: string;
+		name: string;
+		image: string;
+		status: string;
+		containerId: string;
+		ports: PortSummary[];
+		createdAt: number | null;
+		metaLabel: string;
+		metaValue: string;
+		searchText: string;
+	};
+
+	const workloads = $derived.by<WorkloadCardItem[]>(() => {
+		const sandboxItems = sandboxes.map((sandbox: Sandbox) => ({
+			key: `sandbox:${sandbox.id}`,
+			kind: "sandbox" as const,
+			id: sandbox.id,
+			name: sandbox.name,
+			image: sandbox.image,
+			status: sandbox.status,
+			containerId: sandbox.container_id,
+			ports: containers.find((c: ContainerSummary) => c.id === sandbox.container_id)?.ports ?? sandbox.ports ?? [],
+			createdAt: sandbox.created_at,
+			metaLabel: sandbox.owner_username ? "Owner" : "",
+			metaValue: sandbox.owner_username ?? "",
+			searchText: [sandbox.name, sandbox.image, sandbox.owner_username ?? "", sandbox.container_id].join(" ").toLowerCase()
+		}));
+
+		const containerItems = runtimeContainers.map((container: ContainerSummary) => {
+			const composeProject = container.labels["com.docker.compose.project"] ?? "";
+			const composeService = container.labels["com.docker.compose.service"] ?? "";
+			const primaryName = container.names[0] ?? container.id.slice(0, 12);
+			const metaValue = composeProject ? `${composeProject}${composeService ? ` / ${composeService}` : ""}` : "Runtime container";
+			return {
+				key: `container:${container.id}`,
+				kind: "container" as const,
+				id: container.id,
+				name: primaryName,
+				image: container.image,
+				status: container.status,
+				containerId: container.id,
+				ports: container.ports ?? [],
+				createdAt: container.created ?? null,
+				metaLabel: composeProject ? "Compose" : "Type",
+				metaValue,
+				searchText: [primaryName, container.image, metaValue, container.id, ...(container.names ?? [])].join(" ").toLowerCase()
+			};
+		});
+
+		return [...sandboxItems, ...containerItems].sort((a, b) => {
+			const createdDiff = (b.createdAt ?? 0) - (a.createdAt ?? 0);
+			if (createdDiff !== 0) {
+				return createdDiff;
+			}
+			return a.name.localeCompare(b.name);
+		});
+	});
+
+	const filteredWorkloads = $derived.by(() => {
+		const query = workloadSearch.trim().toLowerCase();
+		if (query.length === 0) {
+			return workloads;
+		}
+		return workloads.filter((item) => item.searchText.includes(query));
+	});
+
+	const workloadCount = $derived(workloads.length);
 </script>
 
 <div class="list-view anim-fade-up">
 	<!-- Page header -->
 	<div class="list-header">
-	<div class="list-title-group">
+		<div class="list-title-group">
 			<h1 class="list-title">Workloads</h1>
 			{#if workloadCount > 0}
-				<span class="list-count">{workloadCount}</span>
+				<span class="list-count">{filteredWorkloads.length === workloadCount ? workloadCount : `${filteredWorkloads.length}/${workloadCount}`}</span>
 			{/if}
 		</div>
 		<div class="list-actions">
+			<label class="search-field" aria-label="Search workloads">
+				<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+				<input class="search-input" bind:value={workloadSearch} placeholder="Search workloads..." />
+			</label>
 			<button class="btn-ghost btn-sm" type="button" onclick={onRefresh} disabled={loading}>
 				{#if loading}
 					<svg class="spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.22-8.56"/></svg>
@@ -195,7 +271,7 @@
 	{#if notice}<p class="alert-ok anim-fade-up">{notice}</p>{/if}
 
 	<!-- Card grid -->
-	{#if sandboxes.length === 0 && runtimeContainers.length === 0 && !showCreateForm}
+	{#if workloadCount === 0 && !showCreateForm}
 		<div class="empty-state anim-fade-up anim-delay-1">
 			<div class="empty-icon">
 				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -208,53 +284,40 @@
 				<button class="btn-ghost btn-sm" type="button" onclick={onToggleCreate}>+ New sandbox</button>
 			{/if}
 		</div>
+	{:else if filteredWorkloads.length === 0}
+		<div class="empty-state anim-fade-up anim-delay-1">
+			<div class="empty-icon">
+				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+			</div>
+			<p class="empty-title">No workloads match</p>
+			<p class="empty-sub">Try a different name, image, compose project, or container id.</p>
+		</div>
 	{:else}
-		{#if sandboxes.length > 0}
-			<div class="section-block">
-				<div class="section-heading-row">
-					<h2 class="section-heading">Sandboxes</h2>
-					<span class="section-count">{sandboxes.length}</span>
+		<div class="sandbox-grid">
+			{#each filteredWorkloads as workload, i (workload.key)}
+				<div class="anim-fade-up" style="animation-delay: {i * 0.035}s">
+					<SandboxCard
+						name={workload.name}
+						image={workload.image}
+						status={workload.status}
+						containerId={workload.containerId}
+						ports={workload.ports}
+						createdAt={workload.createdAt}
+						metaLabel={workload.metaLabel}
+						metaValue={workload.metaValue}
+						isSelected={false}
+						showReset={true}
+						deleteLabel={workload.kind === "sandbox" ? "Delete" : "Remove"}
+						deleteTitle={workload.kind === "sandbox" ? "Delete sandbox" : "Remove container"}
+						onOpen={() => workload.kind === "sandbox" ? onOpen(workload.id) : onOpenContainer(workload.id)}
+						onRestart={() => workload.kind === "sandbox" ? onRestart(workload.id) : onRestartContainer(workload.id)}
+						onReset={() => workload.kind === "sandbox" ? onReset(workload.id) : onResetContainer(workload.id)}
+						onStop={() => workload.kind === "sandbox" ? onStop(workload.id) : onStopContainer(workload.id)}
+						onDelete={() => workload.kind === "sandbox" ? onDelete(workload.id) : onRemoveContainer(workload.id)}
+					/>
 				</div>
-				<div class="sandbox-grid">
-					{#each sandboxes as sandbox, i (sandbox.id)}
-						<div class="anim-fade-up" style="animation-delay: {i * 0.035}s">
-							<SandboxCard
-								{sandbox}
-								container={containers.find((c: ContainerSummary) => c.id === sandbox.container_id) ?? null}
-								isSelected={false}
-								onOpen={() => onOpen(sandbox.id)}
-								onRestart={() => onRestart(sandbox.id)}
-								onReset={() => onReset(sandbox.id)}
-								onStop={() => onStop(sandbox.id)}
-								onDelete={() => onDelete(sandbox.id)}
-							/>
-						</div>
-					{/each}
-				</div>
-			</div>
-		{/if}
-
-		{#if runtimeContainers.length > 0}
-			<div class="section-block">
-				<div class="section-heading-row">
-					<h2 class="section-heading">Runtime containers</h2>
-					<span class="section-count">{runtimeContainers.length}</span>
-				</div>
-				<div class="sandbox-grid">
-					{#each runtimeContainers as container, i (container.id)}
-						<div class="anim-fade-up" style="animation-delay: {i * 0.035}s">
-							<RuntimeContainerCard
-								{container}
-								onOpen={() => onOpenContainer(container.id)}
-								onRestart={() => onRestartContainer(container.id)}
-								onStop={() => onStopContainer(container.id)}
-								onRemove={() => onRemoveContainer(container.id)}
-							/>
-						</div>
-					{/each}
-				</div>
-			</div>
-		{/if}
+			{/each}
+		</div>
 	{/if}
 </div>
 
@@ -524,37 +587,30 @@
 		gap: 0.5rem;
 	}
 
-	.section-block {
-		display: flex;
-		flex-direction: column;
-		gap: 0.75rem;
-	}
-
-	.section-heading-row {
-		display: flex;
+	.search-field {
+		display: inline-flex;
 		align-items: center;
-		justify-content: space-between;
-		gap: 0.75rem;
+		gap: 0.45rem;
+		padding: 0.45rem 0.65rem;
+		border: 1px solid var(--border-dim);
+		border-radius: var(--radius-md);
+		background: var(--bg-surface);
+		color: var(--text-muted);
+		min-width: min(22rem, 40vw);
 	}
 
-	.section-heading {
-		margin: 0;
+	.search-input {
+		border: 0;
+		outline: 0;
+		background: transparent;
+		color: var(--text-primary);
 		font-family: var(--font-mono);
 		font-size: 0.72rem;
-		font-weight: 500;
-		text-transform: uppercase;
-		letter-spacing: 0.08em;
-		color: var(--text-muted);
+		width: 100%;
 	}
 
-	.section-count {
-		font-family: var(--font-mono);
-		font-size: 0.62rem;
+	.search-input::placeholder {
 		color: var(--text-muted);
-		background: var(--bg-raised);
-		border: 1px solid var(--border-dim);
-		border-radius: 3px;
-		padding: 0.1rem 0.45rem;
 	}
 
 	/* Empty state */
@@ -597,8 +653,15 @@
 	/* Card grid */
 	.sandbox-grid {
 		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+		grid-template-columns: repeat(auto-fit, minmax(320px, 320px));
 		gap: 0.875rem;
+		align-items: stretch;
+		justify-content: start;
+	}
+
+	.sandbox-grid > :global(.anim-fade-up) {
+		height: 100%;
+		display: flex;
 	}
 
 	/* Backdrop */
@@ -926,6 +989,9 @@
 
 	@media (max-width: 640px) {
 		.list-view { padding: 1rem; }
+		.list-header { align-items: stretch; flex-direction: column; }
+		.list-actions { width: 100%; flex-wrap: wrap; }
+		.search-field { min-width: 100%; }
 		.sandbox-grid { grid-template-columns: 1fr; }
 		.drawer { width: 100vw; }
 		.method-grid { grid-template-columns: 1fr; }
