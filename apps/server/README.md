@@ -38,13 +38,14 @@ When the database has no users yet, create the initial admin account through `/a
 You can place env vars in `apps/server/.env` (auto-loaded at startup), or export them in your shell.
 
 ```bash
-export SANDBOX_JWT_SECRET="dev-jwt-signing-secret"
-go run .
+bun run dev:server
 ```
 
-From the monorepo root, run `go run ./apps/server`.
+This uses `go tool air -c .air.toml` for hot reload. From `apps/server`, you can run the same watcher directly with `SANDBOX_JWT_SECRET=dev-jwt-signing-secret go tool air -c .air.toml`.
 
 Server defaults to `:8080` (override with `PORT`).
+
+When started through Turbo, the working directory is `apps/server`, so the default SQLite path `open-sandbox.db` resolves there unless `SANDBOX_DB_PATH` is set.
 
 ## Swagger
 
@@ -309,10 +310,10 @@ Use `/auth/login` to get short-lived tokens.
 Unit tests for auth + endpoint handler behavior:
 
 ```bash
-go test ./...
+bun run test:server
 ```
 
-From the monorepo root, run `go test ./apps/server/...`.
+From `apps/server`, you can still run `go test ./...` directly.
 
 Focused endpoint tests:
 

@@ -1,7 +1,12 @@
 apps/server/.env
 apps/server/open-sandbox.db
 apps/server/open-sandbox
+apps/server/tmp/
 .DS_Store
+node_modules/
+.turbo/
 
 # opensrc - source code for packages
 opensrc/
+
+.env

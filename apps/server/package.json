@@ -1,0 +1,10 @@
+{
+	"name": "server",
+	"private": true,
+	"version": "0.0.1",
+	"scripts": {
+		"dev": "SANDBOX_JWT_SECRET=${SANDBOX_JWT_SECRET:-dev-jwt-signing-secret} go tool air -c .air.toml",
+		"build": "go build -o open-sandbox .",
+		"test": "go test ./..."
+	}
+}

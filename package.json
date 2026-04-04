@@ -1,0 +1,23 @@
+{
+	"name": "open-sandbox",
+	"private": true,
+	"packageManager": "bun@1.3.5",
+	"workspaces": [
+		"apps/*"
+	],
+	"scripts": {
+		"dev": "turbo run dev",
+		"dev:client": "turbo run dev --filter=./apps/client",
+		"dev:server": "turbo run dev --filter=./apps/server",
+		"build": "turbo run build",
+		"build:client": "turbo run build --filter=./apps/client",
+		"build:server": "turbo run build --filter=./apps/server",
+		"check": "turbo run check",
+		"check:client": "turbo run check --filter=./apps/client",
+		"test": "turbo run test",
+		"test:server": "turbo run test --filter=./apps/server"
+	},
+	"devDependencies": {
+		"turbo": "^2.5.8"
+	}
+}

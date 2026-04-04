@@ -12,39 +12,37 @@ Monorepo for the open-sandbox backend and dashboard.
 `apps/server` auto-loads a local `.env` file via `godotenv`, so you can set env vars there.
 
 ```bash
-export SANDBOX_JWT_SECRET="dev-jwt-signing-secret"
-go run ./apps/server
+bun install
+bun run dev
 ```
 
 On first launch, create the initial admin account from the UI login screen.
-
-In a second terminal, run the dashboard:
-
-```bash
-bun --cwd apps/client install
-bun --cwd apps/client dev
-```
 
 Default URLs:
 - API: `http://localhost:8080`
 - UI: `http://localhost:5173`
 
-Or run both together:
+Run individual apps when needed:
 
 ```bash
-make dev
+bun run dev:server
+bun run dev:client
 ```
+
+`bun run dev:server` uses `air` for Go hot reload, with a local fallback `SANDBOX_JWT_SECRET` for development.
+
+The server now runs from `apps/server` under Turbo, so its default SQLite file is created at `apps/server/open-sandbox.db` unless `SANDBOX_DB_PATH` is set.
 
 ## Run server tests
 
 ```bash
-go test ./apps/server/...
+bun run test:server
 ```
 
 ## Run client checks
 
 ```bash
-bun --cwd apps/client check
+bun run check:client
 ```
 
 ## Helpful Make targets
@@ -54,5 +52,7 @@ make test-server
 make check-client
 make build-client
 ```
+
+The Make targets are thin wrappers around the root Bun/Turbo scripts, so `bun run ...` and `make ...` are interchangeable for the common workflows above.
 
 More API usage docs are in `apps/server/README.md`.

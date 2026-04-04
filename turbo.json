@@ -1,0 +1,24 @@
+{
+	"$schema": "https://turborepo.dev/schema.json",
+	"envMode": "strict",
+	"globalDependencies": ["go.work", "go.work.sum"],
+	"globalPassThroughEnv": ["SANDBOX_*", "PORT", "VITE_*"],
+	"tasks": {
+		"dev": {
+			"cache": false,
+			"persistent": true
+		},
+		"build": {
+			"env": ["VITE_*"],
+			"outputs": ["build/**", ".svelte-kit/**", "open-sandbox"]
+		},
+		"check": {
+			"env": ["VITE_*"],
+			"outputs": []
+		},
+		"test": {
+			"env": ["SANDBOX_*", "PORT", "VITE_*"],
+			"outputs": []
+		}
+	}
+}

@@ -1,19 +1,19 @@
 .PHONY: server client dev test-server check-client build-client
 
 server:
-	go run ./apps/server
+	bun run dev:server
 
 client:
-	bun --cwd apps/client dev
+	bun run dev:client
 
 dev:
-	@trap 'kill 0' EXIT; $(MAKE) server & $(MAKE) client
+	bun run dev
 
 test-server:
-	go test ./apps/server/...
+	bun run test:server
 
 check-client:
-	bun --cwd apps/client check
+	bun run check:client
 
 build-client:
-	bun --cwd apps/client build
+	bun run build:client
