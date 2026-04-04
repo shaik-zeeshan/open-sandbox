@@ -112,6 +112,36 @@ func (s *Server) listContainers(c *gin.Context) {
 	c.JSON(http.StatusOK, containers)
 }
 
+func (s *Server) restartContainer(c *gin.Context) {
+	containerID := strings.TrimSpace(c.Param("id"))
+	if containerID == "" {
+		writeError(c, http.StatusBadRequest, errors.New("container id is required"))
+		return
+	}
+
+	inspect, err := s.docker.ContainerInspect(c.Request.Context(), containerID)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+	if inspect.State != nil && inspect.State.Running {
+		if err := s.docker.ContainerStop(c.Request.Context(), containerID, container.StopOptions{}); err != nil {
+			writeError(c, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	if err := s.docker.ContainerStart(c.Request.Context(), containerID, container.StartOptions{}); err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+
+	if s.sandboxStore != nil {
+		_ = s.sandboxStore.UpdateSandboxStatusByContainerID(c.Request.Context(), containerID, "running")
+	}
+
+	c.JSON(http.StatusOK, gin.H{"container_id": containerID, "restarted": true})
+}
+
 func (s *Server) stopContainer(c *gin.Context) {
 	containerID := strings.TrimSpace(c.Param("id"))
 	if containerID == "" {
@@ -170,6 +200,20 @@ func (s *Server) readContainerFile(c *gin.Context) {
 
 func (s *Server) writeContainerFile(c *gin.Context) {
 	containerID := strings.TrimSpace(c.Param("id"))
+	if strings.Contains(strings.ToLower(c.GetHeader("Content-Type")), "application/json") {
+		var req SaveFileRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			writeError(c, http.StatusBadRequest, err)
+			return
+		}
+		if err := s.writeContainerFileByID(c.Request.Context(), containerID, req.TargetPath, path.Base(req.TargetPath), strings.NewReader(req.Content)); err != nil {
+			writeError(c, http.StatusInternalServerError, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"container_id": containerID, "path": req.TargetPath, "saved": true})
+		return
+	}
+
 	targetPath := strings.TrimSpace(c.PostForm("target_path"))
 	if targetPath == "" {
 		writeError(c, http.StatusBadRequest, errors.New("target_path form field is required"))

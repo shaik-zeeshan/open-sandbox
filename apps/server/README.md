@@ -26,7 +26,7 @@ Optional:
 - `SANDBOX_JWT_TTL`: token lifetime (default `15m`)
 - `SANDBOX_JWT_ISSUER`: issuer claim (default `open-sandbox`)
 - `SANDBOX_CORS_ORIGINS`: comma-separated origins (default `http://localhost:5173,http://127.0.0.1:5173`)
-- `SANDBOX_WORKSPACE_DIR`: base directory for `context_path` (default current working directory)
+- `SANDBOX_WORKSPACE_DIR`: base directory for `context_path` and managed compose projects (default user home directory)
 - `SANDBOX_DB_PATH`: SQLite path for sandbox metadata (default resolves to `apps/server/open-sandbox.db` in the repo layout)
 
 `/health` is intentionally public.
@@ -46,6 +46,8 @@ This uses `go tool air -c .air.toml` for hot reload. From `apps/server`, you can
 Server defaults to `:8080` (override with `PORT`).
 
 When `SANDBOX_DB_PATH` is not set, the server detects the repo layout and stores SQLite data in `apps/server/open-sandbox.db` by default, including when `air` runs the compiled binary from `apps/server/tmp`.
+
+When `SANDBOX_WORKSPACE_DIR` is not set, the workspace root defaults to the current user's home directory.
 
 ## Swagger
 
@@ -159,6 +161,8 @@ curl -X DELETE "$BASE_URL/api/images/alpine:3.20?force=true" \
 
 ### Compose up
 
+Compose projects are written to `<workspace-root>/.open-sandbox/compose/<project-name>/docker-compose.yml` before `docker compose` runs, so naming and relative paths use a stable managed directory instead of a random temp file.
+
 ```bash
 curl -X POST "$BASE_URL/api/compose/up" \
   -H "$AUTH_HEADER" \
@@ -170,6 +174,8 @@ curl -X POST "$BASE_URL/api/compose/up" \
     "services": ["app"]
   }'
 ```
+
+Use `project_name` whenever possible. It becomes both the Docker Compose project name and the managed directory name under `.open-sandbox/compose`.
 
 ### Compose down
 

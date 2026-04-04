@@ -1,5 +1,6 @@
 <script lang="ts">
 	import SandboxCard from "./SandboxCard.svelte";
+	import RuntimeContainerCard from "./RuntimeContainerCard.svelte";
 	import Combobox from "./Combobox.svelte";
 	import CodeEditor from "./CodeEditor.svelte";
 	import PortsEditor from "./PortsEditor.svelte";
@@ -19,6 +20,10 @@
 		onReset,
 		onStop,
 		onDelete,
+		onOpenContainer,
+		onRestartContainer,
+		onStopContainer,
+		onRemoveContainer,
 		onRefresh,
 		showCreateForm,
 		createName = $bindable(),
@@ -61,6 +66,10 @@
 		onReset: (id: string) => void;
 		onStop: (id: string) => void;
 		onDelete: (id: string) => void;
+		onOpenContainer: (id: string) => void;
+		onRestartContainer: (id: string) => void;
+		onStopContainer: (id: string) => void;
+		onRemoveContainer: (id: string) => void;
 		onRefresh: () => void;
 		showCreateForm: boolean;
 		createName: string;
@@ -152,15 +161,18 @@
 
 	// ANSI stripping for pipeline log display (display only, not storage)
 	const stripAnsi = (str: string): string => str.replace(/\x1b\[[0-9;]*[mGKHF]/g, "");
+	const sandboxContainerIDs = $derived(new Set(sandboxes.map((sandbox: Sandbox) => sandbox.container_id)));
+	const runtimeContainers = $derived(containers.filter((container: ContainerSummary) => !sandboxContainerIDs.has(container.id)));
+	const workloadCount = $derived(sandboxes.length + runtimeContainers.length);
 </script>
 
 <div class="list-view anim-fade-up">
 	<!-- Page header -->
 	<div class="list-header">
-		<div class="list-title-group">
-			<h1 class="list-title">Sandboxes</h1>
-			{#if sandboxes.length > 0}
-				<span class="list-count">{sandboxes.length}</span>
+	<div class="list-title-group">
+			<h1 class="list-title">Workloads</h1>
+			{#if workloadCount > 0}
+				<span class="list-count">{workloadCount}</span>
 			{/if}
 		</div>
 		<div class="list-actions">
@@ -183,36 +195,66 @@
 	{#if notice}<p class="alert-ok anim-fade-up">{notice}</p>{/if}
 
 	<!-- Card grid -->
-	{#if sandboxes.length === 0 && !showCreateForm}
+	{#if sandboxes.length === 0 && runtimeContainers.length === 0 && !showCreateForm}
 		<div class="empty-state anim-fade-up anim-delay-1">
 			<div class="empty-icon">
 				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
 					<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
 				</svg>
 			</div>
-			<p class="empty-title">{loading ? "Loading..." : "No sandboxes yet"}</p>
+			<p class="empty-title">{loading ? "Loading..." : "No workloads yet"}</p>
 			{#if !loading}
-				<p class="empty-sub">Create your first sandbox to get started.</p>
+				<p class="empty-sub">Create a sandbox or run a compose project to get started.</p>
 				<button class="btn-ghost btn-sm" type="button" onclick={onToggleCreate}>+ New sandbox</button>
 			{/if}
 		</div>
-	{:else if sandboxes.length > 0}
-		<div class="sandbox-grid">
-			{#each sandboxes as sandbox, i (sandbox.id)}
-				<div class="anim-fade-up" style="animation-delay: {i * 0.035}s">
-					<SandboxCard
-						{sandbox}
-						container={containers.find((c: ContainerSummary) => c.id === sandbox.container_id) ?? null}
-						isSelected={false}
-						onOpen={() => onOpen(sandbox.id)}
-						onRestart={() => onRestart(sandbox.id)}
-						onReset={() => onReset(sandbox.id)}
-						onStop={() => onStop(sandbox.id)}
-						onDelete={() => onDelete(sandbox.id)}
-					/>
+	{:else}
+		{#if sandboxes.length > 0}
+			<div class="section-block">
+				<div class="section-heading-row">
+					<h2 class="section-heading">Sandboxes</h2>
+					<span class="section-count">{sandboxes.length}</span>
 				</div>
-			{/each}
-		</div>
+				<div class="sandbox-grid">
+					{#each sandboxes as sandbox, i (sandbox.id)}
+						<div class="anim-fade-up" style="animation-delay: {i * 0.035}s">
+							<SandboxCard
+								{sandbox}
+								container={containers.find((c: ContainerSummary) => c.id === sandbox.container_id) ?? null}
+								isSelected={false}
+								onOpen={() => onOpen(sandbox.id)}
+								onRestart={() => onRestart(sandbox.id)}
+								onReset={() => onReset(sandbox.id)}
+								onStop={() => onStop(sandbox.id)}
+								onDelete={() => onDelete(sandbox.id)}
+							/>
+						</div>
+					{/each}
+				</div>
+			</div>
+		{/if}
+
+		{#if runtimeContainers.length > 0}
+			<div class="section-block">
+				<div class="section-heading-row">
+					<h2 class="section-heading">Runtime containers</h2>
+					<span class="section-count">{runtimeContainers.length}</span>
+				</div>
+				<div class="sandbox-grid">
+					{#each runtimeContainers as container, i (container.id)}
+						<div class="anim-fade-up" style="animation-delay: {i * 0.035}s">
+							<RuntimeContainerCard
+								{container}
+								onOpen={() => onOpenContainer(container.id)}
+								onRestart={() => onRestartContainer(container.id)}
+								onStop={() => onStopContainer(container.id)}
+								onRemove={() => onRemoveContainer(container.id)}
+							/>
+						</div>
+					{/each}
+				</div>
+			</div>
+		{/if}
 	{/if}
 </div>
 
@@ -245,13 +287,15 @@
 	<div class="drawer-body">
 		<fieldset class="create-fieldset" disabled={createLoading}>
 
-			<!-- Name -->
-			<div class="form-section">
-				<label class="field-col">
-					<span class="section-label">Sandbox name</span>
-					<input class="field" bind:value={createName} placeholder="my-workspace" required />
-				</label>
-			</div>
+			{#if createMethod !== "compose"}
+				<!-- Name -->
+				<div class="form-section">
+					<label class="field-col">
+						<span class="section-label">Sandbox name</span>
+						<input class="field" bind:value={createName} placeholder="my-workspace" required />
+					</label>
+				</div>
+			{/if}
 
 			<!-- Method -->
 			<div class="form-section">
@@ -355,12 +399,12 @@
 				<div class="form-section">
 					<div class="compose-note">
 						<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-						<span>Docker Compose runs services directly — no sandbox image is created. The Name and Runtime options below are not used for this method.</span>
+						<span>Docker Compose runs services directly and stores the submitted project under <code class="inline-code">.open-sandbox/compose</code> inside the server workspace root.</span>
 					</div>
 					<label class="field-col">
-						<span class="section-label">Project name <span class="opt">(optional)</span></span>
-						<input class="field" bind:value={createComposeProjectName} placeholder="my-project" />
-						<span class="field-help">Defaults to the directory name. Used to namespace compose resources.</span>
+						<span class="section-label">Project name</span>
+						<input class="field" bind:value={createComposeProjectName} placeholder="my-project" required />
+						<span class="field-help">Used for the Docker Compose project name and the managed directory under <code class="inline-code">.open-sandbox/compose</code>.</span>
 					</label>
 					<div class="field-col">
 						<span class="section-label">docker-compose.yml</span>
@@ -478,6 +522,39 @@
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
+	}
+
+	.section-block {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+	}
+
+	.section-heading-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.75rem;
+	}
+
+	.section-heading {
+		margin: 0;
+		font-family: var(--font-mono);
+		font-size: 0.72rem;
+		font-weight: 500;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-muted);
+	}
+
+	.section-count {
+		font-family: var(--font-mono);
+		font-size: 0.62rem;
+		color: var(--text-muted);
+		background: var(--bg-raised);
+		border: 1px solid var(--border-dim);
+		border-radius: 3px;
+		padding: 0.1rem 0.45rem;
 	}
 
 	/* Empty state */

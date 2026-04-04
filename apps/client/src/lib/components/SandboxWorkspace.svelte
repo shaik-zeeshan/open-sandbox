@@ -5,13 +5,19 @@
 	import {
 		deleteSandbox,
 		formatApiFailure,
+		readContainerFile,
 		readSandboxFile,
+		removeContainer,
+		restartContainer,
 		resetSandbox,
 		resolveApiUrl,
 		restartSandbox,
 		runApiEffect,
+		saveContainerFile,
 		saveSandboxFile,
+		stopContainer,
 		stopSandbox,
+		uploadContainerFile,
 		uploadSandboxFile,
 		type ApiConfig,
 		type ContainerSummary,
@@ -23,15 +29,17 @@
 	type WorkspaceTab = "overview" | "terminal" | "files" | "logs";
 
 	let {
-		sandbox,
+		sandbox = null,
 		container,
+		runtimeContainer = null,
 		config,
 		onBack,
 		onRefresh,
 		onDeleted
 	} = $props<{
-		sandbox: Sandbox;
+		sandbox?: Sandbox | null;
 		container: ContainerSummary | null;
+		runtimeContainer?: ContainerSummary | null;
 		config: ApiConfig;
 		onBack: () => void;
 		onRefresh: () => void;
@@ -108,8 +116,20 @@
 		return { label: "idle", cls: "idle" };
 	};
 
-	const st = $derived(statusInfo(sandbox.status));
-	const ports = $derived(previewLinks(container?.ports));
+	const workloadKind = $derived(runtimeContainer ? "container" : "sandbox");
+	const workloadLabel = $derived(workloadKind === "sandbox" ? "sandbox" : "container");
+	const activeContainer = $derived(runtimeContainer ?? container);
+	const targetId = $derived(workloadKind === "sandbox" ? (sandbox?.id ?? "") : (runtimeContainer?.id ?? ""));
+	const backingContainerId = $derived(runtimeContainer?.id ?? sandbox?.container_id ?? container?.id ?? "");
+	const workspaceDirValue = $derived(sandbox?.workspace_dir ?? "/");
+	const workloadName = $derived(runtimeContainer?.names[0] ?? sandbox?.name ?? runtimeContainer?.id.slice(0, 12) ?? "Container");
+	const workloadImage = $derived(runtimeContainer?.image ?? sandbox?.image ?? activeContainer?.image ?? "");
+	const workloadStatus = $derived(activeContainer?.status ?? sandbox?.status ?? "");
+	const workloadCreatedAt = $derived(sandbox?.created_at ?? 0);
+	const st = $derived(statusInfo(workloadStatus));
+	const ports = $derived(previewLinks(activeContainer?.ports));
+	const canReset = $derived(workloadKind === "sandbox");
+	const canBrowseFiles = $derived(backingContainerId.length > 0);
 
 	const formatDate = (unixSeconds: number): string =>
 		new Date(unixSeconds * 1000).toLocaleString(undefined, {
@@ -139,7 +159,7 @@
 
 	// Load the workspace dir on mount
 	onMount(() => {
-		const initialWorkspaceDir = sandbox.workspace_dir ?? "/";
+		const initialWorkspaceDir = workspaceDirValue;
 		browsePath = initialWorkspaceDir;
 		uploadPath = defaultUploadPath(initialWorkspaceDir);
 		void loadPath(initialWorkspaceDir);
@@ -151,7 +171,9 @@
 		readLoading = true;
 		errorMessage = "";
 		try {
-			filePayload = await readSandboxFile(config, sandbox.id, pathToLoad.trim());
+			filePayload = workloadKind === "sandbox"
+				? await readSandboxFile(config, targetId, pathToLoad.trim())
+				: await readContainerFile(config, backingContainerId, pathToLoad.trim());
 			browsePath = pathToLoad.trim();
 			editorContent = filePayload.kind === "file" ? filePayload.content ?? "" : "";
 		} catch (error) {
@@ -166,7 +188,11 @@
 		saveLoading = true;
 		errorMessage = ""; notice = "";
 		try {
-			await saveSandboxFile(config, sandbox.id, browsePath, editorContent);
+			if (workloadKind === "sandbox") {
+				await saveSandboxFile(config, targetId, browsePath, editorContent);
+			} else {
+				await saveContainerFile(config, backingContainerId, browsePath, editorContent);
+			}
 			notice = "File saved.";
 			filePayload = { ...filePayload, content: editorContent };
 		} catch (error) {
@@ -181,7 +207,11 @@
 		uploadLoading = true;
 		errorMessage = ""; notice = "";
 		try {
-			await uploadSandboxFile(config, sandbox.id, uploadPath.trim(), uploadFile);
+			if (workloadKind === "sandbox") {
+				await uploadSandboxFile(config, targetId, uploadPath.trim(), uploadFile);
+			} else {
+				await uploadContainerFile(config, backingContainerId, uploadPath.trim(), uploadFile);
+			}
 			notice = "File uploaded.";
 			await loadPath(filePayload?.kind === "directory" ? browsePath : parentPath(uploadPath));
 		} catch (error) {
@@ -204,7 +234,7 @@
 		logsAbortController = controller;
 		streaming = true;
 		try {
-			const url = resolveApiUrl(config, `/api/sandboxes/${encodeURIComponent(sandbox.id)}/logs`, {
+			const url = resolveApiUrl(config, `/api/${workloadKind === "sandbox" ? "sandboxes" : "containers"}/${encodeURIComponent(targetId)}/logs`, {
 				follow: logFollow,
 				tail: logTail.trim() || "100"
 			});
@@ -254,10 +284,38 @@
 		actionLoading = action;
 		errorMessage = ""; notice = "";
 		try {
-			if (action === "restart") { await runApiEffect(restartSandbox(config, sandbox.id)); notice = "Restarted."; onRefresh(); }
-			else if (action === "reset") { await runApiEffect(resetSandbox(config, sandbox.id)); notice = "Reset to clean workspace."; onRefresh(); await loadPath(sandbox.workspace_dir ?? "/"); }
-			else if (action === "stop") { await runApiEffect(stopSandbox(config, sandbox.id)); notice = "Stopped."; onRefresh(); }
-			else if (action === "delete") { await runApiEffect(deleteSandbox(config, sandbox.id)); onDeleted(); }
+			if (action === "restart") {
+				if (workloadKind === "sandbox") {
+					await runApiEffect(restartSandbox(config, targetId));
+				} else {
+					await runApiEffect(restartContainer(config, targetId));
+				}
+				notice = "Restarted.";
+				onRefresh();
+			} else if (action === "reset") {
+				if (workloadKind !== "sandbox") {
+					throw new Error("Reset is only available for managed sandboxes.");
+				}
+				await runApiEffect(resetSandbox(config, targetId));
+				notice = "Reset to clean workspace.";
+				onRefresh();
+				await loadPath(workspaceDirValue);
+			} else if (action === "stop") {
+				if (workloadKind === "sandbox") {
+					await runApiEffect(stopSandbox(config, targetId));
+				} else {
+					await runApiEffect(stopContainer(config, targetId));
+				}
+				notice = "Stopped.";
+				onRefresh();
+			} else if (action === "delete") {
+				if (workloadKind === "sandbox") {
+					await runApiEffect(deleteSandbox(config, targetId));
+				} else {
+					await runApiEffect(removeContainer(config, targetId));
+				}
+				onDeleted();
+			}
 		} catch (error) {
 			errorMessage = formatApiFailure(error);
 		} finally {
@@ -284,7 +342,7 @@
 			</button>
 			<div class="ws-identity">
 				<div class="ws-status-dot ws-status-dot--{st.cls}"></div>
-				<h1 class="ws-title">{sandbox.name}</h1>
+				<h1 class="ws-title">{workloadName}</h1>
 				<span class="ws-status-badge ws-status-badge--{st.cls}">{st.label}</span>
 			</div>
 		</div>
@@ -310,9 +368,11 @@
 				<button class="action-btn" type="button" onclick={() => void handleAction("stop")} disabled={actionLoading !== null}>
 					{actionLoading === "stop" ? "..." : "Stop"}
 				</button>
-				<button class="action-btn" type="button" onclick={() => void handleAction("reset")} disabled={actionLoading !== null}>
-					{actionLoading === "reset" ? "..." : "Reset"}
-				</button>
+				{#if canReset}
+					<button class="action-btn" type="button" onclick={() => void handleAction("reset")} disabled={actionLoading !== null}>
+						{actionLoading === "reset" ? "..." : "Reset"}
+					</button>
+				{/if}
 				<button
 					class="action-btn action-btn--danger"
 					class:action-btn--confirming={deleteConfirm}
@@ -320,7 +380,7 @@
 					onclick={requestDelete}
 					disabled={actionLoading !== null}
 				>
-					{actionLoading === "delete" ? "..." : deleteConfirm ? "Confirm?" : "Delete"}
+					{actionLoading === "delete" ? "..." : deleteConfirm ? "Confirm?" : workloadKind === "sandbox" ? "Delete" : "Remove"}
 				</button>
 			</div>
 		</div>
@@ -364,20 +424,22 @@
 				<div class="meta-grid">
 					<div class="meta-card">
 						<span class="meta-label">Image</span>
-						<span class="meta-value">{sandbox.image}</span>
+						<span class="meta-value">{workloadImage}</span>
 					</div>
 					<div class="meta-card">
 						<span class="meta-label">Container ID</span>
-						<span class="meta-value mono">{sandbox.container_id.slice(0, 16)}</span>
+						<span class="meta-value mono">{backingContainerId.slice(0, 16)}</span>
 					</div>
 					<div class="meta-card">
-						<span class="meta-label">Workspace</span>
-						<span class="meta-value mono">{sandbox.workspace_dir}</span>
+						<span class="meta-label">{workloadKind === "sandbox" ? "Workspace" : "Default path"}</span>
+						<span class="meta-value mono">{workspaceDirValue}</span>
 					</div>
-					<div class="meta-card">
-						<span class="meta-label">Created</span>
-						<span class="meta-value">{formatDate(sandbox.created_at)}</span>
-					</div>
+					{#if workloadCreatedAt > 0}
+						<div class="meta-card">
+							<span class="meta-label">Created</span>
+							<span class="meta-value">{formatDate(workloadCreatedAt)}</span>
+						</div>
+					{/if}
 					{#if ports.length > 0}
 						<div class="meta-card meta-card--wide">
 							<span class="meta-label">Exposed ports</span>
@@ -397,9 +459,9 @@
 							<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
 						</svg>
 						<span class="quick-btn-label">Open Terminal</span>
-						<span class="quick-btn-sub">Run commands in this sandbox</span>
+						<span class="quick-btn-sub">Run commands in this {workloadLabel}</span>
 					</button>
-					<button class="quick-btn" type="button" onclick={() => activeTab = "files"}>
+					<button class="quick-btn" type="button" onclick={() => activeTab = "files"} disabled={!canBrowseFiles}>
 						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
 							<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/>
 						</svg>
@@ -419,7 +481,7 @@
 
 		<!-- Terminal -->
 		{#if activeTab === "terminal"}
-			<SandboxTerminal sandboxId={sandbox.id} workspaceDir={sandbox.workspace_dir} {config} />
+			<SandboxTerminal targetId={targetId} targetType={workloadKind} workspaceDir={workspaceDirValue} {config} />
 		{/if}
 
 		<!-- Files -->

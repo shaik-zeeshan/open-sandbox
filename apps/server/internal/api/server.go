@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -93,6 +94,13 @@ type Server struct {
 }
 
 var commandRunner = runCommand
+var commandRunnerInDir = runCommandInDir
+
+type composeProjectContext struct {
+	ProjectName string
+	ProjectDir  string
+	ComposeFile string
+}
 
 type ErrorResponse struct {
 	Error  string `json:"error"`
@@ -286,6 +294,7 @@ func (s *Server) registerRoutes() {
 
 		api.GET("/containers", s.listContainers)
 		api.POST("/containers/create", s.createContainer)
+		api.POST("/containers/:id/restart", s.restartContainer)
 		api.POST("/containers/:id/stop", s.stopContainer)
 		api.DELETE("/containers/:id", s.removeContainer)
 		api.POST("/containers/:id/exec", s.execInContainer)
@@ -549,14 +558,13 @@ func (s *Server) composeUp(c *gin.Context) {
 		return
 	}
 
-	composeFile, cleanup, err := writeTempComposeFile(req.Content)
+	project, err := s.prepareComposeProject(req)
 	if err != nil {
 		writeError(c, http.StatusBadRequest, err)
 		return
 	}
-	defer cleanup()
 
-	args := buildComposeArgs(composeFile, req, "up", "-d")
+	args := buildComposeArgs(project, req, "up", "-d")
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		writeError(c, http.StatusInternalServerError, errors.New("streaming not supported"))
@@ -564,6 +572,7 @@ func (s *Server) composeUp(c *gin.Context) {
 	}
 
 	cmd := exec.CommandContext(c.Request.Context(), "docker", args...)
+	cmd.Dir = project.ProjectDir
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
@@ -643,15 +652,14 @@ func (s *Server) composeDown(c *gin.Context) {
 		return
 	}
 
-	composeFile, cleanup, err := writeTempComposeFile(req.Content)
+	project, err := s.prepareComposeProject(req)
 	if err != nil {
 		writeError(c, http.StatusBadRequest, err)
 		return
 	}
-	defer cleanup()
 
-	args := buildComposeArgs(composeFile, req, "down")
-	stdout, stderr, err := commandRunner(c.Request.Context(), "docker", args...)
+	args := buildComposeArgs(project, req, "down")
+	stdout, stderr, err := commandRunnerInDir(c.Request.Context(), project.ProjectDir, "docker", args...)
 	if err != nil {
 		writeErrorWithDetails(c, http.StatusInternalServerError, "compose down failed", "command_failed", strings.TrimSpace(stderr))
 		return
@@ -678,15 +686,14 @@ func (s *Server) composeStatus(c *gin.Context) {
 		return
 	}
 
-	composeFile, cleanup, err := writeTempComposeFile(req.Content)
+	project, err := s.prepareComposeProject(req)
 	if err != nil {
 		writeError(c, http.StatusBadRequest, err)
 		return
 	}
-	defer cleanup()
 
-	args := buildComposeArgs(composeFile, req, "ps", "--format", "json")
-	stdout, stderr, err := commandRunner(c.Request.Context(), "docker", args...)
+	args := buildComposeArgs(project, req, "ps", "--format", "json")
+	stdout, stderr, err := commandRunnerInDir(c.Request.Context(), project.ProjectDir, "docker", args...)
 	if err != nil {
 		writeErrorWithDetails(c, http.StatusInternalServerError, "compose status failed", "command_failed", strings.TrimSpace(stderr))
 		return
@@ -1143,11 +1150,8 @@ func emitSSE(c *gin.Context, mu *sync.Mutex, event string, data string) {
 	flusher.Flush()
 }
 
-func buildComposeArgs(composeFile string, req ComposeRequest, cmd string, extra ...string) []string {
-	args := []string{"compose", "-f", composeFile}
-	if req.ProjectName != "" {
-		args = append(args, "-p", req.ProjectName)
-	}
+func buildComposeArgs(project composeProjectContext, req ComposeRequest, cmd string, extra ...string) []string {
+	args := []string{"compose", "--project-name", project.ProjectName, "--project-directory", project.ProjectDir, "-f", project.ComposeFile}
 
 	args = append(args, cmd)
 	if cmd == "down" {
@@ -1166,37 +1170,83 @@ func buildComposeArgs(composeFile string, req ComposeRequest, cmd string, extra 
 	return args
 }
 
-func writeTempComposeFile(content string) (string, func(), error) {
+func (s *Server) prepareComposeProject(req ComposeRequest) (composeProjectContext, error) {
+	composeRoot := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose")
+	projectName := composeProjectName(req.ProjectName, req.Content)
+	projectDir := filepath.Join(composeRoot, projectName)
+	composeFile, err := writeManagedComposeFile(projectDir, req.Content)
+	if err != nil {
+		return composeProjectContext{}, err
+	}
+
+	return composeProjectContext{
+		ProjectName: projectName,
+		ProjectDir:  projectDir,
+		ComposeFile: composeFile,
+	}, nil
+}
+
+func composeProjectName(raw string, content string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed != "" {
+		sanitized := sanitizeComposeProjectName(trimmed)
+		if sanitized != "" {
+			return sanitized
+		}
+	}
+
+	sum := sha256.Sum256([]byte(content))
+	return fmt.Sprintf("compose-%x", sum[:6])
+}
+
+func sanitizeComposeProjectName(raw string) string {
+	var b strings.Builder
+	b.Grow(len(raw))
+	lastWasDash := false
+	for _, r := range strings.ToLower(strings.TrimSpace(raw)) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastWasDash = false
+		case r == '-', r == '_':
+			b.WriteRune(r)
+			lastWasDash = false
+		case !lastWasDash:
+			b.WriteByte('-')
+			lastWasDash = true
+		}
+	}
+
+	return strings.Trim(b.String(), "-_")
+}
+
+func writeManagedComposeFile(projectDir string, content string) (string, error) {
 	trimmed := strings.TrimSpace(content)
 	if trimmed == "" {
-		return "", nil, errors.New("compose content is required")
+		return "", errors.New("compose content is required")
 	}
 
-	f, err := os.CreateTemp("", "open-sandbox-compose-*.yaml")
-	if err != nil {
-		return "", nil, fmt.Errorf("create compose temp file: %w", err)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		return "", fmt.Errorf("create compose project dir: %w", err)
 	}
 
-	if _, err := f.WriteString(content); err != nil {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
-		return "", nil, fmt.Errorf("write compose temp file: %w", err)
+	composeFile := filepath.Join(projectDir, "docker-compose.yml")
+	if err := os.WriteFile(composeFile, []byte(content), 0o644); err != nil {
+		return "", fmt.Errorf("write compose file: %w", err)
 	}
 
-	if err := f.Close(); err != nil {
-		_ = os.Remove(f.Name())
-		return "", nil, fmt.Errorf("close compose temp file: %w", err)
-	}
-
-	cleanup := func() {
-		_ = os.Remove(f.Name())
-	}
-
-	return f.Name(), cleanup, nil
+	return composeFile, nil
 }
 
 func runCommand(ctx context.Context, name string, args ...string) (string, string, error) {
+	return runCommandInDir(ctx, "", name, args...)
+}
+
+func runCommandInDir(ctx context.Context, dir string, name string, args ...string) (string, string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	if strings.TrimSpace(dir) != "" {
+		cmd.Dir = dir
+	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -1597,7 +1647,12 @@ func loadExecWaitTimeout() time.Duration {
 func resolveWorkspaceRoot() string {
 	raw := strings.TrimSpace(os.Getenv("SANDBOX_WORKSPACE_DIR"))
 	if raw == "" {
-		raw = "."
+		homeDir, err := os.UserHomeDir()
+		if err == nil {
+			raw = homeDir
+		} else {
+			raw = "."
+		}
 	}
 
 	resolved, err := filepath.Abs(raw)

@@ -767,6 +767,12 @@ export const stopContainer = (
 ): Effect.Effect<{ container_id: string; stopped: boolean }, ApiFailure, HttpClient.HttpClient> =>
 	postJson(config, `/api/containers/${encodeURIComponent(containerId)}/stop`, {});
 
+export const restartContainer = (
+	config: ApiConfig,
+	containerId: string
+): Effect.Effect<{ container_id: string; restarted: boolean }, ApiFailure, HttpClient.HttpClient> =>
+	postJson(config, `/api/containers/${encodeURIComponent(containerId)}/restart`, {});
+
 export const removeContainer = (
 	config: ApiConfig,
 	containerId: string,
@@ -862,6 +868,49 @@ export const saveSandboxFile = async (
 	fetchJson<{ id: string; path: string; saved: boolean }>(
 		config,
 		`/api/sandboxes/${encodeURIComponent(sandboxId)}/files`,
+		{
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ target_path: targetPath, content })
+		}
+	);
+
+export const readContainerFile = async (
+	config: ApiConfig,
+	containerId: string,
+	filePath: string
+): Promise<FileReadResponse> =>
+	fetchJson<FileReadResponse>(config, `/api/containers/${encodeURIComponent(containerId)}/files?path=${encodeURIComponent(filePath)}`);
+
+export const uploadContainerFile = async (
+	config: ApiConfig,
+	containerId: string,
+	targetPath: string,
+	file: File
+): Promise<{ container_id: string; path: string; uploaded: boolean }> => {
+	const formData = new FormData();
+	formData.set("target_path", targetPath);
+	formData.set("file", file, file.name);
+
+	return fetchJson<{ container_id: string; path: string; uploaded: boolean }>(
+		config,
+		`/api/containers/${encodeURIComponent(containerId)}/files`,
+		{
+			method: "PUT",
+			body: formData
+		}
+	);
+};
+
+export const saveContainerFile = async (
+	config: ApiConfig,
+	containerId: string,
+	targetPath: string,
+	content: string
+): Promise<{ container_id: string; path: string; saved: boolean }> =>
+	fetchJson<{ container_id: string; path: string; saved: boolean }>(
+		config,
+		`/api/containers/${encodeURIComponent(containerId)}/files`,
 		{
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },

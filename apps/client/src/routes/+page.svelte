@@ -19,11 +19,14 @@
 		listSandboxes,
 		login,
 		logout,
+		removeContainer,
 		pullImage,
 		resetSandbox,
+		restartContainer,
 		restartSandbox,
 		runApiEffect,
 		searchImages,
+		stopContainer,
 		stopSandbox,
 		type ContainerSummary,
 		type ImageSearchResult,
@@ -57,14 +60,25 @@
 	let dataNotice = $state("");
 
 	// ── View routing ───────────────────────────────────────────────────────────
-	// null = list view, string = sandbox id = workspace view
-	let activeSandboxId = $state<string | null>(null);
+	type ActiveWorkload = { kind: "sandbox" | "container"; id: string } | null;
+	let activeWorkload = $state<ActiveWorkload>(null);
 
-	const activeSandbox = $derived(
-		activeSandboxId ? (sandboxes.find(s => s.id === activeSandboxId) ?? null) : null
-	);
+	const activeSandbox = $derived.by(() => {
+		const currentActive = activeWorkload;
+		if (currentActive === null || currentActive.kind !== "sandbox") {
+			return null;
+		}
+		return sandboxes.find((s) => s.id === currentActive.id) ?? null;
+	});
+	const activeRuntimeContainer = $derived.by(() => {
+		const currentActive = activeWorkload;
+		if (currentActive === null || currentActive.kind !== "container") {
+			return null;
+		}
+		return containers.find((c) => c.id === currentActive.id) ?? null;
+	});
 	const activeContainer = $derived(
-		activeSandbox ? (containers.find(c => c.id === activeSandbox.container_id) ?? null) : null
+		activeRuntimeContainer ?? (activeSandbox ? (containers.find(c => c.id === activeSandbox.container_id) ?? null) : null)
 	);
 
 	// ── Create form ────────────────────────────────────────────────────────────
@@ -198,7 +212,7 @@
 		loginUsername = "";
 		loginPassword = "";
 		loginError = "";
-		activeSandboxId = null;
+		activeWorkload = null;
 		sandboxes = [];
 		containers = [];
 		images = [];
@@ -278,9 +292,12 @@
 			sandboxes = sb;
 			containers = ct;
 			images = img;
-			// If the active sandbox no longer exists, go back to list
-			if (activeSandboxId && !sb.some(s => s.id === activeSandboxId)) {
-				activeSandboxId = null;
+			const currentActive = activeWorkload;
+			if (currentActive?.kind === "sandbox" && !sb.some((s) => s.id === currentActive.id)) {
+				activeWorkload = null;
+			}
+			if (currentActive?.kind === "container" && !ct.some((c) => c.id === currentActive.id)) {
+				activeWorkload = null;
 			}
 		} catch (err) {
 			dataError = formatApiFailure(err);
@@ -298,7 +315,7 @@
 		try {
 			const parseLines = (v: string) => v.split("\n").map((l) => l.trim()).filter(Boolean);
 			const sandboxName = createName.trim();
-			if (sandboxName.length === 0) {
+			if (createMethod !== "compose" && sandboxName.length === 0) {
 				throw new Error("Sandbox name is required.");
 			}
 
@@ -400,13 +417,16 @@
 			}
 			case "compose": {
 				const content = createComposeContent.trim();
-				const projectName = createComposeProjectName.trim() || undefined;
+				const projectName = createComposeProjectName.trim();
 				if (content.length === 0) {
 					throw new Error("docker-compose.yml content is required.");
 				}
+				if (projectName.length === 0) {
+					throw new Error("Compose project name is required.");
+				}
 
 				createStep = "Running compose";
-				appendCreateLog(`Starting docker compose${projectName ? ` (project: ${projectName})` : ""}...`);
+				appendCreateLog(`Starting docker compose (project: ${projectName})...`);
 				let composeError = "";
 				await composeUpStream(clientState.config, {
 					content,
@@ -450,7 +470,7 @@
 			createPorts = "";
 			await refreshData();
 			// Navigate directly into the new sandbox
-			activeSandboxId = created.id;
+			activeWorkload = { kind: "sandbox", id: created.id };
 		} catch (err) {
 			dataError = formatApiFailure(err);
 		} finally {
@@ -499,13 +519,40 @@
 		try {
 			await runApiEffect(deleteSandbox(clientState.config, id));
 			dataNotice = "Deleted.";
-			if (activeSandboxId === id) activeSandboxId = null;
+			const currentActive = activeWorkload;
+			if (currentActive?.kind === "sandbox" && currentActive.id === id) activeWorkload = null;
 			await refreshData();
 		} catch (err) { dataError = formatApiFailure(err); }
 	}
+	async function handleRestartContainer(id: string): Promise<void> {
+		dataError = ""; dataNotice = "";
+		try { await runApiEffect(restartContainer(clientState.config, id)); dataNotice = "Container restarted."; await refreshData(); }
+		catch (err) { dataError = formatApiFailure(err); }
+	}
+	async function handleStopContainer(id: string): Promise<void> {
+		dataError = ""; dataNotice = "";
+		try { await runApiEffect(stopContainer(clientState.config, id)); dataNotice = "Container stopped."; await refreshData(); }
+		catch (err) { dataError = formatApiFailure(err); }
+	}
+	async function handleRemoveContainer(id: string): Promise<void> {
+		dataError = ""; dataNotice = "";
+		try {
+			await runApiEffect(removeContainer(clientState.config, id));
+			const currentActive = activeWorkload;
+			if (currentActive?.kind === "container" && currentActive.id === id) activeWorkload = null;
+			dataNotice = "Container removed.";
+			await refreshData();
+		}
+		catch (err) { dataError = formatApiFailure(err); }
+	}
 
 	function openSandbox(id: string): void {
-		activeSandboxId = id;
+		activeWorkload = { kind: "sandbox", id };
+		dataError = ""; dataNotice = "";
+	}
+
+	function openContainer(id: string): void {
+		activeWorkload = { kind: "container", id };
 		dataError = ""; dataNotice = "";
 	}
 
@@ -576,15 +623,16 @@
 		currentUsername={clientState.username}
 		currentRole={clientState.role}
 	>
-		{#if activeSandbox}
+		{#if activeSandbox || activeRuntimeContainer}
 			<!-- ── Sandbox Workspace ── -->
 			<SandboxWorkspace
 				sandbox={activeSandbox}
 				container={activeContainer}
+				runtimeContainer={activeRuntimeContainer}
 				config={clientState.config}
-				onBack={() => { activeSandboxId = null; }}
+				onBack={() => { activeWorkload = null; }}
 				onRefresh={() => void refreshData()}
-				onDeleted={() => { activeSandboxId = null; void refreshData(); }}
+				onDeleted={() => { activeWorkload = null; void refreshData(); }}
 			/>
 		{:else}
 			<!-- ── Sandbox List ── -->
@@ -596,10 +644,14 @@
 				errorMessage={dataError}
 				notice={dataNotice}
 				onOpen={(id) => openSandbox(id)}
+				onOpenContainer={(id) => openContainer(id)}
 				onRestart={(id) => void handleRestart(id)}
 				onReset={(id) => void handleReset(id)}
 				onStop={(id) => void handleStop(id)}
 				onDelete={(id) => void handleDelete(id)}
+				onRestartContainer={(id) => void handleRestartContainer(id)}
+				onStopContainer={(id) => void handleStopContainer(id)}
+				onRemoveContainer={(id) => void handleRemoveContainer(id)}
 				onRefresh={() => void refreshData()}
 				{showCreateForm}
 				bind:createName
