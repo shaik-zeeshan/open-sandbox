@@ -391,32 +391,35 @@ func (s *Server) createSandbox(c *gin.Context) {
 	}
 
 	sandboxID := newRequestID()
-	workspaceDir := strings.TrimSpace(req.Workdir)
-	if workspaceDir == "" {
-		workspaceDir = "/workspace"
+	workspaceDir, err := s.resolveSandboxWorkdir(c.Request.Context(), req.Image, req.Workdir)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
 	}
 
-	volumeName := "open-sandbox-" + sandboxID[:12]
-	_, err := s.docker.VolumeCreate(c.Request.Context(), volume.CreateOptions{
-		Name: volumeName,
-		Labels: map[string]string{
-			"open-sandbox.managed":    "true",
-			"open-sandbox.sandbox_id": sandboxID,
-		},
-	})
-	if err != nil {
-		writeError(c, http.StatusInternalServerError, fmt.Errorf("create sandbox volume: %w", err))
-		return
+	volumeName := ""
+	if workspaceDir != "" {
+		volumeName = "open-sandbox-" + sandboxID[:12]
+		_, err = s.docker.VolumeCreate(c.Request.Context(), volume.CreateOptions{
+			Name: volumeName,
+			Labels: map[string]string{
+				"open-sandbox.managed":    "true",
+				"open-sandbox.sandbox_id": sandboxID,
+			},
+		})
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, fmt.Errorf("create sandbox volume: %w", err))
+			return
+		}
 	}
 
 	containerName := fmt.Sprintf("sandbox-%s-%s", sanitizeSandboxName(req.Name), sandboxID[:6])
 
 	containerConfig := &container.Config{
-		Image:      req.Image,
-		Env:        req.Env,
-		WorkingDir: workspaceDir,
-		Tty:        req.TTY,
-		User:       req.User,
+		Image: req.Image,
+		Env:   req.Env,
+		Tty:   req.TTY,
+		User:  req.User,
 		Labels: map[string]string{
 			labelOpenSandboxManaged:       "true",
 			labelOpenSandboxSandboxID:     sandboxID,
@@ -437,13 +440,17 @@ func (s *Server) createSandbox(c *gin.Context) {
 			}(),
 		},
 	}
+	if workspaceDir != "" {
+		containerConfig.WorkingDir = workspaceDir
+	}
 	if len(req.Cmd) > 0 {
 		containerConfig.Cmd = req.Cmd
 	} else if !req.UseImageDefaultCmd {
 		containerConfig.Cmd = []string{"sleep", "infinity"}
 	}
-	hostConfig := &container.HostConfig{
-		Binds: []string{fmt.Sprintf("%s:%s", volumeName, workspaceDir)},
+	hostConfig := &container.HostConfig{}
+	if workspaceDir != "" {
+		hostConfig.Binds = []string{fmt.Sprintf("%s:%s", volumeName, workspaceDir)}
 	}
 
 	if len(req.Ports) > 0 {
@@ -615,24 +622,37 @@ func (s *Server) resetSandbox(c *gin.Context) {
 		}
 	}
 
-	cleanupCmd := []string{"sh", "-lc", fmt.Sprintf("rm -rf %s/* %s/.[!.]* %s/..?* 2>/dev/null || true", shellQuote(sandbox.WorkspaceDir), shellQuote(sandbox.WorkspaceDir), shellQuote(sandbox.WorkspaceDir))}
-	cleanupResp, err := s.runContainerExec(c.Request.Context(), sandbox.ContainerID, ExecRequest{Cmd: cleanupCmd})
-	if err != nil {
-		writeError(c, http.StatusInternalServerError, fmt.Errorf("reset workspace: %w", err))
-		return
-	}
-	if cleanupResp.ExitCode != 0 {
-		writeErrorWithDetails(c, http.StatusInternalServerError, "reset workspace failed", "workspace_reset_failed", strings.TrimSpace(cleanupResp.Stderr))
-		return
-	}
-
 	repoURL := strings.TrimSpace(inspect.Config.Labels["open-sandbox.repo_url"])
 	repoTargetPath := strings.TrimSpace(inspect.Config.Labels["open-sandbox.repo_target_path"])
 	repoBranch := strings.TrimSpace(inspect.Config.Labels["open-sandbox.repo_branch"])
 	if repoURL != "" {
 		if repoTargetPath == "" {
-			repoTargetPath = path.Join(sandbox.WorkspaceDir, "repo")
+			if sandbox.WorkspaceDir != "" {
+				repoTargetPath = path.Join(sandbox.WorkspaceDir, "repo")
+			} else {
+				repoTargetPath = "repo"
+			}
 		}
+	}
+
+	cleanupTargetPath := strings.TrimSpace(sandbox.WorkspaceDir)
+	if cleanupTargetPath == "" {
+		cleanupTargetPath = repoTargetPath
+	}
+	if cleanupTargetPath != "" {
+		cleanupCmd := []string{"sh", "-lc", fmt.Sprintf("rm -rf %s/* %s/.[!.]* %s/..?* 2>/dev/null || true", shellQuote(cleanupTargetPath), shellQuote(cleanupTargetPath), shellQuote(cleanupTargetPath))}
+		cleanupResp, err := s.runContainerExec(c.Request.Context(), sandbox.ContainerID, ExecRequest{Cmd: cleanupCmd})
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, fmt.Errorf("reset workspace: %w", err))
+			return
+		}
+		if cleanupResp.ExitCode != 0 {
+			writeErrorWithDetails(c, http.StatusInternalServerError, "reset workspace failed", "workspace_reset_failed", strings.TrimSpace(cleanupResp.Stderr))
+			return
+		}
+	}
+
+	if repoURL != "" {
 		cloneCmd := []string{"git", "clone"}
 		if repoBranch != "" {
 			cloneCmd = append(cloneCmd, "--branch", repoBranch)
@@ -1134,6 +1154,52 @@ func (s *Server) listRuntimeContainers(ctx context.Context) ([]ContainerSummary,
 	})
 
 	return out, nil
+}
+
+func (s *Server) resolveSandboxWorkdir(ctx context.Context, imageRef string, requestedWorkdir string) (string, error) {
+	if workdir := strings.TrimSpace(requestedWorkdir); workdir != "" {
+		return workdir, nil
+	}
+
+	inspected, err := s.inspectImageWithAutoPull(ctx, imageRef)
+	if err != nil {
+		return "", fmt.Errorf("inspect sandbox image: %w", err)
+	}
+	if inspected.Config != nil {
+		if workdir := strings.TrimSpace(inspected.Config.WorkingDir); workdir != "" {
+			return workdir, nil
+		}
+	}
+
+	return "", nil
+}
+
+func (s *Server) inspectImageWithAutoPull(ctx context.Context, imageRef string) (image.InspectResponse, error) {
+	inspected, err := s.docker.ImageInspect(ctx, imageRef)
+	if err == nil {
+		return inspected, nil
+	}
+
+	if !isMissingImageError(err) {
+		return image.InspectResponse{}, err
+	}
+
+	pullReader, pullErr := s.docker.ImagePull(ctx, imageRef, image.PullOptions{})
+	if pullErr != nil {
+		return image.InspectResponse{}, fmt.Errorf("inspect image failed and auto-pull failed: %w", pullErr)
+	}
+	defer pullReader.Close()
+
+	if _, pullErr := io.Copy(io.Discard, pullReader); pullErr != nil {
+		return image.InspectResponse{}, fmt.Errorf("read pull output: %w", pullErr)
+	}
+
+	inspected, err = s.docker.ImageInspect(ctx, imageRef)
+	if err != nil {
+		return image.InspectResponse{}, fmt.Errorf("inspect image after pull: %w", err)
+	}
+
+	return inspected, nil
 }
 
 func (s *Server) createContainerWithAutoPull(

@@ -126,6 +126,7 @@
 	let createComposeProjectName = $state("");
 	let createRepoUrl = $state("");
 	let createBranch = $state("");
+	let createWorkdir = $state("");
 	let createPorts = $state("");
 	let createLoading = $state(false);
 	let createStep = $state("Idle");
@@ -345,6 +346,7 @@
 		try {
 			const parseLines = (v: string) => v.split("\n").map((l) => l.trim()).filter(Boolean);
 			const sandboxName = createName.trim();
+			const workdir = createWorkdir.trim();
 			if (createMethod !== "compose" && sandboxName.length === 0) {
 				throw new Error("Sandbox name is required.");
 			}
@@ -490,6 +492,7 @@
 				use_image_default_cmd: true,
 				repo_url: createRepoUrl.trim() || undefined,
 				branch: createBranch.trim() || undefined,
+				workdir: workdir || undefined,
 				ports: parseLines(createPorts)
 			}));
 			createStep = "Done";
@@ -497,6 +500,7 @@
 			showCreateForm = false;
 			createRepoUrl = "";
 			createBranch = "";
+			createWorkdir = "";
 			createPorts = "";
 			await refreshData();
 			// Navigate directly into the new sandbox
@@ -730,6 +734,7 @@
 				bind:createComposeProjectName
 				bind:createRepoUrl
 				bind:createBranch
+				bind:createWorkdir
 				bind:createPorts
 				{createLoading}
 				{createStep}

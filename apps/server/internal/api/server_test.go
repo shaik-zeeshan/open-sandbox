@@ -23,17 +23,20 @@ import (
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
+	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/websocket"
+	dockerspec "github.com/moby/docker-image-spec/specs-go/v1"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/shaik-zeeshan/open-sandbox/internal/store"
 )
 
 type mockDocker struct {
 	imageBuildFn           func(context.Context, io.Reader, build.ImageBuildOptions) (build.ImageBuildResponse, error)
+	imageInspectFn         func(context.Context, string) (image.InspectResponse, error)
 	imagePullFn            func(context.Context, string, image.PullOptions) (io.ReadCloser, error)
 	imageListFn            func(context.Context, image.ListOptions) ([]image.Summary, error)
 	imageRemoveFn          func(context.Context, string, image.RemoveOptions) ([]image.DeleteResponse, error)
@@ -69,6 +72,13 @@ func (m *mockDocker) ImageBuild(ctx context.Context, buildContext io.Reader, opt
 		return build.ImageBuildResponse{}, errors.New("not implemented")
 	}
 	return m.imageBuildFn(ctx, buildContext, options)
+}
+
+func (m *mockDocker) ImageInspect(ctx context.Context, imageID string, _ ...client.ImageInspectOption) (image.InspectResponse, error) {
+	if m.imageInspectFn == nil {
+		return image.InspectResponse{}, errors.New("not implemented")
+	}
+	return m.imageInspectFn(ctx, imageID)
 }
 
 func (m *mockDocker) ImagePull(ctx context.Context, refStr string, options image.PullOptions) (io.ReadCloser, error) {
@@ -1207,6 +1217,12 @@ func TestAuthorizeComposeProjectAccessRejectsForeignOwner(t *testing.T) {
 func TestCreateSandboxEndpoint(t *testing.T) {
 	createdSandbox := store.Sandbox{}
 	m := &mockDocker{
+		imageInspectFn: func(_ context.Context, imageID string) (image.InspectResponse, error) {
+			if imageID != "ubuntu:24.04" {
+				t.Fatalf("expected image inspect for ubuntu:24.04, got %q", imageID)
+			}
+			return image.InspectResponse{Config: &dockerspec.DockerOCIImageConfig{ImageConfig: ocispec.ImageConfig{WorkingDir: "/home/opencode"}}}, nil
+		},
 		volumeCreateFn: func(_ context.Context, options volume.CreateOptions) (volume.Volume, error) {
 			if !strings.HasPrefix(options.Name, "open-sandbox-") {
 				t.Fatalf("expected volume name to be prefixed, got %q", options.Name)
@@ -1220,7 +1236,10 @@ func TestCreateSandboxEndpoint(t *testing.T) {
 			if config.Image != "ubuntu:24.04" {
 				t.Fatalf("expected ubuntu image, got %q", config.Image)
 			}
-			if len(hostConfig.Binds) != 1 || !strings.Contains(hostConfig.Binds[0], ":/workspace") {
+			if config.WorkingDir != "/home/opencode" {
+				t.Fatalf("expected image workdir /home/opencode, got %q", config.WorkingDir)
+			}
+			if len(hostConfig.Binds) != 1 || !strings.Contains(hostConfig.Binds[0], ":/home/opencode") {
 				t.Fatalf("expected workspace bind mount, got %v", hostConfig.Binds)
 			}
 			return container.CreateResponse{ID: "sandbox-container-id"}, nil
@@ -1255,6 +1274,9 @@ func TestCreateSandboxEndpoint(t *testing.T) {
 	if createdSandbox.Name != "workspace" || createdSandbox.ContainerID != "sandbox-container-id" {
 		t.Fatalf("unexpected sandbox persisted: %+v", createdSandbox)
 	}
+	if createdSandbox.WorkspaceDir != "/home/opencode" {
+		t.Fatalf("expected persisted workspace dir /home/opencode, got %q", createdSandbox.WorkspaceDir)
+	}
 	if createdSandbox.OwnerID != "admin-user" || createdSandbox.OwnerUsername != "admin" {
 		t.Fatalf("expected sandbox ownership to be set, got %+v", createdSandbox)
 	}
@@ -1264,8 +1286,128 @@ func TestCreateSandboxEndpoint(t *testing.T) {
 	}
 }
 
+func TestCreateSandboxEndpointLeavesWorkdirUnsetWhenImageHasNoWorkdir(t *testing.T) {
+	createdSandbox := store.Sandbox{}
+	volumeCreated := false
+	m := &mockDocker{
+		imageInspectFn: func(_ context.Context, imageID string) (image.InspectResponse, error) {
+			if imageID != "ubuntu:24.04" {
+				t.Fatalf("expected image inspect for ubuntu:24.04, got %q", imageID)
+			}
+			return image.InspectResponse{Config: &dockerspec.DockerOCIImageConfig{}}, nil
+		},
+		volumeCreateFn: func(_ context.Context, options volume.CreateOptions) (volume.Volume, error) {
+			volumeCreated = true
+			return volume.Volume{Name: options.Name}, nil
+		},
+		containerCreateFn: func(_ context.Context, config *container.Config, hostConfig *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, _ string) (container.CreateResponse, error) {
+			if config.WorkingDir != "" {
+				t.Fatalf("expected workdir to be unset, got %q", config.WorkingDir)
+			}
+			if len(hostConfig.Binds) != 0 {
+				t.Fatalf("expected no workspace bind mount, got %v", hostConfig.Binds)
+			}
+			return container.CreateResponse{ID: "sandbox-container-id"}, nil
+		},
+		containerStartFn: func(_ context.Context, _ string, _ container.StartOptions) error {
+			return nil
+		},
+	}
+
+	sandboxStore := &mockSandboxStore{
+		createSandboxFn: func(_ context.Context, sandbox store.Sandbox) error {
+			createdSandbox = sandbox
+			return nil
+		},
+	}
+
+	s := newTestServerWithStore(m, sandboxStore)
+	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes", bytes.NewBufferString(`{"name":"workspace","image":"ubuntu:24.04"}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if volumeCreated {
+		t.Fatal("expected sandbox volume creation to be skipped when workdir is unset")
+	}
+	if createdSandbox.WorkspaceDir != "" {
+		t.Fatalf("expected persisted workspace dir to be empty, got %q", createdSandbox.WorkspaceDir)
+	}
+}
+
+func TestCreateSandboxEndpointAutoPullsImageBeforeResolvingWorkdir(t *testing.T) {
+	inspectCalls := 0
+	pullCalled := false
+	m := &mockDocker{
+		imageInspectFn: func(_ context.Context, imageID string) (image.InspectResponse, error) {
+			if imageID != "ubuntu:24.04" {
+				t.Fatalf("expected image inspect for ubuntu:24.04, got %q", imageID)
+			}
+			inspectCalls++
+			if inspectCalls == 1 {
+				return image.InspectResponse{}, errors.New("No such image: ubuntu:24.04")
+			}
+			return image.InspectResponse{Config: &dockerspec.DockerOCIImageConfig{ImageConfig: ocispec.ImageConfig{WorkingDir: "/home/opencode"}}}, nil
+		},
+		imagePullFn: func(_ context.Context, imageID string, _ image.PullOptions) (io.ReadCloser, error) {
+			if imageID != "ubuntu:24.04" {
+				t.Fatalf("expected image pull for ubuntu:24.04, got %q", imageID)
+			}
+			pullCalled = true
+			return io.NopCloser(bytes.NewReader([]byte("{}"))), nil
+		},
+		volumeCreateFn: func(_ context.Context, options volume.CreateOptions) (volume.Volume, error) {
+			return volume.Volume{Name: options.Name}, nil
+		},
+		containerCreateFn: func(_ context.Context, config *container.Config, hostConfig *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, _ string) (container.CreateResponse, error) {
+			if config.WorkingDir != "/home/opencode" {
+				t.Fatalf("expected pulled image workdir /home/opencode, got %q", config.WorkingDir)
+			}
+			if len(hostConfig.Binds) != 1 || !strings.Contains(hostConfig.Binds[0], ":/home/opencode") {
+				t.Fatalf("expected workspace bind mount, got %v", hostConfig.Binds)
+			}
+			return container.CreateResponse{ID: "sandbox-container-id"}, nil
+		},
+		containerStartFn: func(_ context.Context, _ string, _ container.StartOptions) error {
+			return nil
+		},
+	}
+
+	sandboxStore := &mockSandboxStore{
+		createSandboxFn: func(_ context.Context, _ store.Sandbox) error {
+			return nil
+		},
+	}
+
+	s := newTestServerWithStore(m, sandboxStore)
+	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes", bytes.NewBufferString(`{"name":"workspace","image":"ubuntu:24.04"}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if !pullCalled {
+		t.Fatal("expected image pull to be called when image inspect reports a missing image")
+	}
+	if inspectCalls != 2 {
+		t.Fatalf("expected image inspect to be retried after pull, got %d calls", inspectCalls)
+	}
+}
+
 func TestCreateSandboxEndpointUsesImageDefaultCommandWhenRequested(t *testing.T) {
 	m := &mockDocker{
+		imageInspectFn: func(_ context.Context, _ string) (image.InspectResponse, error) {
+			return image.InspectResponse{Config: &dockerspec.DockerOCIImageConfig{ImageConfig: ocispec.ImageConfig{WorkingDir: "/home/opencode"}}}, nil
+		},
 		volumeCreateFn: func(_ context.Context, options volume.CreateOptions) (volume.Volume, error) {
 			return volume.Volume{Name: options.Name}, nil
 		},
@@ -1450,6 +1592,9 @@ func TestSandboxTerminalWebSocket(t *testing.T) {
 			}
 			if options.WorkingDir != "/workspace" {
 				t.Fatalf("expected workspace dir /workspace, got %q", options.WorkingDir)
+			}
+			if len(options.Cmd) != 3 || !strings.Contains(options.Cmd[2], "cd '/workspace'") {
+				t.Fatalf("expected terminal shell command to cd into /workspace, got %v", options.Cmd)
 			}
 			if options.ConsoleSize == nil || options.ConsoleSize[0] != 32 || options.ConsoleSize[1] != 100 {
 				t.Fatalf("expected initial console size [32 100], got %+v", options.ConsoleSize)

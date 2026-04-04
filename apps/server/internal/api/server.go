@@ -29,6 +29,7 @@ import (
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
+	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
@@ -43,6 +44,7 @@ import (
 
 type DockerAPI interface {
 	ImageBuild(ctx context.Context, buildContext io.Reader, options build.ImageBuildOptions) (build.ImageBuildResponse, error)
+	ImageInspect(ctx context.Context, imageID string, inspectOpts ...client.ImageInspectOption) (image.InspectResponse, error)
 	ImagePull(ctx context.Context, refStr string, options image.PullOptions) (io.ReadCloser, error)
 	ImageList(ctx context.Context, options image.ListOptions) ([]image.Summary, error)
 	ImageRemove(ctx context.Context, imageID string, options image.RemoveOptions) ([]image.DeleteResponse, error)
@@ -1034,7 +1036,7 @@ func (s *Server) startInteractiveExec(
 ) (string, dockertypes.HijackedResponse, error) {
 	consoleSize := &[2]uint{rows, cols}
 	execConfig := container.ExecOptions{
-		Cmd:          defaultTerminalShellCommand(),
+		Cmd:          defaultTerminalShellCommand(workdir),
 		Env:          []string{"TERM=xterm-256color", "COLORTERM=truecolor"},
 		WorkingDir:   workdir,
 		Tty:          true,
@@ -1057,8 +1059,12 @@ func (s *Server) startInteractiveExec(
 	return created.ID, attached, nil
 }
 
-func defaultTerminalShellCommand() []string {
-	return []string{"sh", "-lc", "export TERM=${TERM:-xterm-256color}; if command -v bash >/dev/null 2>&1; then exec bash -i; fi; exec sh -i"}
+func defaultTerminalShellCommand(workdir string) []string {
+	command := "export TERM=${TERM:-xterm-256color}; if command -v bash >/dev/null 2>&1; then exec bash -i; fi; exec sh -i"
+	if trimmed := strings.TrimSpace(workdir); trimmed != "" {
+		command = fmt.Sprintf("cd %s 2>/dev/null || true; %s", shellQuote(trimmed), command)
+	}
+	return []string{"sh", "-lc", command}
 }
 
 func parseTerminalDimension(raw string, fallback uint) uint {

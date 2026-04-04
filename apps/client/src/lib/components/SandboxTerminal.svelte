@@ -161,7 +161,9 @@
 			}
 
 			status = "connected";
-			statusText = `Live shell in ${workspaceDir}`;
+			statusText = workspaceDir.trim().length > 0
+				? `Live shell in ${workspaceDir}`
+				: "Live shell using the container default working directory";
 			terminal?.focus();
 			sendResize();
 		};

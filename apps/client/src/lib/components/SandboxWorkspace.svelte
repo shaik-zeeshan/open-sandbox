@@ -124,7 +124,10 @@
 	const activeContainer = $derived(runtimeContainer ?? container);
 	const targetId = $derived(workloadKind === "sandbox" ? (sandbox?.id ?? "") : (runtimeContainer?.id ?? ""));
 	const backingContainerId = $derived(runtimeContainer?.id ?? sandbox?.container_id ?? container?.id ?? "");
-	const workspaceDirValue = $derived(sandbox?.workspace_dir ?? "/");
+	const sandboxWorkspaceDir = $derived(sandbox?.workspace_dir ?? "");
+	const workspaceDirValue = $derived(sandboxWorkspaceDir.trim().length > 0 ? sandboxWorkspaceDir : "/");
+	const workspaceMetaValue = $derived(workloadKind === "sandbox" && sandboxWorkspaceDir.trim().length === 0 ? "container default" : workspaceDirValue);
+	const terminalWorkspaceDir = $derived(workloadKind === "sandbox" ? sandboxWorkspaceDir : workspaceDirValue);
 	const workloadName = $derived(runtimeContainer?.names[0] ?? sandbox?.name ?? runtimeContainer?.id.slice(0, 12) ?? "Container");
 	const workloadImage = $derived(runtimeContainer?.image ?? sandbox?.image ?? activeContainer?.image ?? "");
 	const workloadStatus = $derived(activeContainer?.status ?? sandbox?.status ?? "");
@@ -156,6 +159,10 @@
 	const joinPath = (base: string, child: string): string => {
 		const nb = base.endsWith("/") ? base.slice(0, -1) : base;
 		return `${nb || ""}/${child}`.replace(/\/+/g, "/");
+	};
+
+	const uploadBasePath = (): string => {
+		return filePayload?.kind === "directory" ? browsePath : parentPath(browsePath);
 	};
 
 	$effect(() => {
@@ -450,7 +457,7 @@
 					</div>
 					<div class="meta-card">
 						<span class="meta-label">{workloadKind === "sandbox" ? "Workspace" : "Default path"}</span>
-						<span class="meta-value mono">{workspaceDirValue}</span>
+						<span class="meta-value mono">{workspaceMetaValue}</span>
 					</div>
 					{#if workloadCreatedAt > 0}
 						<div class="meta-card">
@@ -499,7 +506,7 @@
 
 		<!-- Terminal -->
 		{#if activeTab === "terminal"}
-			<SandboxTerminal targetId={targetId} targetType={workloadKind} workspaceDir={workspaceDirValue} {config} />
+			<SandboxTerminal targetId={targetId} targetType={workloadKind} workspaceDir={terminalWorkspaceDir} {config} />
 		{/if}
 
 		<!-- Files -->
@@ -580,6 +587,9 @@
 								<input type="file" class="file-pick-hidden" onchange={(e) => {
 									const el = e.currentTarget as HTMLInputElement;
 									uploadFile = el.files?.[0] ?? null;
+									if (uploadFile !== null) {
+										uploadPath = joinPath(uploadBasePath(), uploadFile.name);
+									}
 								}} />
 								<span class="file-pick-display">
 									<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>

@@ -44,6 +44,7 @@
 		createComposeProjectName = $bindable(),
 		createRepoUrl = $bindable(),
 		createBranch = $bindable(),
+		createWorkdir = $bindable(),
 		createPorts = $bindable(),
 		createLoading,
 		createStep,
@@ -91,6 +92,7 @@
 		createComposeProjectName: string;
 		createRepoUrl: string;
 		createBranch: string;
+		createWorkdir: string;
 		createPorts: string;
 		createLoading: boolean;
 		createStep: string;
@@ -498,6 +500,11 @@
 						<input class="field" bind:value={createBranch} placeholder="main" />
 					</label>
 				</div>
+				<label class="field-col">
+					<span class="section-label">Workdir</span>
+					<input class="field" bind:value={createWorkdir} />
+					<span class="field-help">Leave empty to use the image <code class="inline-code">WORKDIR</code>. If the image does not define one, the sandbox keeps the container default working directory and skips the workspace volume.</span>
+				</label>
 				<div class="field-col">
 					<span class="section-label">Port mappings <span class="opt">(host → container)</span></span>
 					<PortsEditor bind:value={createPorts} />
@@ -507,11 +514,11 @@
 
 		</fieldset>
 
-		<!-- Pipeline output -->
+		<!-- Creation output -->
 		{#if createStep !== "Idle" || createResolvedImage || createLogs}
 			<div class="pipeline-panel">
 				<div class="pipeline-header">
-					<span class="pipeline-title">Pipeline output</span>
+					<span class="pipeline-title">Creation output</span>
 					<span class="pipeline-step">{createStep}</span>
 				</div>
 				{#if createResolvedImage}
@@ -533,7 +540,7 @@
 			{:else if createMethod === "compose"}
 				Run compose
 			{:else}
-				Run pipeline
+				Create sandbox
 			{/if}
 		</button>
 	</div>
