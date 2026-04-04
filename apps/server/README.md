@@ -27,7 +27,7 @@ Optional:
 - `SANDBOX_JWT_ISSUER`: issuer claim (default `open-sandbox`)
 - `SANDBOX_CORS_ORIGINS`: comma-separated origins (default `http://localhost:5173,http://127.0.0.1:5173`)
 - `SANDBOX_WORKSPACE_DIR`: base directory for `context_path` (default current working directory)
-- `SANDBOX_DB_PATH`: SQLite path for sandbox metadata (default `open-sandbox.db`)
+- `SANDBOX_DB_PATH`: SQLite path for sandbox metadata (default resolves to `apps/server/open-sandbox.db` in the repo layout)
 
 `/health` is intentionally public.
 
@@ -45,7 +45,7 @@ This uses `go tool air -c .air.toml` for hot reload. From `apps/server`, you can
 
 Server defaults to `:8080` (override with `PORT`).
 
-When started through Turbo, the working directory is `apps/server`, so the default SQLite path `open-sandbox.db` resolves there unless `SANDBOX_DB_PATH` is set.
+When `SANDBOX_DB_PATH` is not set, the server detects the repo layout and stores SQLite data in `apps/server/open-sandbox.db` by default, including when `air` runs the compiled binary from `apps/server/tmp`.
 
 ## Swagger
 

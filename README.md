@@ -31,7 +31,7 @@ bun run dev:client
 
 `bun run dev:server` uses `air` for Go hot reload, with a local fallback `SANDBOX_JWT_SECRET` for development.
 
-The server now runs from `apps/server` under Turbo, so its default SQLite file is created at `apps/server/open-sandbox.db` unless `SANDBOX_DB_PATH` is set.
+Unless `SANDBOX_DB_PATH` is set, the server keeps its default SQLite file at `apps/server/open-sandbox.db`, even when the dev watcher starts the process from a nested temp directory.
 
 ## Run server tests
 

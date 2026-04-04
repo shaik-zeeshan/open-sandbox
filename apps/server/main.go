@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -36,7 +37,7 @@ func main() {
 		log.Fatalf("failed to load auth config: %v", err)
 	}
 
-	sandboxStore, err := store.OpenSQLite(loadEnv("SANDBOX_DB_PATH", "open-sandbox.db"))
+	sandboxStore, err := store.OpenSQLite(loadEnv("SANDBOX_DB_PATH", defaultDBPath()))
 	if err != nil {
 		log.Fatalf("failed to initialize sandbox store: %v", err)
 	}
@@ -69,6 +70,58 @@ func loadEnv(key string, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func defaultDBPath() string {
+	workingDir, err := os.Getwd()
+	if err != nil {
+		return "open-sandbox.db"
+	}
+
+	return defaultDBPathFrom(workingDir)
+}
+
+func defaultDBPathFrom(startDir string) string {
+	if root, ok := findServerRoot(startDir); ok {
+		return filepath.Join(root, "open-sandbox.db")
+	}
+
+	return "open-sandbox.db"
+}
+
+func findServerRoot(startDir string) (string, bool) {
+	current := filepath.Clean(startDir)
+
+	for {
+		if looksLikeServerRoot(current) {
+			return current, true
+		}
+
+		repoServerDir := filepath.Join(current, "apps", "server")
+		if looksLikeServerRoot(repoServerDir) {
+			return repoServerDir, true
+		}
+
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", false
+		}
+
+		current = parent
+	}
+}
+
+func looksLikeServerRoot(dir string) bool {
+	return fileExists(filepath.Join(dir, "main.go")) && fileExists(filepath.Join(dir, "go.mod"))
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+
+	return !info.IsDir()
 }
 
 func loadServerDuration(envKey string, fallback time.Duration) time.Duration {
