@@ -733,6 +733,12 @@ func TestCreateContainerEndpointStartsContainerWhenRequested(t *testing.T) {
 }
 
 func TestRestartContainerEndpoint(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return `{"ID":"cid-123","Image":"ubuntu:24.04","Names":"sandbox-one","Status":"Up 5 minutes","Labels":"open-sandbox.managed=true,open-sandbox.owner_id=admin-user"}` + "\n", "", nil
+	}
+
 	stopped := false
 	started := false
 	m := &mockDocker{
@@ -854,6 +860,128 @@ func TestListContainersEndpoint(t *testing.T) {
 
 	if !bytes.Contains(w.Body.Bytes(), []byte("sandbox-one")) {
 		t.Fatalf("expected container response body: %s", w.Body.String())
+	}
+}
+
+func TestListContainersFiltersToCurrentUser(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return strings.Join([]string{
+			`{"ID":"owned-sandbox","Image":"ubuntu:24.04","Names":"mine","Status":"Up 1 minute","Labels":"open-sandbox.managed=true,open-sandbox.owner_id=member-1"}`,
+			`{"ID":"direct-owned","Image":"alpine:3.20","Names":"direct","Status":"Up 1 minute","Labels":"open-sandbox.managed=true,open-sandbox.owner_id=member-1"}`,
+			`{"ID":"other-sandbox","Image":"ubuntu:24.04","Names":"other","Status":"Up 1 minute","Labels":"open-sandbox.managed=true,open-sandbox.owner_id=member-2"}`,
+			`{"ID":"compose-unowned","Image":"redis:7","Names":"compose","Status":"Up 1 minute","Labels":"com.docker.compose.project=shared"}`,
+		}, "\n"), "", nil
+	}
+
+	sandboxStore := &mockSandboxStore{
+		listSandboxesFn: func(context.Context) ([]store.Sandbox, error) {
+			return []store.Sandbox{
+				{ID: "sandbox-1", ContainerID: "owned-sandbox", OwnerID: "member-1", OwnerUsername: "alice"},
+				{ID: "sandbox-2", ContainerID: "other-sandbox", OwnerID: "member-2", OwnerUsername: "bob"},
+			}, nil
+		},
+	}
+
+	s := newTestServerWithStore(&mockDocker{}, sandboxStore)
+	req := httptest.NewRequest(http.MethodGet, "/api/containers", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"owned-sandbox"`)) || !bytes.Contains(w.Body.Bytes(), []byte(`"direct-owned"`)) {
+		t.Fatalf("expected owned containers in response: %s", w.Body.String())
+	}
+	if bytes.Contains(w.Body.Bytes(), []byte(`"other-sandbox"`)) || bytes.Contains(w.Body.Bytes(), []byte(`"compose-unowned"`)) {
+		t.Fatalf("expected unowned containers to be filtered out: %s", w.Body.String())
+	}
+}
+
+func TestContainerAccessRejectsOtherUsers(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return `{"ID":"other-sandbox","Image":"ubuntu:24.04","Names":"other","Status":"Up 1 minute","Labels":"open-sandbox.managed=true,open-sandbox.owner_id=member-2"}` + "\n", "", nil
+	}
+
+	stopped := false
+	m := &mockDocker{
+		containerStopFn: func(context.Context, string, container.StopOptions) error {
+			stopped = true
+			return nil
+		},
+	}
+	sandboxStore := &mockSandboxStore{
+		listSandboxesFn: func(context.Context) ([]store.Sandbox, error) {
+			return []store.Sandbox{{ID: "sandbox-2", ContainerID: "other-sandbox", OwnerID: "member-2", OwnerUsername: "bob"}}, nil
+		},
+	}
+
+	s := newTestServerWithStore(m, sandboxStore)
+	req := httptest.NewRequest(http.MethodPost, "/api/containers/other-sandbox/stop", bytes.NewBufferString(`{}`))
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+	if stopped {
+		t.Fatal("expected unauthorized container stop to be blocked")
+	}
+}
+
+func TestWriteManagedComposeFileUsesRestrictedPermissions(t *testing.T) {
+	projectDir := filepath.Join(t.TempDir(), "compose-project")
+	composeFile, err := writeManagedComposeFile(projectDir, "services:\n  app:\n    image: alpine:3.20\n")
+	if err != nil {
+		t.Fatalf("expected managed compose file to be written: %v", err)
+	}
+
+	projectInfo, err := os.Stat(projectDir)
+	if err != nil {
+		t.Fatalf("expected project dir to exist: %v", err)
+	}
+	if got := projectInfo.Mode().Perm(); got != 0o700 {
+		t.Fatalf("expected project dir mode 0700, got %#o", got)
+	}
+
+	fileInfo, err := os.Stat(composeFile)
+	if err != nil {
+		t.Fatalf("expected compose file to exist: %v", err)
+	}
+	if got := fileInfo.Mode().Perm(); got != 0o600 {
+		t.Fatalf("expected compose file mode 0600, got %#o", got)
+	}
+}
+
+func TestPrepareComposeProjectLocksManagedDirectories(t *testing.T) {
+	s := newTestServer(&mockDocker{})
+	s.workspaceRoot = t.TempDir()
+
+	project, err := s.prepareComposeProject(ComposeRequest{
+		ProjectName: "sandbox",
+		Content:     "services:\n  app:\n    image: alpine:3.20\n",
+	})
+	if err != nil {
+		t.Fatalf("expected compose project to be prepared: %v", err)
+	}
+
+	for _, dir := range []string{filepath.Join(s.workspaceRoot, ".open-sandbox"), filepath.Join(s.workspaceRoot, ".open-sandbox", "compose"), project.ProjectDir} {
+		info, statErr := os.Stat(dir)
+		if statErr != nil {
+			t.Fatalf("expected managed dir %q: %v", dir, statErr)
+		}
+		if got := info.Mode().Perm(); got != 0o700 {
+			t.Fatalf("expected dir %q mode 0700, got %#o", dir, got)
+		}
 	}
 }
 
@@ -1039,6 +1167,12 @@ func TestSandboxExecEndpointUsesSandboxContainer(t *testing.T) {
 }
 
 func TestExecEndpoint(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return `{"ID":"c-1","Image":"ubuntu:24.04","Names":"sandbox-one","Status":"Up 5 minutes","Labels":"open-sandbox.managed=true,open-sandbox.owner_id=admin-user"}` + "\n", "", nil
+	}
+
 	hijacked := fakeHijackedResponse([]byte("command output\n"), []byte(""))
 	m := &mockDocker{
 		containerExecCreateFn: func(context.Context, string, container.ExecOptions) (container.ExecCreateResponse, error) {
@@ -1228,6 +1362,12 @@ func TestGitCloneEndpointBuildsExpectedCommand(t *testing.T) {
 }
 
 func TestLogStreamEndpoint(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return `{"ID":"c-2","Image":"ubuntu:24.04","Names":"sandbox-two","Status":"Up 5 minutes","Labels":"open-sandbox.managed=true,open-sandbox.owner_id=admin-user"}` + "\n", "", nil
+	}
+
 	stream := fakeMuxedStream([]byte("hello\n"), []byte("warn\n"))
 	m := &mockDocker{
 		containerInspectFn: func(context.Context, string) (container.InspectResponse, error) {

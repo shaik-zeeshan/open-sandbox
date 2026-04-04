@@ -104,92 +104,117 @@ type dockerContainerCLIRecord struct {
 }
 
 func (s *Server) listContainers(c *gin.Context) {
+	identity, ok := authIdentityFromContext(c)
+	if !ok {
+		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
+		return
+	}
+
 	containers, err := s.listRuntimeContainers(c.Request.Context())
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
-	c.JSON(http.StatusOK, containers)
-}
-
-func (s *Server) restartContainer(c *gin.Context) {
-	containerID := strings.TrimSpace(c.Param("id"))
-	if containerID == "" {
-		writeError(c, http.StatusBadRequest, errors.New("container id is required"))
+	if identity.IsAdmin() {
+		c.JSON(http.StatusOK, containers)
 		return
 	}
 
-	inspect, err := s.docker.ContainerInspect(c.Request.Context(), containerID)
+	ownedContainerIDs, err := s.ownedRuntimeContainerIDs(c.Request.Context(), identity.UserID)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+
+	visible := make([]ContainerSummary, 0, len(containers))
+	for _, item := range containers {
+		if runtimeContainerVisibleToIdentity(item, identity, ownedContainerIDs) {
+			visible = append(visible, item)
+		}
+	}
+
+	c.JSON(http.StatusOK, visible)
+}
+
+func (s *Server) restartContainer(c *gin.Context) {
+	target, ok := s.loadAuthorizedContainer(c)
+	if !ok {
+		return
+	}
+
+	inspect, err := s.docker.ContainerInspect(c.Request.Context(), target.ID)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 	if inspect.State != nil && inspect.State.Running {
-		if err := s.docker.ContainerStop(c.Request.Context(), containerID, container.StopOptions{}); err != nil {
+		if err := s.docker.ContainerStop(c.Request.Context(), target.ID, container.StopOptions{}); err != nil {
 			writeError(c, http.StatusInternalServerError, err)
 			return
 		}
 	}
-	if err := s.docker.ContainerStart(c.Request.Context(), containerID, container.StartOptions{}); err != nil {
+	if err := s.docker.ContainerStart(c.Request.Context(), target.ID, container.StartOptions{}); err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 
 	if s.sandboxStore != nil {
-		_ = s.sandboxStore.UpdateSandboxStatusByContainerID(c.Request.Context(), containerID, "running")
+		_ = s.sandboxStore.UpdateSandboxStatusByContainerID(c.Request.Context(), target.ID, "running")
 	}
 
-	c.JSON(http.StatusOK, gin.H{"container_id": containerID, "restarted": true})
+	c.JSON(http.StatusOK, gin.H{"container_id": target.ID, "restarted": true})
 }
 
 func (s *Server) stopContainer(c *gin.Context) {
-	containerID := strings.TrimSpace(c.Param("id"))
-	if containerID == "" {
-		writeError(c, http.StatusBadRequest, errors.New("container id is required"))
+	target, ok := s.loadAuthorizedContainer(c)
+	if !ok {
 		return
 	}
 
-	if err := s.docker.ContainerStop(c.Request.Context(), containerID, container.StopOptions{}); err != nil {
+	if err := s.docker.ContainerStop(c.Request.Context(), target.ID, container.StopOptions{}); err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 
 	if s.sandboxStore != nil {
-		_ = s.sandboxStore.UpdateSandboxStatusByContainerID(c.Request.Context(), containerID, "stopped")
+		_ = s.sandboxStore.UpdateSandboxStatusByContainerID(c.Request.Context(), target.ID, "stopped")
 	}
 
-	c.JSON(http.StatusOK, gin.H{"container_id": containerID, "stopped": true})
+	c.JSON(http.StatusOK, gin.H{"container_id": target.ID, "stopped": true})
 }
 
 func (s *Server) removeContainer(c *gin.Context) {
-	containerID := strings.TrimSpace(c.Param("id"))
-	if containerID == "" {
-		writeError(c, http.StatusBadRequest, errors.New("container id is required"))
+	target, ok := s.loadAuthorizedContainer(c)
+	if !ok {
 		return
 	}
 
 	force, _ := strconv.ParseBool(c.DefaultQuery("force", "true"))
-	if err := s.docker.ContainerRemove(c.Request.Context(), containerID, container.RemoveOptions{Force: force, RemoveVolumes: true}); err != nil {
+	if err := s.docker.ContainerRemove(c.Request.Context(), target.ID, container.RemoveOptions{Force: force, RemoveVolumes: true}); err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 
 	if s.sandboxStore != nil {
-		_ = s.sandboxStore.DeleteSandboxByContainerID(c.Request.Context(), containerID)
+		_ = s.sandboxStore.DeleteSandboxByContainerID(c.Request.Context(), target.ID)
 	}
 
-	c.JSON(http.StatusOK, gin.H{"container_id": containerID, "removed": true})
+	c.JSON(http.StatusOK, gin.H{"container_id": target.ID, "removed": true})
 }
 
 func (s *Server) readContainerFile(c *gin.Context) {
-	containerID := strings.TrimSpace(c.Param("id"))
+	target, ok := s.loadAuthorizedContainer(c)
+	if !ok {
+		return
+	}
+
 	filePath := strings.TrimSpace(c.Query("path"))
 	if filePath == "" {
 		writeError(c, http.StatusBadRequest, errors.New("query parameter path is required"))
 		return
 	}
 
-	response, err := s.readContainerFileByID(c.Request.Context(), containerID, filePath)
+	response, err := s.readContainerFileByID(c.Request.Context(), target.ID, filePath)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
@@ -199,18 +224,22 @@ func (s *Server) readContainerFile(c *gin.Context) {
 }
 
 func (s *Server) writeContainerFile(c *gin.Context) {
-	containerID := strings.TrimSpace(c.Param("id"))
+	target, ok := s.loadAuthorizedContainer(c)
+	if !ok {
+		return
+	}
+
 	if strings.Contains(strings.ToLower(c.GetHeader("Content-Type")), "application/json") {
 		var req SaveFileRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			writeError(c, http.StatusBadRequest, err)
 			return
 		}
-		if err := s.writeContainerFileByID(c.Request.Context(), containerID, req.TargetPath, path.Base(req.TargetPath), strings.NewReader(req.Content)); err != nil {
+		if err := s.writeContainerFileByID(c.Request.Context(), target.ID, req.TargetPath, path.Base(req.TargetPath), strings.NewReader(req.Content)); err != nil {
 			writeError(c, http.StatusInternalServerError, err)
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"container_id": containerID, "path": req.TargetPath, "saved": true})
+		c.JSON(http.StatusOK, gin.H{"container_id": target.ID, "path": req.TargetPath, "saved": true})
 		return
 	}
 
@@ -227,12 +256,12 @@ func (s *Server) writeContainerFile(c *gin.Context) {
 	}
 	defer file.Close()
 
-	if err := s.writeContainerFileByID(c.Request.Context(), containerID, targetPath, header.Filename, file); err != nil {
+	if err := s.writeContainerFileByID(c.Request.Context(), target.ID, targetPath, header.Filename, file); err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"container_id": containerID, "path": targetPath, "uploaded": true})
+	c.JSON(http.StatusOK, gin.H{"container_id": target.ID, "path": targetPath, "uploaded": true})
 }
 
 func (s *Server) createSandbox(c *gin.Context) {
@@ -281,11 +310,13 @@ func (s *Server) createSandbox(c *gin.Context) {
 		Tty:        req.TTY,
 		User:       req.User,
 		Labels: map[string]string{
-			"open-sandbox.managed":     "true",
-			"open-sandbox.sandbox_id":  sandboxID,
-			"open-sandbox.name":        req.Name,
-			"open-sandbox.repo_url":    strings.TrimSpace(req.RepoURL),
-			"open-sandbox.repo_branch": strings.TrimSpace(req.Branch),
+			"open-sandbox.managed":        "true",
+			"open-sandbox.sandbox_id":     sandboxID,
+			"open-sandbox.owner_id":       identity.UserID,
+			"open-sandbox.owner_username": identity.Username,
+			"open-sandbox.name":           req.Name,
+			"open-sandbox.repo_url":       strings.TrimSpace(req.RepoURL),
+			"open-sandbox.repo_branch":    strings.TrimSpace(req.Branch),
 			"open-sandbox.repo_target_path": func() string {
 				if strings.TrimSpace(req.RepoTargetPath) != "" {
 					return strings.TrimSpace(req.RepoTargetPath)
@@ -740,6 +771,78 @@ func (s *Server) loadSandbox(c *gin.Context) (store.Sandbox, bool) {
 	}
 
 	return sandbox, true
+}
+
+func (s *Server) loadAuthorizedContainer(c *gin.Context) (ContainerSummary, bool) {
+	containerID := strings.TrimSpace(c.Param("id"))
+	if containerID == "" {
+		writeError(c, http.StatusBadRequest, errors.New("container id is required"))
+		return ContainerSummary{}, false
+	}
+
+	identity, ok := authIdentityFromContext(c)
+	if !ok {
+		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
+		return ContainerSummary{}, false
+	}
+
+	containersByID, err := s.runtimeContainersByID(c.Request.Context())
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return ContainerSummary{}, false
+	}
+
+	target, exists := containersByID[containerID]
+	if !exists {
+		writeError(c, http.StatusNotFound, errors.New("container not found"))
+		return ContainerSummary{}, false
+	}
+
+	if identity.IsAdmin() {
+		return target, true
+	}
+
+	ownedContainerIDs, err := s.ownedRuntimeContainerIDs(c.Request.Context(), identity.UserID)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return ContainerSummary{}, false
+	}
+	if !runtimeContainerVisibleToIdentity(target, identity, ownedContainerIDs) {
+		writeError(c, http.StatusNotFound, errors.New("container not found"))
+		return ContainerSummary{}, false
+	}
+
+	return target, true
+}
+
+func (s *Server) ownedRuntimeContainerIDs(ctx context.Context, userID string) (map[string]struct{}, error) {
+	owned := map[string]struct{}{}
+	if s.sandboxStore == nil {
+		return owned, nil
+	}
+
+	sandboxes, err := s.sandboxStore.ListSandboxes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, sandbox := range sandboxes {
+		if sandbox.OwnerID == userID {
+			owned[sandbox.ContainerID] = struct{}{}
+		}
+	}
+
+	return owned, nil
+}
+
+func runtimeContainerVisibleToIdentity(item ContainerSummary, identity AuthIdentity, ownedContainerIDs map[string]struct{}) bool {
+	if identity.IsAdmin() {
+		return true
+	}
+	if item.Labels["open-sandbox.owner_id"] == identity.UserID {
+		return true
+	}
+	_, ok := ownedContainerIDs[item.ID]
+	return ok
 }
 
 func (s *Server) readContainerFileByID(ctx context.Context, containerID string, filePath string) (FileReadResponse, error) {

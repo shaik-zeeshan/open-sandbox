@@ -759,6 +759,12 @@ func (s *Server) createContainer(c *gin.Context) {
 		return
 	}
 
+	identity, ok := authIdentityFromContext(c)
+	if !ok {
+		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
+		return
+	}
+
 	containerConfig := &container.Config{
 		Image:      req.Image,
 		Cmd:        req.Cmd,
@@ -766,6 +772,11 @@ func (s *Server) createContainer(c *gin.Context) {
 		WorkingDir: req.Workdir,
 		Tty:        req.TTY,
 		User:       req.User,
+		Labels: map[string]string{
+			"open-sandbox.managed":        "true",
+			"open-sandbox.owner_id":       identity.UserID,
+			"open-sandbox.owner_username": identity.Username,
+		},
 	}
 	hostConfig := &container.HostConfig{
 		Binds:      req.Binds,
@@ -822,13 +833,18 @@ func isMissingImageError(err error) bool {
 // @Failure 500 {object} ErrorResponse
 // @Router /api/containers/{id}/exec [post]
 func (s *Server) execInContainer(c *gin.Context) {
+	target, ok := s.loadAuthorizedContainer(c)
+	if !ok {
+		return
+	}
+
 	var req ExecRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c, http.StatusBadRequest, err)
 		return
 	}
 
-	resp, err := s.runContainerExec(c.Request.Context(), c.Param("id"), req)
+	resp, err := s.runContainerExec(c.Request.Context(), target.ID, req)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
@@ -849,20 +865,24 @@ func (s *Server) execInContainer(c *gin.Context) {
 // @Failure 500 {object} ErrorResponse
 // @Router /api/containers/{id}/logs [get]
 func (s *Server) streamLogs(c *gin.Context) {
+	target, ok := s.loadAuthorizedContainer(c)
+	if !ok {
+		return
+	}
+
 	follow, _ := strconv.ParseBool(c.DefaultQuery("follow", "true"))
 	tail := c.DefaultQuery("tail", "100")
-	s.streamLogsForContainer(c, c.Param("id"), follow, tail)
+	s.streamLogsForContainer(c, target.ID, follow, tail)
 }
 
 func (s *Server) streamContainerTerminal(c *gin.Context) {
-	containerID := strings.TrimSpace(c.Param("id"))
-	if containerID == "" {
-		writeError(c, http.StatusBadRequest, errors.New("container id is required"))
+	target, ok := s.loadAuthorizedContainer(c)
+	if !ok {
 		return
 	}
 
 	workdir := strings.TrimSpace(c.Query("workdir"))
-	s.streamTerminalForContainer(c, containerID, workdir)
+	s.streamTerminalForContainer(c, target.ID, workdir)
 }
 
 func (s *Server) streamTerminalForContainer(c *gin.Context, containerID string, workdir string) {
@@ -1172,6 +1192,17 @@ func buildComposeArgs(project composeProjectContext, req ComposeRequest, cmd str
 
 func (s *Server) prepareComposeProject(req ComposeRequest) (composeProjectContext, error) {
 	composeRoot := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose")
+	if err := os.MkdirAll(composeRoot, 0o700); err != nil {
+		return composeProjectContext{}, fmt.Errorf("create compose root: %w", err)
+	}
+	if err := os.Chmod(composeRoot, 0o700); err != nil {
+		return composeProjectContext{}, fmt.Errorf("chmod compose root: %w", err)
+	}
+	hiddenRoot := filepath.Dir(composeRoot)
+	if err := os.Chmod(hiddenRoot, 0o700); err != nil {
+		return composeProjectContext{}, fmt.Errorf("chmod compose storage root: %w", err)
+	}
+
 	projectName := composeProjectName(req.ProjectName, req.Content)
 	projectDir := filepath.Join(composeRoot, projectName)
 	composeFile, err := writeManagedComposeFile(projectDir, req.Content)
@@ -1226,12 +1257,15 @@ func writeManagedComposeFile(projectDir string, content string) (string, error) 
 		return "", errors.New("compose content is required")
 	}
 
-	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
 		return "", fmt.Errorf("create compose project dir: %w", err)
+	}
+	if err := os.Chmod(projectDir, 0o700); err != nil {
+		return "", fmt.Errorf("chmod compose project dir: %w", err)
 	}
 
 	composeFile := filepath.Join(projectDir, "docker-compose.yml")
-	if err := os.WriteFile(composeFile, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(composeFile, []byte(content), 0o600); err != nil {
 		return "", fmt.Errorf("write compose file: %w", err)
 	}
 
