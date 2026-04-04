@@ -11,6 +11,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -503,14 +505,20 @@ func TestSearchImagesEndpointRequiresQuery(t *testing.T) {
 }
 
 func TestComposeStatusEndpoint(t *testing.T) {
-	original := commandRunner
-	defer func() { commandRunner = original }()
+	original := commandRunnerInDir
+	defer func() { commandRunnerInDir = original }()
 
-	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+	workspaceRoot := t.TempDir()
+	var capturedDir string
+	var capturedArgs []string
+	commandRunnerInDir = func(_ context.Context, dir string, _ string, args ...string) (string, string, error) {
+		capturedDir = dir
+		capturedArgs = append([]string(nil), args...)
 		return `[{"Name":"app","State":"running"}]`, "", nil
 	}
 
 	s := newTestServer(&mockDocker{})
+	s.workspaceRoot = workspaceRoot
 	req := httptest.NewRequest(http.MethodPost, "/api/compose/status", bytes.NewBufferString(`{
 		"content":"services:\n  app:\n    image: alpine:3.20\n",
 		"project_name":"sandbox"
@@ -528,6 +536,26 @@ func TestComposeStatusEndpoint(t *testing.T) {
 	if !bytes.Contains(w.Body.Bytes(), []byte("running")) {
 		t.Fatalf("expected compose status in response: %s", w.Body.String())
 	}
+
+	expectedProjectDir := filepath.Join(workspaceRoot, ".open-sandbox", "compose", "sandbox")
+	expectedComposeFile := filepath.Join(expectedProjectDir, "docker-compose.yml")
+	if capturedDir != expectedProjectDir {
+		t.Fatalf("expected compose command dir %q, got %q", expectedProjectDir, capturedDir)
+	}
+	argsJoined := strings.Join(capturedArgs, " ")
+	if !strings.Contains(argsJoined, "--project-directory "+expectedProjectDir) {
+		t.Fatalf("expected project directory in args, got %v", capturedArgs)
+	}
+	if !strings.Contains(argsJoined, "-f "+expectedComposeFile) {
+		t.Fatalf("expected compose file in args, got %v", capturedArgs)
+	}
+	content, err := os.ReadFile(expectedComposeFile)
+	if err != nil {
+		t.Fatalf("expected managed compose file: %v", err)
+	}
+	if !strings.Contains(string(content), "image: alpine:3.20") {
+		t.Fatalf("unexpected compose file content: %q", string(content))
+	}
 }
 
 func TestComposeStatusRequiresContent(t *testing.T) {
@@ -544,17 +572,59 @@ func TestComposeStatusRequiresContent(t *testing.T) {
 	}
 }
 
-func TestComposeDownIncludesOptionalFlags(t *testing.T) {
-	original := commandRunner
-	defer func() { commandRunner = original }()
+func TestComposeUpReservesOwnerBeforeCommandSucceeds(t *testing.T) {
+	dockerBinDir := t.TempDir()
+	dockerScript := filepath.Join(dockerBinDir, "docker")
+	if err := os.WriteFile(dockerScript, []byte("#!/bin/sh\nprintf 'compose failed\n' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("expected fake docker script: %v", err)
+	}
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", dockerBinDir+string(os.PathListSeparator)+oldPath)
 
+	s := newTestServer(&mockDocker{})
+	s.workspaceRoot = t.TempDir()
+	req := httptest.NewRequest(http.MethodPost, "/api/compose/up", bytes.NewBufferString(`{
+		"content":"services:\n  app:\n    image: alpine:3.20\n",
+		"project_name":"demo"
+	}`))
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	projectDir := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", "demo")
+	owner, hasOwner, err := s.readComposeProjectOwnerMetadata(projectDir)
+	if err != nil {
+		t.Fatalf("expected compose owner metadata after failed run: %v", err)
+	}
+	if !hasOwner || owner.UserID != "member-1" {
+		t.Fatalf("expected failed first compose run to reserve ownership, got %+v", owner)
+	}
+	shouldWriteOwner, err := s.authorizeComposeProjectAccess(AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}, s.composeProjectContextForName("demo"))
+	if err != nil {
+		t.Fatalf("expected same owner to be allowed to retry after failed run: %v", err)
+	}
+	if shouldWriteOwner {
+		t.Fatal("expected retry access to reuse existing owner metadata")
+	}
+}
+
+func TestComposeDownIncludesOptionalFlags(t *testing.T) {
+	original := commandRunnerInDir
+	defer func() { commandRunnerInDir = original }()
+
+	workspaceRoot := t.TempDir()
+	var capturedDir string
 	var capturedArgs []string
-	commandRunner = func(_ context.Context, _ string, args ...string) (string, string, error) {
+	commandRunnerInDir = func(_ context.Context, dir string, _ string, args ...string) (string, string, error) {
+		capturedDir = dir
 		capturedArgs = append([]string(nil), args...)
 		return "ok", "", nil
 	}
 
 	s := newTestServer(&mockDocker{})
+	s.workspaceRoot = workspaceRoot
 	req := httptest.NewRequest(http.MethodPost, "/api/compose/down", bytes.NewBufferString(`{
 		"content":"services:\n  app:\n    image: alpine:3.20\n",
 		"project_name":"sandbox",
@@ -574,6 +644,61 @@ func TestComposeDownIncludesOptionalFlags(t *testing.T) {
 	argsJoined := strings.Join(capturedArgs, " ")
 	if !strings.Contains(argsJoined, "down") || !strings.Contains(argsJoined, "--volumes") || !strings.Contains(argsJoined, "--remove-orphans") {
 		t.Fatalf("expected down command to include optional flags, args: %v", capturedArgs)
+	}
+	expectedProjectDir := filepath.Join(workspaceRoot, ".open-sandbox", "compose", "sandbox")
+	if capturedDir != expectedProjectDir {
+		t.Fatalf("expected compose command dir %q, got %q", expectedProjectDir, capturedDir)
+	}
+}
+
+func TestPrepareComposeProjectSanitizesProjectName(t *testing.T) {
+	s := newTestServer(&mockDocker{})
+	s.workspaceRoot = t.TempDir()
+
+	project, err := s.prepareComposeProject(ComposeRequest{
+		ProjectName: " My Demo/Project ",
+		Content:     "services:\n  app:\n    image: alpine:3.20\n",
+	})
+	if err != nil {
+		t.Fatalf("expected compose project to be prepared: %v", err)
+	}
+	if project.ProjectName != "my-demo-project" {
+		t.Fatalf("expected sanitized project name, got %q", project.ProjectName)
+	}
+	if !strings.HasPrefix(project.ProjectDir, filepath.Join(s.workspaceRoot, ".open-sandbox", "compose")) {
+		t.Fatalf("expected project dir under managed compose root, got %q", project.ProjectDir)
+	}
+}
+
+func TestComposeProjectNameFallsBackToContentHash(t *testing.T) {
+	first := composeProjectName("", "services:\n  app:\n    image: alpine:3.20\n")
+	second := composeProjectName("", "services:\n  app:\n    image: alpine:3.20\n")
+	if first != second {
+		t.Fatalf("expected deterministic fallback compose name, got %q and %q", first, second)
+	}
+	if !strings.HasPrefix(first, "compose-") {
+		t.Fatalf("expected fallback compose name prefix, got %q", first)
+	}
+}
+
+func TestResolveWorkspaceRootUsesHomeDirByDefault(t *testing.T) {
+	t.Setenv("SANDBOX_WORKSPACE_DIR", "")
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("expected home directory to be available: %v", err)
+	}
+
+	if got := resolveWorkspaceRoot(); got != filepath.Clean(homeDir) {
+		t.Fatalf("expected workspace root %q, got %q", filepath.Clean(homeDir), got)
+	}
+}
+
+func TestResolveWorkspaceRootUsesConfiguredPath(t *testing.T) {
+	configured := t.TempDir()
+	t.Setenv("SANDBOX_WORKSPACE_DIR", configured)
+
+	if got := resolveWorkspaceRoot(); got != filepath.Clean(configured) {
+		t.Fatalf("expected workspace root %q, got %q", filepath.Clean(configured), got)
 	}
 }
 
@@ -642,6 +767,48 @@ func TestCreateContainerEndpointStartsContainerWhenRequested(t *testing.T) {
 
 	if !bytes.Contains(w.Body.Bytes(), []byte(`"started":true`)) {
 		t.Fatalf("expected started=true in response: %s", w.Body.String())
+	}
+}
+
+func TestRestartContainerEndpoint(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return `{"ID":"cid-123","Image":"ubuntu:24.04","Names":"sandbox-one","Status":"Up 5 minutes","Labels":"open-sandbox.managed=true,open-sandbox.owner_id=admin-user"}` + "\n", "", nil
+	}
+
+	stopped := false
+	started := false
+	m := &mockDocker{
+		containerInspectFn: func(context.Context, string) (container.InspectResponse, error) {
+			return container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{State: &container.State{Running: true}}}, nil
+		},
+		containerStopFn: func(_ context.Context, id string, _ container.StopOptions) error {
+			stopped = id == "cid-123"
+			return nil
+		},
+		containerStartFn: func(_ context.Context, id string, _ container.StartOptions) error {
+			started = id == "cid-123"
+			return nil
+		},
+	}
+
+	s := newTestServer(m)
+	req := httptest.NewRequest(http.MethodPost, "/api/containers/cid-123/restart", bytes.NewBufferString(`{}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if !stopped || !started {
+		t.Fatalf("expected container to be stopped then started, stopped=%v started=%v", stopped, started)
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"restarted":true`)) {
+		t.Fatalf("expected restarted=true in response: %s", w.Body.String())
 	}
 }
 
@@ -731,6 +898,309 @@ func TestListContainersEndpoint(t *testing.T) {
 
 	if !bytes.Contains(w.Body.Bytes(), []byte("sandbox-one")) {
 		t.Fatalf("expected container response body: %s", w.Body.String())
+	}
+}
+
+func TestListContainersFiltersToCurrentUser(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return strings.Join([]string{
+			`{"ID":"owned-sandbox","Image":"ubuntu:24.04","Names":"mine","Status":"Up 1 minute","Labels":"open-sandbox.managed=true,open-sandbox.owner_id=member-1"}`,
+			`{"ID":"direct-owned","Image":"alpine:3.20","Names":"direct","Status":"Up 1 minute","Labels":"open-sandbox.managed=true,open-sandbox.owner_id=member-1"}`,
+			`{"ID":"other-sandbox","Image":"ubuntu:24.04","Names":"other","Status":"Up 1 minute","Labels":"open-sandbox.managed=true,open-sandbox.owner_id=member-2"}`,
+			`{"ID":"compose-unowned","Image":"redis:7","Names":"compose","Status":"Up 1 minute","Labels":"com.docker.compose.project=shared"}`,
+		}, "\n"), "", nil
+	}
+
+	sandboxStore := &mockSandboxStore{
+		listSandboxesFn: func(context.Context) ([]store.Sandbox, error) {
+			return []store.Sandbox{
+				{ID: "sandbox-1", ContainerID: "owned-sandbox", OwnerID: "member-1", OwnerUsername: "alice"},
+				{ID: "sandbox-2", ContainerID: "other-sandbox", OwnerID: "member-2", OwnerUsername: "bob"},
+			}, nil
+		},
+	}
+
+	s := newTestServerWithStore(&mockDocker{}, sandboxStore)
+	req := httptest.NewRequest(http.MethodGet, "/api/containers", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"owned-sandbox"`)) || !bytes.Contains(w.Body.Bytes(), []byte(`"direct-owned"`)) {
+		t.Fatalf("expected owned containers in response: %s", w.Body.String())
+	}
+	if bytes.Contains(w.Body.Bytes(), []byte(`"other-sandbox"`)) || bytes.Contains(w.Body.Bytes(), []byte(`"compose-unowned"`)) {
+		t.Fatalf("expected unowned containers to be filtered out: %s", w.Body.String())
+	}
+}
+
+func TestContainerAccessRejectsOtherUsers(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return `{"ID":"other-sandbox","Image":"ubuntu:24.04","Names":"other","Status":"Up 1 minute","Labels":"open-sandbox.managed=true,open-sandbox.owner_id=member-2"}` + "\n", "", nil
+	}
+
+	stopped := false
+	m := &mockDocker{
+		containerStopFn: func(context.Context, string, container.StopOptions) error {
+			stopped = true
+			return nil
+		},
+	}
+	sandboxStore := &mockSandboxStore{
+		listSandboxesFn: func(context.Context) ([]store.Sandbox, error) {
+			return []store.Sandbox{{ID: "sandbox-2", ContainerID: "other-sandbox", OwnerID: "member-2", OwnerUsername: "bob"}}, nil
+		},
+	}
+
+	s := newTestServerWithStore(m, sandboxStore)
+	req := httptest.NewRequest(http.MethodPost, "/api/containers/other-sandbox/stop", bytes.NewBufferString(`{}`))
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+	if stopped {
+		t.Fatal("expected unauthorized container stop to be blocked")
+	}
+}
+
+func TestListContainersIncludesOwnedComposeProjects(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return `{"ID":"compose-owned","Image":"redis:7","Names":"compose-owned","Status":"Up 1 minute","Labels":"com.docker.compose.project=demo,com.docker.compose.service=cache"}` + "\n", "", nil
+	}
+
+	s := newTestServer(&mockDocker{})
+	s.workspaceRoot = t.TempDir()
+	projectDir := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", "demo")
+	if err := ensurePrivateDir(projectDir); err != nil {
+		t.Fatalf("expected compose project dir: %v", err)
+	}
+	if err := s.writeComposeProjectOwnerMetadata(projectDir, AuthIdentity{UserID: "member-1", Username: "alice"}); err != nil {
+		t.Fatalf("expected owner metadata to be written: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/containers", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"compose-owned"`)) {
+		t.Fatalf("expected owned compose container in response: %s", w.Body.String())
+	}
+}
+
+func TestResetDirectContainerEndpoint(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return `{"ID":"direct-1","Image":"alpine:3.20","Names":"direct-box","Status":"Up 1 minute","Labels":"open-sandbox.managed=true,open-sandbox.kind=direct,open-sandbox.managed_id=ctr-123,open-sandbox.owner_id=admin-user,open-sandbox.owner_username=admin"}` + "\n", "", nil
+	}
+
+	removed := false
+	started := false
+	createdName := ""
+	m := &mockDocker{
+		containerRemoveFn: func(_ context.Context, id string, _ container.RemoveOptions) error {
+			removed = id == "direct-1"
+			return nil
+		},
+		containerCreateFn: func(_ context.Context, config *container.Config, hostConfig *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, name string) (container.CreateResponse, error) {
+			createdName = name
+			if config.Labels[labelOpenSandboxManagedID] != "ctr-123" {
+				t.Fatalf("expected managed id label to be preserved, got %q", config.Labels[labelOpenSandboxManagedID])
+			}
+			if config.Labels[labelOpenSandboxKind] != managedKindDirect {
+				t.Fatalf("expected direct kind label, got %q", config.Labels[labelOpenSandboxKind])
+			}
+			if hostConfig.AutoRemove {
+				t.Fatal("expected auto remove to stay false")
+			}
+			return container.CreateResponse{ID: "direct-2"}, nil
+		},
+		containerStartFn: func(_ context.Context, id string, _ container.StartOptions) error {
+			started = id == "direct-2"
+			return nil
+		},
+	}
+
+	s := newTestServer(m)
+	s.workspaceRoot = t.TempDir()
+	if err := s.writeDirectContainerSpec("ctr-123", CreateContainerRequest{Image: "alpine:3.20", Name: "direct-box", Start: true}); err != nil {
+		t.Fatalf("expected direct container spec to be written: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/containers/direct-1/reset", bytes.NewBufferString(`{}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if !removed || !started {
+		t.Fatalf("expected direct container reset to recreate container, removed=%v started=%v", removed, started)
+	}
+	if createdName != "direct-box" {
+		t.Fatalf("expected container name to be reused, got %q", createdName)
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"container_id":"direct-2"`)) {
+		t.Fatalf("expected replacement container id in response: %s", w.Body.String())
+	}
+}
+
+func TestResetComposeContainerEndpoint(t *testing.T) {
+	original := commandRunner
+	originalInDir := commandRunnerInDir
+	defer func() {
+		commandRunner = original
+		commandRunnerInDir = originalInDir
+	}()
+
+	callCount := 0
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		callCount++
+		if callCount == 1 {
+			return `{"ID":"compose-old","Image":"redis:7","Names":"demo-cache-1","Status":"Up 1 minute","Labels":"com.docker.compose.project=demo,com.docker.compose.service=cache"}` + "\n", "", nil
+		}
+		return `{"ID":"compose-new","Image":"redis:7","Names":"demo-cache-1","Status":"Up 1 minute","Labels":"com.docker.compose.project=demo,com.docker.compose.service=cache"}` + "\n", "", nil
+	}
+
+	var capturedDir string
+	var capturedArgs []string
+	commandRunnerInDir = func(_ context.Context, dir string, _ string, args ...string) (string, string, error) {
+		capturedDir = dir
+		capturedArgs = append([]string(nil), args...)
+		return "compose recreated", "", nil
+	}
+
+	s := newTestServer(&mockDocker{})
+	s.workspaceRoot = t.TempDir()
+	projectDir := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", "demo")
+	if err := ensurePrivateDir(projectDir); err != nil {
+		t.Fatalf("expected compose project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "docker-compose.yml"), []byte("services:\n  cache:\n    image: redis:7\n"), 0o600); err != nil {
+		t.Fatalf("expected compose file: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/containers/compose-old/reset", bytes.NewBufferString(`{}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if capturedDir != projectDir {
+		t.Fatalf("expected compose command dir %q, got %q", projectDir, capturedDir)
+	}
+	joined := strings.Join(capturedArgs, " ")
+	if !strings.Contains(joined, "up -d --force-recreate cache") {
+		t.Fatalf("expected compose reset args, got %v", capturedArgs)
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"container_id":"compose-new"`)) {
+		t.Fatalf("expected replacement compose container id in response: %s", w.Body.String())
+	}
+}
+
+func TestWriteManagedComposeFileUsesRestrictedPermissions(t *testing.T) {
+	projectDir := filepath.Join(t.TempDir(), "compose-project")
+	composeFile, err := writeManagedComposeFile(projectDir, "services:\n  app:\n    image: alpine:3.20\n")
+	if err != nil {
+		t.Fatalf("expected managed compose file to be written: %v", err)
+	}
+
+	projectInfo, err := os.Stat(projectDir)
+	if err != nil {
+		t.Fatalf("expected project dir to exist: %v", err)
+	}
+	if got := projectInfo.Mode().Perm(); got != 0o700 {
+		t.Fatalf("expected project dir mode 0700, got %#o", got)
+	}
+
+	fileInfo, err := os.Stat(composeFile)
+	if err != nil {
+		t.Fatalf("expected compose file to exist: %v", err)
+	}
+	if got := fileInfo.Mode().Perm(); got != 0o600 {
+		t.Fatalf("expected compose file mode 0600, got %#o", got)
+	}
+}
+
+func TestPrepareComposeProjectLocksManagedDirectories(t *testing.T) {
+	s := newTestServer(&mockDocker{})
+	s.workspaceRoot = t.TempDir()
+
+	project, err := s.prepareComposeProject(ComposeRequest{
+		ProjectName: "sandbox",
+		Content:     "services:\n  app:\n    image: alpine:3.20\n",
+	})
+	if err != nil {
+		t.Fatalf("expected compose project to be prepared: %v", err)
+	}
+
+	for _, dir := range []string{filepath.Join(s.workspaceRoot, ".open-sandbox"), filepath.Join(s.workspaceRoot, ".open-sandbox", "compose"), project.ProjectDir} {
+		info, statErr := os.Stat(dir)
+		if statErr != nil {
+			t.Fatalf("expected managed dir %q: %v", dir, statErr)
+		}
+		if got := info.Mode().Perm(); got != 0o700 {
+			t.Fatalf("expected dir %q mode 0700, got %#o", dir, got)
+		}
+	}
+}
+
+func TestAuthorizeComposeProjectAccessRejectsForeignOwner(t *testing.T) {
+	s := newTestServer(&mockDocker{})
+	s.workspaceRoot = t.TempDir()
+	projectDir := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", "demo")
+	if err := ensurePrivateDir(projectDir); err != nil {
+		t.Fatalf("expected compose project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "docker-compose.yml"), []byte("services:\n  app:\n    image: alpine:3.20\n"), 0o600); err != nil {
+		t.Fatalf("expected compose file: %v", err)
+	}
+	if err := s.writeComposeProjectOwnerMetadata(projectDir, AuthIdentity{UserID: "owner-1", Username: "alice"}); err != nil {
+		t.Fatalf("expected owner metadata to be written: %v", err)
+	}
+
+	project := s.composeProjectContextForName("demo")
+	shouldWriteOwner, err := s.authorizeComposeProjectAccess(AuthIdentity{UserID: "owner-2", Username: "bob", Role: roleMember}, project)
+	if err == nil {
+		t.Fatal("expected foreign owner access to be rejected")
+	}
+	if shouldWriteOwner {
+		t.Fatal("expected foreign owner access to avoid owner writes")
+	}
+
+	owner, hasOwner, err := s.readComposeProjectOwnerMetadata(projectDir)
+	if err != nil {
+		t.Fatalf("expected owner metadata to remain readable: %v", err)
+	}
+	if !hasOwner || owner.UserID != "owner-1" {
+		t.Fatalf("expected original owner metadata to remain intact: %+v", owner)
 	}
 }
 
@@ -916,6 +1386,12 @@ func TestSandboxExecEndpointUsesSandboxContainer(t *testing.T) {
 }
 
 func TestExecEndpoint(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return `{"ID":"c-1","Image":"ubuntu:24.04","Names":"sandbox-one","Status":"Up 5 minutes","Labels":"open-sandbox.managed=true,open-sandbox.owner_id=admin-user"}` + "\n", "", nil
+	}
+
 	hijacked := fakeHijackedResponse([]byte("command output\n"), []byte(""))
 	m := &mockDocker{
 		containerExecCreateFn: func(context.Context, string, container.ExecOptions) (container.ExecCreateResponse, error) {
@@ -1105,6 +1581,12 @@ func TestGitCloneEndpointBuildsExpectedCommand(t *testing.T) {
 }
 
 func TestLogStreamEndpoint(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return `{"ID":"c-2","Image":"ubuntu:24.04","Names":"sandbox-two","Status":"Up 5 minutes","Labels":"open-sandbox.managed=true,open-sandbox.owner_id=admin-user"}` + "\n", "", nil
+	}
+
 	stream := fakeMuxedStream([]byte("hello\n"), []byte("warn\n"))
 	m := &mockDocker{
 		containerInspectFn: func(context.Context, string) (container.InspectResponse, error) {

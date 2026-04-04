@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -93,6 +94,30 @@ type Server struct {
 }
 
 var commandRunner = runCommand
+var commandRunnerInDir = runCommandInDir
+
+type composeProjectContext struct {
+	ProjectName string
+	ProjectDir  string
+	ComposeFile string
+}
+
+const (
+	labelOpenSandboxManaged       = "open-sandbox.managed"
+	labelOpenSandboxOwnerID       = "open-sandbox.owner_id"
+	labelOpenSandboxOwnerUsername = "open-sandbox.owner_username"
+	labelOpenSandboxKind          = "open-sandbox.kind"
+	labelOpenSandboxManagedID     = "open-sandbox.managed_id"
+	labelOpenSandboxSandboxID     = "open-sandbox.sandbox_id"
+	managedKindDirect             = "direct"
+	managedKindSandbox            = "sandbox"
+	composeOwnerMetadataFile      = ".owner.json"
+)
+
+type managedOwnerMetadata struct {
+	UserID   string `json:"user_id"`
+	Username string `json:"username"`
+}
 
 type ErrorResponse struct {
 	Error  string `json:"error"`
@@ -286,6 +311,8 @@ func (s *Server) registerRoutes() {
 
 		api.GET("/containers", s.listContainers)
 		api.POST("/containers/create", s.createContainer)
+		api.POST("/containers/:id/restart", s.restartContainer)
+		api.POST("/containers/:id/reset", s.resetContainer)
 		api.POST("/containers/:id/stop", s.stopContainer)
 		api.DELETE("/containers/:id", s.removeContainer)
 		api.POST("/containers/:id/exec", s.execInContainer)
@@ -549,14 +576,32 @@ func (s *Server) composeUp(c *gin.Context) {
 		return
 	}
 
-	composeFile, cleanup, err := writeTempComposeFile(req.Content)
+	identity, ok := authIdentityFromContext(c)
+	if !ok {
+		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
+		return
+	}
+
+	existingProject := s.composeProjectContextForName(composeProjectName(req.ProjectName, req.Content))
+	shouldWriteOwner, err := s.authorizeComposeProjectAccess(identity, existingProject)
+	if err != nil {
+		writeError(c, http.StatusNotFound, err)
+		return
+	}
+
+	project, err := s.prepareComposeProject(req)
 	if err != nil {
 		writeError(c, http.StatusBadRequest, err)
 		return
 	}
-	defer cleanup()
+	if shouldWriteOwner {
+		if err := s.writeComposeProjectOwnerMetadata(project.ProjectDir, identity); err != nil {
+			writeError(c, http.StatusInternalServerError, err)
+			return
+		}
+	}
 
-	args := buildComposeArgs(composeFile, req, "up", "-d")
+	args := buildComposeArgs(project, req, "up", "-d")
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		writeError(c, http.StatusInternalServerError, errors.New("streaming not supported"))
@@ -564,6 +609,7 @@ func (s *Server) composeUp(c *gin.Context) {
 	}
 
 	cmd := exec.CommandContext(c.Request.Context(), "docker", args...)
+	cmd.Dir = project.ProjectDir
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
@@ -643,15 +689,26 @@ func (s *Server) composeDown(c *gin.Context) {
 		return
 	}
 
-	composeFile, cleanup, err := writeTempComposeFile(req.Content)
+	identity, ok := authIdentityFromContext(c)
+	if !ok {
+		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
+		return
+	}
+
+	existingProject := s.composeProjectContextForName(composeProjectName(req.ProjectName, req.Content))
+	if _, err := s.authorizeComposeProjectAccess(identity, existingProject); err != nil {
+		writeError(c, http.StatusNotFound, err)
+		return
+	}
+
+	project, err := s.prepareComposeProject(req)
 	if err != nil {
 		writeError(c, http.StatusBadRequest, err)
 		return
 	}
-	defer cleanup()
 
-	args := buildComposeArgs(composeFile, req, "down")
-	stdout, stderr, err := commandRunner(c.Request.Context(), "docker", args...)
+	args := buildComposeArgs(project, req, "down")
+	stdout, stderr, err := commandRunnerInDir(c.Request.Context(), project.ProjectDir, "docker", args...)
 	if err != nil {
 		writeErrorWithDetails(c, http.StatusInternalServerError, "compose down failed", "command_failed", strings.TrimSpace(stderr))
 		return
@@ -678,15 +735,26 @@ func (s *Server) composeStatus(c *gin.Context) {
 		return
 	}
 
-	composeFile, cleanup, err := writeTempComposeFile(req.Content)
+	identity, ok := authIdentityFromContext(c)
+	if !ok {
+		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
+		return
+	}
+
+	existingProject := s.composeProjectContextForName(composeProjectName(req.ProjectName, req.Content))
+	if _, err := s.authorizeComposeProjectAccess(identity, existingProject); err != nil {
+		writeError(c, http.StatusNotFound, err)
+		return
+	}
+
+	project, err := s.prepareComposeProject(req)
 	if err != nil {
 		writeError(c, http.StatusBadRequest, err)
 		return
 	}
-	defer cleanup()
 
-	args := buildComposeArgs(composeFile, req, "ps", "--format", "json")
-	stdout, stderr, err := commandRunner(c.Request.Context(), "docker", args...)
+	args := buildComposeArgs(project, req, "ps", "--format", "json")
+	stdout, stderr, err := commandRunnerInDir(c.Request.Context(), project.ProjectDir, "docker", args...)
 	if err != nil {
 		writeErrorWithDetails(c, http.StatusInternalServerError, "compose status failed", "command_failed", strings.TrimSpace(stderr))
 		return
@@ -752,31 +820,27 @@ func (s *Server) createContainer(c *gin.Context) {
 		return
 	}
 
-	containerConfig := &container.Config{
-		Image:      req.Image,
-		Cmd:        req.Cmd,
-		Env:        req.Env,
-		WorkingDir: req.Workdir,
-		Tty:        req.TTY,
-		User:       req.User,
+	identity, ok := authIdentityFromContext(c)
+	if !ok {
+		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
+		return
 	}
-	hostConfig := &container.HostConfig{
-		Binds:      req.Binds,
-		AutoRemove: req.AutoRemove,
+	managedID := newManagedResourceID("ctr")
+	if err := s.writeDirectContainerSpec(managedID, req); err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
 	}
 
-	if len(req.Ports) > 0 {
-		exposedPorts, portBindings, err := nat.ParsePortSpecs(req.Ports)
-		if err != nil {
-			writeError(c, http.StatusBadRequest, fmt.Errorf("parse ports: %w", err))
-			return
-		}
-		containerConfig.ExposedPorts = exposedPorts
-		hostConfig.PortBindings = portBindings
+	containerConfig, hostConfig, err := buildDirectContainerConfigs(req, identity.UserID, identity.Username, managedID)
+	if err != nil {
+		_ = os.Remove(s.directContainerSpecPath(managedID))
+		writeError(c, http.StatusBadRequest, err)
+		return
 	}
 
 	created, err := s.createContainerWithAutoPull(c.Request.Context(), req.Image, containerConfig, hostConfig, req.Name)
 	if err != nil {
+		_ = os.Remove(s.directContainerSpecPath(managedID))
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
@@ -815,13 +879,18 @@ func isMissingImageError(err error) bool {
 // @Failure 500 {object} ErrorResponse
 // @Router /api/containers/{id}/exec [post]
 func (s *Server) execInContainer(c *gin.Context) {
+	target, ok := s.loadAuthorizedContainer(c)
+	if !ok {
+		return
+	}
+
 	var req ExecRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c, http.StatusBadRequest, err)
 		return
 	}
 
-	resp, err := s.runContainerExec(c.Request.Context(), c.Param("id"), req)
+	resp, err := s.runContainerExec(c.Request.Context(), target.ID, req)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
@@ -842,20 +911,24 @@ func (s *Server) execInContainer(c *gin.Context) {
 // @Failure 500 {object} ErrorResponse
 // @Router /api/containers/{id}/logs [get]
 func (s *Server) streamLogs(c *gin.Context) {
+	target, ok := s.loadAuthorizedContainer(c)
+	if !ok {
+		return
+	}
+
 	follow, _ := strconv.ParseBool(c.DefaultQuery("follow", "true"))
 	tail := c.DefaultQuery("tail", "100")
-	s.streamLogsForContainer(c, c.Param("id"), follow, tail)
+	s.streamLogsForContainer(c, target.ID, follow, tail)
 }
 
 func (s *Server) streamContainerTerminal(c *gin.Context) {
-	containerID := strings.TrimSpace(c.Param("id"))
-	if containerID == "" {
-		writeError(c, http.StatusBadRequest, errors.New("container id is required"))
+	target, ok := s.loadAuthorizedContainer(c)
+	if !ok {
 		return
 	}
 
 	workdir := strings.TrimSpace(c.Query("workdir"))
-	s.streamTerminalForContainer(c, containerID, workdir)
+	s.streamTerminalForContainer(c, target.ID, workdir)
 }
 
 func (s *Server) streamTerminalForContainer(c *gin.Context, containerID string, workdir string) {
@@ -1143,11 +1216,8 @@ func emitSSE(c *gin.Context, mu *sync.Mutex, event string, data string) {
 	flusher.Flush()
 }
 
-func buildComposeArgs(composeFile string, req ComposeRequest, cmd string, extra ...string) []string {
-	args := []string{"compose", "-f", composeFile}
-	if req.ProjectName != "" {
-		args = append(args, "-p", req.ProjectName)
-	}
+func buildComposeArgs(project composeProjectContext, req ComposeRequest, cmd string, extra ...string) []string {
+	args := []string{"compose", "--project-name", project.ProjectName, "--project-directory", project.ProjectDir, "-f", project.ComposeFile}
 
 	args = append(args, cmd)
 	if cmd == "down" {
@@ -1166,37 +1236,274 @@ func buildComposeArgs(composeFile string, req ComposeRequest, cmd string, extra 
 	return args
 }
 
-func writeTempComposeFile(content string) (string, func(), error) {
+func buildDirectContainerConfigs(req CreateContainerRequest, ownerID string, ownerUsername string, managedID string) (*container.Config, *container.HostConfig, error) {
+	containerConfig := &container.Config{
+		Image:      req.Image,
+		Cmd:        req.Cmd,
+		Env:        req.Env,
+		WorkingDir: req.Workdir,
+		Tty:        req.TTY,
+		User:       req.User,
+		Labels: map[string]string{
+			labelOpenSandboxManaged:       "true",
+			labelOpenSandboxOwnerID:       ownerID,
+			labelOpenSandboxOwnerUsername: ownerUsername,
+			labelOpenSandboxKind:          managedKindDirect,
+			labelOpenSandboxManagedID:     managedID,
+		},
+	}
+	hostConfig := &container.HostConfig{
+		Binds:      req.Binds,
+		AutoRemove: req.AutoRemove,
+	}
+
+	if len(req.Ports) > 0 {
+		exposedPorts, portBindings, err := nat.ParsePortSpecs(req.Ports)
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse ports: %w", err)
+		}
+		containerConfig.ExposedPorts = exposedPorts
+		hostConfig.PortBindings = portBindings
+	}
+
+	return containerConfig, hostConfig, nil
+}
+
+func (s *Server) prepareComposeProject(req ComposeRequest) (composeProjectContext, error) {
+	composeRoot := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose")
+	if err := os.MkdirAll(composeRoot, 0o700); err != nil {
+		return composeProjectContext{}, fmt.Errorf("create compose root: %w", err)
+	}
+	if err := os.Chmod(composeRoot, 0o700); err != nil {
+		return composeProjectContext{}, fmt.Errorf("chmod compose root: %w", err)
+	}
+	hiddenRoot := filepath.Dir(composeRoot)
+	if err := os.Chmod(hiddenRoot, 0o700); err != nil {
+		return composeProjectContext{}, fmt.Errorf("chmod compose storage root: %w", err)
+	}
+
+	projectName := composeProjectName(req.ProjectName, req.Content)
+	projectDir := filepath.Join(composeRoot, projectName)
+	composeFile, err := writeManagedComposeFile(projectDir, req.Content)
+	if err != nil {
+		return composeProjectContext{}, err
+	}
+
+	return composeProjectContext{
+		ProjectName: projectName,
+		ProjectDir:  projectDir,
+		ComposeFile: composeFile,
+	}, nil
+}
+
+func (s *Server) existingComposeProject(projectName string) (composeProjectContext, error) {
+	sanitized := sanitizeComposeProjectName(projectName)
+	if sanitized == "" {
+		return composeProjectContext{}, errors.New("compose project name is required")
+	}
+	projectDir := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", sanitized)
+	composeFile := filepath.Join(projectDir, "docker-compose.yml")
+	if _, err := os.Stat(composeFile); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return composeProjectContext{}, fmt.Errorf("compose project %q not found", sanitized)
+		}
+		return composeProjectContext{}, fmt.Errorf("inspect compose project: %w", err)
+	}
+
+	return composeProjectContext{ProjectName: sanitized, ProjectDir: projectDir, ComposeFile: composeFile}, nil
+}
+
+func (s *Server) composeProjectContextForName(projectName string) composeProjectContext {
+	return composeProjectContext{
+		ProjectName: projectName,
+		ProjectDir:  filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", projectName),
+		ComposeFile: filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", projectName, "docker-compose.yml"),
+	}
+}
+
+func (s *Server) authorizeComposeProjectAccess(identity AuthIdentity, project composeProjectContext) (bool, error) {
+	owner, hasOwner, err := s.readComposeProjectOwnerMetadata(project.ProjectDir)
+	if err != nil {
+		return false, err
+	}
+	if hasOwner {
+		if identity.IsAdmin() || owner.UserID == identity.UserID {
+			return false, nil
+		}
+		return false, errors.New("compose project not found")
+	}
+	if _, err := os.Stat(project.ComposeFile); err == nil {
+		if identity.IsAdmin() {
+			return false, nil
+		}
+		return false, errors.New("compose project not found")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("inspect compose project: %w", err)
+	}
+	return true, nil
+}
+
+func composeProjectName(raw string, content string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed != "" {
+		sanitized := sanitizeComposeProjectName(trimmed)
+		if sanitized != "" {
+			return sanitized
+		}
+	}
+
+	sum := sha256.Sum256([]byte(content))
+	return fmt.Sprintf("compose-%x", sum[:6])
+}
+
+func sanitizeComposeProjectName(raw string) string {
+	var b strings.Builder
+	b.Grow(len(raw))
+	lastWasDash := false
+	for _, r := range strings.ToLower(strings.TrimSpace(raw)) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastWasDash = false
+		case r == '-', r == '_':
+			b.WriteRune(r)
+			lastWasDash = false
+		case !lastWasDash:
+			b.WriteByte('-')
+			lastWasDash = true
+		}
+	}
+
+	return strings.Trim(b.String(), "-_")
+}
+
+func writeManagedComposeFile(projectDir string, content string) (string, error) {
 	trimmed := strings.TrimSpace(content)
 	if trimmed == "" {
-		return "", nil, errors.New("compose content is required")
+		return "", errors.New("compose content is required")
 	}
 
-	f, err := os.CreateTemp("", "open-sandbox-compose-*.yaml")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		return "", fmt.Errorf("create compose project dir: %w", err)
+	}
+	if err := os.Chmod(projectDir, 0o700); err != nil {
+		return "", fmt.Errorf("chmod compose project dir: %w", err)
+	}
+
+	composeFile := filepath.Join(projectDir, "docker-compose.yml")
+	if err := os.WriteFile(composeFile, []byte(content), 0o600); err != nil {
+		return "", fmt.Errorf("write compose file: %w", err)
+	}
+
+	return composeFile, nil
+}
+
+func (s *Server) writeComposeProjectOwnerMetadata(projectDir string, identity AuthIdentity) error {
+	owner, hasOwner, err := s.readComposeProjectOwnerMetadata(projectDir)
 	if err != nil {
-		return "", nil, fmt.Errorf("create compose temp file: %w", err)
+		return err
+	}
+	if hasOwner {
+		if owner.UserID != identity.UserID {
+			return errors.New("compose project owner mismatch")
+		}
+		return nil
 	}
 
-	if _, err := f.WriteString(content); err != nil {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
-		return "", nil, fmt.Errorf("write compose temp file: %w", err)
+	ownerFile := filepath.Join(projectDir, composeOwnerMetadataFile)
+	payload, err := json.Marshal(managedOwnerMetadata{UserID: identity.UserID, Username: identity.Username})
+	if err != nil {
+		return fmt.Errorf("encode compose owner metadata: %w", err)
 	}
-
-	if err := f.Close(); err != nil {
-		_ = os.Remove(f.Name())
-		return "", nil, fmt.Errorf("close compose temp file: %w", err)
+	if err := os.WriteFile(ownerFile, payload, 0o600); err != nil {
+		return fmt.Errorf("write compose owner metadata: %w", err)
 	}
+	return nil
+}
 
-	cleanup := func() {
-		_ = os.Remove(f.Name())
+func (s *Server) readComposeProjectOwnerMetadata(projectDir string) (managedOwnerMetadata, bool, error) {
+	ownerFile := filepath.Join(projectDir, composeOwnerMetadataFile)
+	payload, err := os.ReadFile(ownerFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return managedOwnerMetadata{}, false, nil
+		}
+		return managedOwnerMetadata{}, false, fmt.Errorf("read compose owner metadata: %w", err)
 	}
+	var owner managedOwnerMetadata
+	if err := json.Unmarshal(payload, &owner); err != nil {
+		return managedOwnerMetadata{}, false, fmt.Errorf("decode compose owner metadata: %w", err)
+	}
+	return owner, true, nil
+}
 
-	return f.Name(), cleanup, nil
+func (s *Server) directContainerSpecRoot() string {
+	return filepath.Join(s.workspaceRoot, ".open-sandbox", "containers")
+}
+
+func (s *Server) directContainerSpecPath(managedID string) string {
+	return filepath.Join(s.directContainerSpecRoot(), managedID+".json")
+}
+
+func (s *Server) writeDirectContainerSpec(managedID string, req CreateContainerRequest) error {
+	if err := ensurePrivateDir(filepath.Join(s.workspaceRoot, ".open-sandbox")); err != nil {
+		return err
+	}
+	if err := ensurePrivateDir(s.directContainerSpecRoot()); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("encode direct container spec: %w", err)
+	}
+	if err := os.WriteFile(s.directContainerSpecPath(managedID), payload, 0o600); err != nil {
+		return fmt.Errorf("write direct container spec: %w", err)
+	}
+	return nil
+}
+
+func (s *Server) readDirectContainerSpec(managedID string) (CreateContainerRequest, error) {
+	payload, err := os.ReadFile(s.directContainerSpecPath(managedID))
+	if err != nil {
+		return CreateContainerRequest{}, fmt.Errorf("read direct container spec: %w", err)
+	}
+	var req CreateContainerRequest
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return CreateContainerRequest{}, fmt.Errorf("decode direct container spec: %w", err)
+	}
+	return req, nil
+}
+
+func ensurePrivateDir(path string) error {
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return fmt.Errorf("create private dir %q: %w", path, err)
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		return fmt.Errorf("chmod private dir %q: %w", path, err)
+	}
+	return nil
+}
+
+func newManagedResourceID(prefix string) string {
+	requestID := newRequestID()
+	if len(requestID) > 12 {
+		requestID = requestID[:12]
+	}
+	if strings.TrimSpace(prefix) == "" {
+		return requestID
+	}
+	return prefix + "-" + requestID
 }
 
 func runCommand(ctx context.Context, name string, args ...string) (string, string, error) {
+	return runCommandInDir(ctx, "", name, args...)
+}
+
+func runCommandInDir(ctx context.Context, dir string, name string, args ...string) (string, string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	if strings.TrimSpace(dir) != "" {
+		cmd.Dir = dir
+	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -1597,7 +1904,12 @@ func loadExecWaitTimeout() time.Duration {
 func resolveWorkspaceRoot() string {
 	raw := strings.TrimSpace(os.Getenv("SANDBOX_WORKSPACE_DIR"))
 	if raw == "" {
-		raw = "."
+		homeDir, err := os.UserHomeDir()
+		if err == nil {
+			raw = homeDir
+		} else {
+			raw = "."
+		}
 	}
 
 	resolved, err := filepath.Abs(raw)

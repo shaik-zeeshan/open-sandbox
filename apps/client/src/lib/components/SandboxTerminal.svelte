@@ -8,11 +8,13 @@
 	type XtermTerminal = import("@xterm/xterm").Terminal;
 
 	let {
-		sandboxId,
+		targetId,
+		targetType,
 		workspaceDir,
 		config
 	} = $props<{
-		sandboxId: string;
+		targetId: string;
+		targetType: "sandbox" | "container";
 		workspaceDir: string;
 		config: ApiConfig;
 	}>();
@@ -145,7 +147,7 @@
 		statusText = "Connecting shell...";
 
 		const ws = new WebSocket(
-			resolveWebSocketUrl(config, `/api/sandboxes/${encodeURIComponent(sandboxId)}/terminal/ws`, {
+			resolveWebSocketUrl(config, `/api/${targetType === "sandbox" ? "sandboxes" : "containers"}/${encodeURIComponent(targetId)}/terminal/ws`, {
 				cols: terminal.cols,
 				rows: terminal.rows
 			})

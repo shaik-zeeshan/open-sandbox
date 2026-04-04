@@ -1,19 +1,37 @@
 <script lang="ts">
-	import type { ContainerSummary, PortSummary, Sandbox } from "$lib/api";
+	import type { PortSummary } from "$lib/api";
 
 	let {
-		sandbox,
-		container,
+		name,
+		image,
+		status,
+		containerId,
+		ports = [],
+		createdAt = null,
+		metaLabel = "",
+		metaValue = "",
 		isSelected,
+		showReset = true,
+		deleteLabel = "Delete",
+		deleteTitle = "Delete workload",
 		onOpen,
 		onRestart,
 		onReset,
 		onStop,
 		onDelete
 	} = $props<{
-		sandbox: Sandbox;
-		container: ContainerSummary | null;
+		name: string;
+		image: string;
+		status: string;
+		containerId: string;
+		ports?: PortSummary[];
+		createdAt?: number | null;
+		metaLabel?: string;
+		metaValue?: string;
 		isSelected: boolean;
+		showReset?: boolean;
+		deleteLabel?: string;
+		deleteTitle?: string;
 		onOpen: () => void;
 		onRestart: () => void;
 		onReset: () => void;
@@ -39,8 +57,8 @@
 			.filter(p => typeof p.public === "number" && p.public > 0 && p.type === "tcp")
 			.map(p => `http://localhost:${p.public}`);
 
-	const st = $derived(statusInfo(sandbox.status));
-	const ports = $derived(previewLinks(container?.ports));
+	const st = $derived(statusInfo(status));
+	const previewPorts = $derived(previewLinks(ports));
 </script>
 
 <div class="sandbox-card {isSelected ? 'sandbox-card--selected' : ''}" role="button" tabindex="0"
@@ -51,7 +69,7 @@
 	<div class="card-header">
 		<div class="card-name-row">
 			<div class="status-dot status-dot--{st.cls}"></div>
-			<span class="card-name">{sandbox.name}</span>
+			<span class="card-name">{name}</span>
 		</div>
 		<span class="status-badge status-badge--{st.cls}">{st.label}</span>
 	</div>
@@ -62,33 +80,39 @@
 			<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
 				<rect x="2" y="2" width="20" height="20" rx="5"/><path d="M16 8h.01"/><path d="M8 8h.01"/><path d="M12 8h.01"/><path d="M12 16a4 4 0 0 0 4-4H8a4 4 0 0 0 4 4z"/>
 			</svg>
-			<span class="card-image">{sandbox.image}</span>
+			<span class="card-image">{image}</span>
 		</div>
-		<div class="card-meta-row">
-			<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-				<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-			</svg>
-			<span class="card-date">{formatDate(sandbox.created_at)}</span>
-		</div>
-		{#if ports.length > 0}
-			<div class="card-ports">
-				{#each ports as port}
-					<a
-						class="port-chip"
-						href={port}
-						target="_blank"
-						rel="noreferrer"
-						onclick={(e) => e.stopPropagation()}
-					>
-						{port.replace("http://localhost:", ":")}
-					</a>
-				{/each}
+		{#if metaValue}
+			<div class="card-meta-row">
+				<span class="meta-label">{metaLabel}</span>
+				<span class="card-meta-value">{metaValue}</span>
 			</div>
 		{/if}
-		<div class="card-id">{sandbox.container_id.slice(0, 12)}</div>
+		{#if createdAt !== null && createdAt > 0}
+			<div class="card-meta-row">
+				<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+					<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+				</svg>
+				<span class="card-date">{formatDate(createdAt)}</span>
+			</div>
+		{/if}
+		<div class="card-ports" class:card-ports--empty={previewPorts.length === 0}>
+			{#each previewPorts as port}
+				<a
+					class="port-chip"
+					href={port}
+					target="_blank"
+					rel="noreferrer"
+					onclick={(e) => e.stopPropagation()}
+				>
+					{port.replace("http://localhost:", ":")}
+				</a>
+			{/each}
+		</div>
+		<div class="card-id">{containerId.slice(0, 12)}</div>
 	</div>
 
-	<!-- Actions (shown on hover/selected) -->
+	<!-- Actions -->
 	<div class="card-actions" onclick={(e) => e.stopPropagation()} role="presentation">
 		<button class="action-btn" type="button" onclick={onOpen} title="Open in terminal/files">
 			<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -102,24 +126,26 @@
 			</svg>
 			Restart
 		</button>
-		<button class="action-btn" type="button" onclick={onReset} title="Reset workspace">
-			<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-				<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
-				<path d="M3 3v5h5"/>
-			</svg>
-			Reset
-		</button>
+		{#if showReset}
+			<button class="action-btn" type="button" onclick={onReset} title="Reset workspace">
+				<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+					<path d="M3 3v5h5"/>
+				</svg>
+				Reset
+			</button>
+		{/if}
 		<button class="action-btn" type="button" onclick={onStop} title="Stop container">
 			<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 				<rect x="3" y="3" width="18" height="18" rx="2"/>
 			</svg>
 			Stop
 		</button>
-		<button class="action-btn action-btn--danger" type="button" onclick={onDelete} title="Delete sandbox">
+		<button class="action-btn action-btn--danger" type="button" onclick={onDelete} title={deleteTitle}>
 			<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 				<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
 			</svg>
-			Delete
+			{deleteLabel}
 		</button>
 	</div>
 </div>
@@ -137,6 +163,8 @@
 		gap: 0.625rem;
 		position: relative;
 		overflow: hidden;
+		height: 18rem;
+		max-width: 100%;
 	}
 	.sandbox-card::before {
 		content: '';
@@ -212,6 +240,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.3rem;
+		flex: 1;
 	}
 	.card-meta-row {
 		display: flex;
@@ -219,13 +248,20 @@
 		gap: 0.35rem;
 		color: var(--text-muted);
 	}
-	.card-image, .card-date {
+	.card-image, .card-date, .card-meta-value, .meta-label {
 		font-family: var(--font-mono);
 		font-size: 0.65rem;
+	}
+	.card-image, .card-date, .card-meta-value {
 		color: var(--text-secondary);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+	}
+	.meta-label {
+		color: var(--text-muted);
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
 	}
 	.card-id {
 		font-family: var(--font-mono);
@@ -238,6 +274,13 @@
 		flex-wrap: wrap;
 		gap: 0.3rem;
 		margin-top: 0.1rem;
+		min-height: 1.75rem;
+		max-height: 3.5rem;
+		overflow: hidden;
+		align-content: flex-start;
+	}
+	.card-ports--empty {
+		visibility: hidden;
 	}
 	.port-chip {
 		font-family: var(--font-mono);
@@ -255,23 +298,18 @@
 		border-color: var(--border-hi);
 	}
 
-	/* Actions — hidden until hover or selected */
+	/* Actions */
 	.card-actions {
 		display: flex;
 		align-items: center;
 		gap: 0.3rem;
 		flex-wrap: wrap;
-		opacity: 0;
-		transform: translateY(4px);
-		transition: opacity 0.18s, transform 0.18s var(--ease-snappy);
 		margin-top: 0.25rem;
 		padding-top: 0.625rem;
 		border-top: 1px solid var(--border-dim);
-	}
-	.sandbox-card:hover .card-actions,
-	.sandbox-card--selected .card-actions {
-		opacity: 1;
-		transform: translateY(0);
+		margin-top: auto;
+		min-height: 3.2rem;
+		align-content: flex-start;
 	}
 	.action-btn {
 		display: inline-flex;

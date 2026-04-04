@@ -3,7 +3,7 @@
 	import Combobox from "./Combobox.svelte";
 	import CodeEditor from "./CodeEditor.svelte";
 	import PortsEditor from "./PortsEditor.svelte";
-	import type { ContainerSummary, ImageSearchResult, ImageSummary, Sandbox } from "$lib/api";
+	import type { ContainerSummary, ImageSearchResult, ImageSummary, PortSummary, Sandbox } from "$lib/api";
 
 	type CreateMethod = "existing" | "pull" | "build-context" | "build-inline" | "compose";
 
@@ -17,8 +17,13 @@
 		onOpen,
 		onRestart,
 		onReset,
+		onResetContainer,
 		onStop,
 		onDelete,
+		onOpenContainer,
+		onRestartContainer,
+		onStopContainer,
+		onRemoveContainer,
 		onRefresh,
 		showCreateForm,
 		createName = $bindable(),
@@ -59,8 +64,13 @@
 		onOpen: (id: string) => void;
 		onRestart: (id: string) => void;
 		onReset: (id: string) => void;
+		onResetContainer: (id: string) => void;
 		onStop: (id: string) => void;
 		onDelete: (id: string) => void;
+		onOpenContainer: (id: string) => void;
+		onRestartContainer: (id: string) => void;
+		onStopContainer: (id: string) => void;
+		onRemoveContainer: (id: string) => void;
 		onRefresh: () => void;
 		showCreateForm: boolean;
 		createName: string;
@@ -152,18 +162,99 @@
 
 	// ANSI stripping for pipeline log display (display only, not storage)
 	const stripAnsi = (str: string): string => str.replace(/\x1b\[[0-9;]*[mGKHF]/g, "");
+	let workloadSearch = $state("");
+	const sandboxContainerIDs = $derived(new Set(sandboxes.map((sandbox: Sandbox) => sandbox.container_id)));
+	const runtimeContainers = $derived(containers.filter((container: ContainerSummary) => !sandboxContainerIDs.has(container.id)));
+
+	type WorkloadCardItem = {
+		key: string;
+		kind: "sandbox" | "container";
+		id: string;
+		name: string;
+		image: string;
+		status: string;
+		containerId: string;
+		ports: PortSummary[];
+		createdAt: number | null;
+		metaLabel: string;
+		metaValue: string;
+		canReset: boolean;
+		searchText: string;
+	};
+
+	const workloads = $derived.by<WorkloadCardItem[]>(() => {
+		const sandboxItems = sandboxes.map((sandbox: Sandbox) => ({
+			key: `sandbox:${sandbox.id}`,
+			kind: "sandbox" as const,
+			id: sandbox.id,
+			name: sandbox.name,
+			image: sandbox.image,
+			status: sandbox.status,
+			containerId: sandbox.container_id,
+			ports: containers.find((c: ContainerSummary) => c.id === sandbox.container_id)?.ports ?? sandbox.ports ?? [],
+			createdAt: sandbox.created_at,
+			metaLabel: sandbox.owner_username ? "Owner" : "",
+			metaValue: sandbox.owner_username ?? "",
+			canReset: true,
+			searchText: [sandbox.name, sandbox.image, sandbox.owner_username ?? "", sandbox.container_id].join(" ").toLowerCase()
+		}));
+
+		const containerItems = runtimeContainers.map((container: ContainerSummary) => {
+			const composeProject = container.labels["com.docker.compose.project"] ?? "";
+			const composeService = container.labels["com.docker.compose.service"] ?? "";
+			const primaryName = container.names[0] ?? container.id.slice(0, 12);
+			const metaValue = composeProject ? `${composeProject}${composeService ? ` / ${composeService}` : ""}` : "Runtime container";
+			return {
+				key: `container:${container.id}`,
+				kind: "container" as const,
+				id: container.id,
+				name: primaryName,
+				image: container.image,
+				status: container.status,
+				containerId: container.id,
+				ports: container.ports ?? [],
+				createdAt: container.created ?? null,
+				metaLabel: composeProject ? "Compose" : "Type",
+				metaValue,
+				canReset: composeProject.length > 0 || ((container.labels["open-sandbox.kind"] ?? "") === "direct" && (container.labels["open-sandbox.managed_id"] ?? "").length > 0),
+				searchText: [primaryName, container.image, metaValue, container.id, ...(container.names ?? [])].join(" ").toLowerCase()
+			};
+		});
+
+		return [...sandboxItems, ...containerItems].sort((a, b) => {
+			const createdDiff = (b.createdAt ?? 0) - (a.createdAt ?? 0);
+			if (createdDiff !== 0) {
+				return createdDiff;
+			}
+			return a.name.localeCompare(b.name);
+		});
+	});
+
+	const filteredWorkloads = $derived.by(() => {
+		const query = workloadSearch.trim().toLowerCase();
+		if (query.length === 0) {
+			return workloads;
+		}
+		return workloads.filter((item) => item.searchText.includes(query));
+	});
+
+	const workloadCount = $derived(workloads.length);
 </script>
 
 <div class="list-view anim-fade-up">
 	<!-- Page header -->
 	<div class="list-header">
 		<div class="list-title-group">
-			<h1 class="list-title">Sandboxes</h1>
-			{#if sandboxes.length > 0}
-				<span class="list-count">{sandboxes.length}</span>
+			<h1 class="list-title">Workloads</h1>
+			{#if workloadCount > 0}
+				<span class="list-count">{filteredWorkloads.length === workloadCount ? workloadCount : `${filteredWorkloads.length}/${workloadCount}`}</span>
 			{/if}
 		</div>
 		<div class="list-actions">
+			<label class="search-field" aria-label="Search workloads">
+				<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+				<input class="search-input" bind:value={workloadSearch} placeholder="Search workloads..." />
+			</label>
 			<button class="btn-ghost btn-sm" type="button" onclick={onRefresh} disabled={loading}>
 				{#if loading}
 					<svg class="spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.22-8.56"/></svg>
@@ -183,32 +274,49 @@
 	{#if notice}<p class="alert-ok anim-fade-up">{notice}</p>{/if}
 
 	<!-- Card grid -->
-	{#if sandboxes.length === 0 && !showCreateForm}
+	{#if workloadCount === 0 && !showCreateForm}
 		<div class="empty-state anim-fade-up anim-delay-1">
 			<div class="empty-icon">
 				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
 					<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
 				</svg>
 			</div>
-			<p class="empty-title">{loading ? "Loading..." : "No sandboxes yet"}</p>
+			<p class="empty-title">{loading ? "Loading..." : "No workloads yet"}</p>
 			{#if !loading}
-				<p class="empty-sub">Create your first sandbox to get started.</p>
+				<p class="empty-sub">Create a sandbox or run a compose project to get started.</p>
 				<button class="btn-ghost btn-sm" type="button" onclick={onToggleCreate}>+ New sandbox</button>
 			{/if}
 		</div>
-	{:else if sandboxes.length > 0}
+	{:else if filteredWorkloads.length === 0}
+		<div class="empty-state anim-fade-up anim-delay-1">
+			<div class="empty-icon">
+				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+			</div>
+			<p class="empty-title">No workloads match</p>
+			<p class="empty-sub">Try a different name, image, compose project, or container id.</p>
+		</div>
+	{:else}
 		<div class="sandbox-grid">
-			{#each sandboxes as sandbox, i (sandbox.id)}
+			{#each filteredWorkloads as workload, i (workload.key)}
 				<div class="anim-fade-up" style="animation-delay: {i * 0.035}s">
 					<SandboxCard
-						{sandbox}
-						container={containers.find((c: ContainerSummary) => c.id === sandbox.container_id) ?? null}
+						name={workload.name}
+						image={workload.image}
+						status={workload.status}
+						containerId={workload.containerId}
+						ports={workload.ports}
+						createdAt={workload.createdAt}
+						metaLabel={workload.metaLabel}
+						metaValue={workload.metaValue}
 						isSelected={false}
-						onOpen={() => onOpen(sandbox.id)}
-						onRestart={() => onRestart(sandbox.id)}
-						onReset={() => onReset(sandbox.id)}
-						onStop={() => onStop(sandbox.id)}
-						onDelete={() => onDelete(sandbox.id)}
+						showReset={workload.canReset}
+						deleteLabel={workload.kind === "sandbox" ? "Delete" : "Remove"}
+						deleteTitle={workload.kind === "sandbox" ? "Delete sandbox" : "Remove container"}
+						onOpen={() => workload.kind === "sandbox" ? onOpen(workload.id) : onOpenContainer(workload.id)}
+						onRestart={() => workload.kind === "sandbox" ? onRestart(workload.id) : onRestartContainer(workload.id)}
+						onReset={() => workload.kind === "sandbox" ? onReset(workload.id) : onResetContainer(workload.id)}
+						onStop={() => workload.kind === "sandbox" ? onStop(workload.id) : onStopContainer(workload.id)}
+						onDelete={() => workload.kind === "sandbox" ? onDelete(workload.id) : onRemoveContainer(workload.id)}
 					/>
 				</div>
 			{/each}
@@ -245,13 +353,15 @@
 	<div class="drawer-body">
 		<fieldset class="create-fieldset" disabled={createLoading}>
 
-			<!-- Name -->
-			<div class="form-section">
-				<label class="field-col">
-					<span class="section-label">Sandbox name</span>
-					<input class="field" bind:value={createName} placeholder="my-workspace" required />
-				</label>
-			</div>
+			{#if createMethod !== "compose"}
+				<!-- Name -->
+				<div class="form-section">
+					<label class="field-col">
+						<span class="section-label">Sandbox name</span>
+						<input class="field" bind:value={createName} placeholder="my-workspace" required />
+					</label>
+				</div>
+			{/if}
 
 			<!-- Method -->
 			<div class="form-section">
@@ -355,12 +465,12 @@
 				<div class="form-section">
 					<div class="compose-note">
 						<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-						<span>Docker Compose runs services directly — no sandbox image is created. The Name and Runtime options below are not used for this method.</span>
+						<span>Docker Compose runs services directly and stores the submitted project under <code class="inline-code">.open-sandbox/compose</code> inside the server workspace root.</span>
 					</div>
 					<label class="field-col">
-						<span class="section-label">Project name <span class="opt">(optional)</span></span>
-						<input class="field" bind:value={createComposeProjectName} placeholder="my-project" />
-						<span class="field-help">Defaults to the directory name. Used to namespace compose resources.</span>
+						<span class="section-label">Project name</span>
+						<input class="field" bind:value={createComposeProjectName} placeholder="my-project" required />
+						<span class="field-help">Used for the Docker Compose project name and the managed directory under <code class="inline-code">.open-sandbox/compose</code>.</span>
 					</label>
 					<div class="field-col">
 						<span class="section-label">docker-compose.yml</span>
@@ -480,6 +590,32 @@
 		gap: 0.5rem;
 	}
 
+	.search-field {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.45rem;
+		padding: 0.45rem 0.65rem;
+		border: 1px solid var(--border-dim);
+		border-radius: var(--radius-md);
+		background: var(--bg-surface);
+		color: var(--text-muted);
+		min-width: min(22rem, 40vw);
+	}
+
+	.search-input {
+		border: 0;
+		outline: 0;
+		background: transparent;
+		color: var(--text-primary);
+		font-family: var(--font-mono);
+		font-size: 0.72rem;
+		width: 100%;
+	}
+
+	.search-input::placeholder {
+		color: var(--text-muted);
+	}
+
 	/* Empty state */
 	.empty-state {
 		display: flex;
@@ -520,8 +656,15 @@
 	/* Card grid */
 	.sandbox-grid {
 		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+		grid-template-columns: repeat(auto-fit, minmax(320px, 320px));
 		gap: 0.875rem;
+		align-items: stretch;
+		justify-content: start;
+	}
+
+	.sandbox-grid > :global(.anim-fade-up) {
+		height: 100%;
+		display: flex;
 	}
 
 	/* Backdrop */
@@ -849,6 +992,9 @@
 
 	@media (max-width: 640px) {
 		.list-view { padding: 1rem; }
+		.list-header { align-items: stretch; flex-direction: column; }
+		.list-actions { width: 100%; flex-wrap: wrap; }
+		.search-field { min-width: 100%; }
 		.sandbox-grid { grid-template-columns: 1fr; }
 		.drawer { width: 100vw; }
 		.method-grid { grid-template-columns: 1fr; }

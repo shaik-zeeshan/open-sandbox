@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -104,62 +105,224 @@ type dockerContainerCLIRecord struct {
 }
 
 func (s *Server) listContainers(c *gin.Context) {
+	identity, ok := authIdentityFromContext(c)
+	if !ok {
+		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
+		return
+	}
+
 	containers, err := s.listRuntimeContainers(c.Request.Context())
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
-	c.JSON(http.StatusOK, containers)
-}
-
-func (s *Server) stopContainer(c *gin.Context) {
-	containerID := strings.TrimSpace(c.Param("id"))
-	if containerID == "" {
-		writeError(c, http.StatusBadRequest, errors.New("container id is required"))
+	if identity.IsAdmin() {
+		c.JSON(http.StatusOK, containers)
 		return
 	}
 
-	if err := s.docker.ContainerStop(c.Request.Context(), containerID, container.StopOptions{}); err != nil {
+	ownedContainerIDs, err := s.ownedRuntimeContainerIDs(c.Request.Context(), identity.UserID)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+	ownedComposeProjects, err := s.ownedComposeProjects(identity.UserID)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+
+	visible := make([]ContainerSummary, 0, len(containers))
+	for _, item := range containers {
+		if runtimeContainerVisibleToIdentity(item, identity, ownedContainerIDs, ownedComposeProjects) {
+			visible = append(visible, item)
+		}
+	}
+
+	c.JSON(http.StatusOK, visible)
+}
+
+func (s *Server) restartContainer(c *gin.Context) {
+	target, ok := s.loadAuthorizedContainer(c)
+	if !ok {
+		return
+	}
+
+	inspect, err := s.docker.ContainerInspect(c.Request.Context(), target.ID)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+	if inspect.State != nil && inspect.State.Running {
+		if err := s.docker.ContainerStop(c.Request.Context(), target.ID, container.StopOptions{}); err != nil {
+			writeError(c, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	if err := s.docker.ContainerStart(c.Request.Context(), target.ID, container.StartOptions{}); err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 
 	if s.sandboxStore != nil {
-		_ = s.sandboxStore.UpdateSandboxStatusByContainerID(c.Request.Context(), containerID, "stopped")
+		_ = s.sandboxStore.UpdateSandboxStatusByContainerID(c.Request.Context(), target.ID, "running")
 	}
 
-	c.JSON(http.StatusOK, gin.H{"container_id": containerID, "stopped": true})
+	c.JSON(http.StatusOK, gin.H{"container_id": target.ID, "restarted": true})
+}
+
+func (s *Server) resetContainer(c *gin.Context) {
+	target, ok := s.loadAuthorizedContainer(c)
+	if !ok {
+		return
+	}
+
+	if sandboxID := strings.TrimSpace(target.Labels[labelOpenSandboxSandboxID]); sandboxID != "" {
+		writeError(c, http.StatusBadRequest, errors.New("use the sandbox reset endpoint for managed sandboxes"))
+		return
+	}
+
+	if projectName := strings.TrimSpace(target.Labels["com.docker.compose.project"]); projectName != "" {
+		serviceName := strings.TrimSpace(target.Labels["com.docker.compose.service"])
+		project, err := s.existingComposeProject(projectName)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, err)
+			return
+		}
+		composeReq := ComposeRequest{ProjectName: project.ProjectName}
+		if serviceName != "" {
+			composeReq.Services = []string{serviceName}
+		}
+		args := buildComposeArgs(project, composeReq, "up", "-d", "--force-recreate")
+		stdout, stderr, err := commandRunnerInDir(c.Request.Context(), project.ProjectDir, "docker", args...)
+		if err != nil {
+			writeErrorWithDetails(c, http.StatusInternalServerError, "compose reset failed", "command_failed", strings.TrimSpace(stderr))
+			return
+		}
+
+		replacementID := target.ID
+		containers, listErr := s.listRuntimeContainers(c.Request.Context())
+		if listErr == nil {
+			for _, item := range containers {
+				if item.Labels["com.docker.compose.project"] != project.ProjectName {
+					continue
+				}
+				if serviceName != "" && item.Labels["com.docker.compose.service"] != serviceName {
+					continue
+				}
+				replacementID = item.ID
+				break
+			}
+		}
+
+		c.JSON(http.StatusOK, gin.H{"container_id": replacementID, "reset": true, "stdout": stdout, "stderr": stderr})
+		return
+	}
+
+	managedID := strings.TrimSpace(target.Labels[labelOpenSandboxManagedID])
+	if managedID == "" || strings.TrimSpace(target.Labels[labelOpenSandboxKind]) != managedKindDirect {
+		writeError(c, http.StatusBadRequest, errors.New("reset is only available for managed direct containers and compose workloads"))
+		return
+	}
+
+	createReq, err := s.readDirectContainerSpec(managedID)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+	if createReq.Name == "" && len(target.Names) > 0 {
+		createReq.Name = target.Names[0]
+		if err := s.writeDirectContainerSpec(managedID, createReq); err != nil {
+			writeError(c, http.StatusInternalServerError, err)
+			return
+		}
+	}
+
+	containerConfig, hostConfig, err := buildDirectContainerConfigs(
+		createReq,
+		strings.TrimSpace(target.Labels[labelOpenSandboxOwnerID]),
+		strings.TrimSpace(target.Labels[labelOpenSandboxOwnerUsername]),
+		managedID,
+	)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.docker.ContainerRemove(c.Request.Context(), target.ID, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+	created, err := s.createContainerWithAutoPull(c.Request.Context(), createReq.Image, containerConfig, hostConfig, createReq.Name)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+	if createReq.Start {
+		if err := s.docker.ContainerStart(c.Request.Context(), created.ID, container.StartOptions{}); err != nil {
+			writeError(c, http.StatusInternalServerError, fmt.Errorf("start container: %w", err))
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"container_id": created.ID, "reset": true})
+}
+
+func (s *Server) stopContainer(c *gin.Context) {
+	target, ok := s.loadAuthorizedContainer(c)
+	if !ok {
+		return
+	}
+
+	if err := s.docker.ContainerStop(c.Request.Context(), target.ID, container.StopOptions{}); err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+
+	if s.sandboxStore != nil {
+		_ = s.sandboxStore.UpdateSandboxStatusByContainerID(c.Request.Context(), target.ID, "stopped")
+	}
+
+	c.JSON(http.StatusOK, gin.H{"container_id": target.ID, "stopped": true})
 }
 
 func (s *Server) removeContainer(c *gin.Context) {
-	containerID := strings.TrimSpace(c.Param("id"))
-	if containerID == "" {
-		writeError(c, http.StatusBadRequest, errors.New("container id is required"))
+	target, ok := s.loadAuthorizedContainer(c)
+	if !ok {
 		return
 	}
 
 	force, _ := strconv.ParseBool(c.DefaultQuery("force", "true"))
-	if err := s.docker.ContainerRemove(c.Request.Context(), containerID, container.RemoveOptions{Force: force, RemoveVolumes: true}); err != nil {
+	if err := s.docker.ContainerRemove(c.Request.Context(), target.ID, container.RemoveOptions{Force: force, RemoveVolumes: true}); err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
-
-	if s.sandboxStore != nil {
-		_ = s.sandboxStore.DeleteSandboxByContainerID(c.Request.Context(), containerID)
+	if strings.TrimSpace(target.Labels[labelOpenSandboxKind]) == managedKindDirect {
+		managedID := strings.TrimSpace(target.Labels[labelOpenSandboxManagedID])
+		if managedID != "" {
+			_ = os.Remove(s.directContainerSpecPath(managedID))
+		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{"container_id": containerID, "removed": true})
+	if s.sandboxStore != nil {
+		_ = s.sandboxStore.DeleteSandboxByContainerID(c.Request.Context(), target.ID)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"container_id": target.ID, "removed": true})
 }
 
 func (s *Server) readContainerFile(c *gin.Context) {
-	containerID := strings.TrimSpace(c.Param("id"))
+	target, ok := s.loadAuthorizedContainer(c)
+	if !ok {
+		return
+	}
+
 	filePath := strings.TrimSpace(c.Query("path"))
 	if filePath == "" {
 		writeError(c, http.StatusBadRequest, errors.New("query parameter path is required"))
 		return
 	}
 
-	response, err := s.readContainerFileByID(c.Request.Context(), containerID, filePath)
+	response, err := s.readContainerFileByID(c.Request.Context(), target.ID, filePath)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
@@ -169,7 +332,25 @@ func (s *Server) readContainerFile(c *gin.Context) {
 }
 
 func (s *Server) writeContainerFile(c *gin.Context) {
-	containerID := strings.TrimSpace(c.Param("id"))
+	target, ok := s.loadAuthorizedContainer(c)
+	if !ok {
+		return
+	}
+
+	if strings.Contains(strings.ToLower(c.GetHeader("Content-Type")), "application/json") {
+		var req SaveFileRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			writeError(c, http.StatusBadRequest, err)
+			return
+		}
+		if err := s.writeContainerFileByID(c.Request.Context(), target.ID, req.TargetPath, path.Base(req.TargetPath), strings.NewReader(req.Content)); err != nil {
+			writeError(c, http.StatusInternalServerError, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"container_id": target.ID, "path": req.TargetPath, "saved": true})
+		return
+	}
+
 	targetPath := strings.TrimSpace(c.PostForm("target_path"))
 	if targetPath == "" {
 		writeError(c, http.StatusBadRequest, errors.New("target_path form field is required"))
@@ -183,12 +364,12 @@ func (s *Server) writeContainerFile(c *gin.Context) {
 	}
 	defer file.Close()
 
-	if err := s.writeContainerFileByID(c.Request.Context(), containerID, targetPath, header.Filename, file); err != nil {
+	if err := s.writeContainerFileByID(c.Request.Context(), target.ID, targetPath, header.Filename, file); err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"container_id": containerID, "path": targetPath, "uploaded": true})
+	c.JSON(http.StatusOK, gin.H{"container_id": target.ID, "path": targetPath, "uploaded": true})
 }
 
 func (s *Server) createSandbox(c *gin.Context) {
@@ -237,11 +418,14 @@ func (s *Server) createSandbox(c *gin.Context) {
 		Tty:        req.TTY,
 		User:       req.User,
 		Labels: map[string]string{
-			"open-sandbox.managed":     "true",
-			"open-sandbox.sandbox_id":  sandboxID,
-			"open-sandbox.name":        req.Name,
-			"open-sandbox.repo_url":    strings.TrimSpace(req.RepoURL),
-			"open-sandbox.repo_branch": strings.TrimSpace(req.Branch),
+			labelOpenSandboxManaged:       "true",
+			labelOpenSandboxSandboxID:     sandboxID,
+			labelOpenSandboxOwnerID:       identity.UserID,
+			labelOpenSandboxOwnerUsername: identity.Username,
+			labelOpenSandboxKind:          managedKindSandbox,
+			"open-sandbox.name":           req.Name,
+			"open-sandbox.repo_url":       strings.TrimSpace(req.RepoURL),
+			"open-sandbox.repo_branch":    strings.TrimSpace(req.Branch),
 			"open-sandbox.repo_target_path": func() string {
 				if strings.TrimSpace(req.RepoTargetPath) != "" {
 					return strings.TrimSpace(req.RepoTargetPath)
@@ -696,6 +880,118 @@ func (s *Server) loadSandbox(c *gin.Context) (store.Sandbox, bool) {
 	}
 
 	return sandbox, true
+}
+
+func (s *Server) loadAuthorizedContainer(c *gin.Context) (ContainerSummary, bool) {
+	containerID := strings.TrimSpace(c.Param("id"))
+	if containerID == "" {
+		writeError(c, http.StatusBadRequest, errors.New("container id is required"))
+		return ContainerSummary{}, false
+	}
+
+	identity, ok := authIdentityFromContext(c)
+	if !ok {
+		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
+		return ContainerSummary{}, false
+	}
+
+	containersByID, err := s.runtimeContainersByID(c.Request.Context())
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return ContainerSummary{}, false
+	}
+
+	target, exists := containersByID[containerID]
+	if !exists {
+		writeError(c, http.StatusNotFound, errors.New("container not found"))
+		return ContainerSummary{}, false
+	}
+
+	if identity.IsAdmin() {
+		return target, true
+	}
+
+	ownedContainerIDs, err := s.ownedRuntimeContainerIDs(c.Request.Context(), identity.UserID)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return ContainerSummary{}, false
+	}
+	ownedComposeProjects, err := s.ownedComposeProjects(identity.UserID)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return ContainerSummary{}, false
+	}
+	if !runtimeContainerVisibleToIdentity(target, identity, ownedContainerIDs, ownedComposeProjects) {
+		writeError(c, http.StatusNotFound, errors.New("container not found"))
+		return ContainerSummary{}, false
+	}
+
+	return target, true
+}
+
+func (s *Server) ownedRuntimeContainerIDs(ctx context.Context, userID string) (map[string]struct{}, error) {
+	owned := map[string]struct{}{}
+	if s.sandboxStore == nil {
+		return owned, nil
+	}
+
+	sandboxes, err := s.sandboxStore.ListSandboxes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, sandbox := range sandboxes {
+		if sandbox.OwnerID == userID {
+			owned[sandbox.ContainerID] = struct{}{}
+		}
+	}
+
+	return owned, nil
+}
+
+func (s *Server) ownedComposeProjects(userID string) (map[string]struct{}, error) {
+	owned := map[string]struct{}{}
+	composeRoot := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose")
+	entries, err := os.ReadDir(composeRoot)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return owned, nil
+		}
+		return nil, err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		payload, readErr := os.ReadFile(filepath.Join(composeRoot, entry.Name(), composeOwnerMetadataFile))
+		if readErr != nil {
+			continue
+		}
+		var owner managedOwnerMetadata
+		if jsonErr := json.Unmarshal(payload, &owner); jsonErr != nil {
+			continue
+		}
+		if owner.UserID == userID {
+			owned[entry.Name()] = struct{}{}
+		}
+	}
+	return owned, nil
+}
+
+func runtimeContainerVisibleToIdentity(item ContainerSummary, identity AuthIdentity, ownedContainerIDs map[string]struct{}, ownedComposeProjects map[string]struct{}) bool {
+	if identity.IsAdmin() {
+		return true
+	}
+	if item.Labels[labelOpenSandboxOwnerID] == identity.UserID {
+		return true
+	}
+	if projectName := strings.TrimSpace(item.Labels["com.docker.compose.project"]); projectName != "" {
+		_, ok := ownedComposeProjects[projectName]
+		if ok {
+			return true
+		}
+	}
+	_, ok := ownedContainerIDs[item.ID]
+	return ok
 }
 
 func (s *Server) readContainerFileByID(ctx context.Context, containerID string, filePath string) (FileReadResponse, error) {
