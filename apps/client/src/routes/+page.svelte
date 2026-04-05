@@ -30,6 +30,7 @@
 		type Sandbox
 	} from "$lib/api";
 	import { beginAuthCheck, clearAuth, clientState, setAuthSession, setBaseUrl } from "$lib/stores.svelte";
+	import { toast } from "$lib/toast.svelte";
 
 	type HealthState = "unknown" | "checking" | "ok" | "error";
 
@@ -53,8 +54,10 @@
 	let containers = $state<ContainerSummary[]>([]);
 	let images = $state<ImageSummary[]>([]);
 	let dataLoading = $state(false);
-	let dataError = $state("");
-	let dataNotice = $state("");
+	let refreshPromise: Promise<void> | null = null;
+	let queuedRefreshIncludeImages = false;
+	let queuedRefreshShowLoading = false;
+	let queuedRefreshNotifyOnError = false;
 
 	// ── View routing ───────────────────────────────────────────────────────────
 	type ActiveWorkload = { kind: "sandbox" | "container"; id: string } | null;
@@ -287,45 +290,73 @@
 
 	function toggleCreateForm(): void {
 		showCreateForm = !showCreateForm;
-		if (!showCreateForm) {
-			dataError = "";
-		}
 	}
 
 	// ── Data actions ───────────────────────────────────────────────────────────
-	async function refreshData(): Promise<void> {
-		dataLoading = true;
-		dataError = "";
-		try {
-			const [sb, ct, img] = await Promise.all([
-				runApiEffect(listSandboxes(clientState.config)),
-				runApiEffect(listContainers(clientState.config)),
-				runApiEffect(listImages(clientState.config))
-			]);
-			sandboxes = sb;
-			containers = ct;
-			images = img;
-			const currentActive = activeWorkload;
-			if (currentActive?.kind === "sandbox" && !sb.some((s) => s.id === currentActive.id)) {
-				activeWorkload = null;
+	async function refreshData(options?: { includeImages?: boolean; showLoading?: boolean; notifyOnError?: boolean }): Promise<void> {
+		const includeImages = options?.includeImages ?? true;
+		const showLoading = options?.showLoading ?? true;
+		const notifyOnError = options?.notifyOnError ?? true;
+
+		if (refreshPromise) {
+			queuedRefreshIncludeImages = queuedRefreshIncludeImages || includeImages;
+			queuedRefreshShowLoading = queuedRefreshShowLoading || showLoading;
+			queuedRefreshNotifyOnError = queuedRefreshNotifyOnError || notifyOnError;
+			return refreshPromise;
+		}
+
+		refreshPromise = (async () => {
+			if (showLoading) {
+				dataLoading = true;
 			}
-			if (currentActive?.kind === "container" && !ct.some((c) => c.id === currentActive.id)) {
-				if (pendingContainerActivationId !== currentActive.id) {
+			try {
+				const [sb, ct, img] = await Promise.all([
+					runApiEffect(listSandboxes(clientState.config)),
+					runApiEffect(listContainers(clientState.config)),
+					includeImages ? runApiEffect(listImages(clientState.config)) : Promise.resolve(images)
+				]);
+				sandboxes = sb;
+				containers = ct;
+				images = img;
+				const currentActive = activeWorkload;
+				if (currentActive?.kind === "sandbox" && !sb.some((s) => s.id === currentActive.id)) {
 					activeWorkload = null;
-					activeRuntimeContainerSnapshot = null;
+				}
+				if (currentActive?.kind === "container" && !ct.some((c) => c.id === currentActive.id)) {
+					if (pendingContainerActivationId !== currentActive.id) {
+						activeWorkload = null;
+						activeRuntimeContainerSnapshot = null;
+					}
+				}
+			} catch (err) {
+				if (notifyOnError) {
+					toast.error(formatApiFailure(err));
+				}
+			} finally {
+				if (showLoading) {
+					dataLoading = false;
 				}
 			}
-		} catch (err) {
-			dataError = formatApiFailure(err);
+		})();
+
+		try {
+			await refreshPromise;
 		} finally {
-			dataLoading = false;
+			refreshPromise = null;
+			if (queuedRefreshIncludeImages || queuedRefreshShowLoading) {
+				const nextIncludeImages = queuedRefreshIncludeImages;
+				const nextShowLoading = queuedRefreshShowLoading;
+				const nextNotifyOnError = queuedRefreshNotifyOnError;
+				queuedRefreshIncludeImages = false;
+				queuedRefreshShowLoading = false;
+				queuedRefreshNotifyOnError = false;
+				await refreshData({ includeImages: nextIncludeImages, showLoading: nextShowLoading, notifyOnError: nextNotifyOnError });
+			}
 		}
 	}
 
 	async function submitCreate(): Promise<void> {
 		createLoading = true;
-		dataError = "";
-		dataNotice = "";
 		try {
 			const parseLines = (v: string) => v.split("\n").map((l) => l.trim()).filter(Boolean);
 			const sandboxName = createName.trim();
@@ -356,7 +387,7 @@
 			await refreshData();
 			activeWorkload = { kind: "sandbox", id: created.id };
 		} catch (err) {
-			dataError = formatApiFailure(err);
+			toast.error(formatApiFailure(err));
 		} finally {
 			createLoading = false;
 		}
@@ -369,17 +400,14 @@
 
 	// Sandbox list actions
 	async function handleRestart(id: string): Promise<void> {
-		dataError = ""; dataNotice = "";
-		try { await runApiEffect(restartSandbox(clientState.config, id)); dataNotice = "Restarted."; await refreshData(); }
-		catch (err) { dataError = formatApiFailure(err); }
+		try { await runApiEffect(restartSandbox(clientState.config, id)); toast.ok("Restarted."); await refreshData(); }
+		catch (err) { toast.error(formatApiFailure(err)); }
 	}
 	async function handleReset(id: string): Promise<void> {
-		dataError = ""; dataNotice = "";
-		try { await runApiEffect(resetSandbox(clientState.config, id)); dataNotice = "Reset."; await refreshData(); }
-		catch (err) { dataError = formatApiFailure(err); }
+		try { await runApiEffect(resetSandbox(clientState.config, id)); toast.ok("Reset."); await refreshData(); }
+		catch (err) { toast.error(formatApiFailure(err)); }
 	}
 	async function handleResetContainer(id: string): Promise<void> {
-		dataError = ""; dataNotice = "";
 		try {
 			const result = await runApiEffect(resetContainer(clientState.config, id));
 			const currentActive = activeWorkload;
@@ -387,38 +415,33 @@
 				activeWorkload = { kind: "container", id: result.id };
 				pendingContainerActivationId = result.id;
 			}
-			dataNotice = "Container reset.";
+			toast.ok("Container reset.");
 			await refreshData();
 		}
-		catch (err) { dataError = formatApiFailure(err); }
+		catch (err) { toast.error(formatApiFailure(err)); }
 	}
 	async function handleStop(id: string): Promise<void> {
-		dataError = ""; dataNotice = "";
-		try { await runApiEffect(stopSandbox(clientState.config, id)); dataNotice = "Stopped."; await refreshData(); }
-		catch (err) { dataError = formatApiFailure(err); }
+		try { await runApiEffect(stopSandbox(clientState.config, id)); toast.ok("Stopped."); await refreshData(); }
+		catch (err) { toast.error(formatApiFailure(err)); }
 	}
 	async function handleDelete(id: string): Promise<void> {
-		dataError = ""; dataNotice = "";
 		try {
 			await runApiEffect(deleteSandbox(clientState.config, id));
-			dataNotice = "Deleted.";
+			toast.ok("Deleted.");
 			const currentActive = activeWorkload;
 			if (currentActive?.kind === "sandbox" && currentActive.id === id) activeWorkload = null;
 			await refreshData();
-		} catch (err) { dataError = formatApiFailure(err); }
+		} catch (err) { toast.error(formatApiFailure(err)); }
 	}
 	async function handleRestartContainer(id: string): Promise<void> {
-		dataError = ""; dataNotice = "";
-		try { await runApiEffect(restartContainer(clientState.config, id)); dataNotice = "Container restarted."; await refreshData(); }
-		catch (err) { dataError = formatApiFailure(err); }
+		try { await runApiEffect(restartContainer(clientState.config, id)); toast.ok("Container restarted."); await refreshData(); }
+		catch (err) { toast.error(formatApiFailure(err)); }
 	}
 	async function handleStopContainer(id: string): Promise<void> {
-		dataError = ""; dataNotice = "";
-		try { await runApiEffect(stopContainer(clientState.config, id)); dataNotice = "Container stopped."; await refreshData(); }
-		catch (err) { dataError = formatApiFailure(err); }
+		try { await runApiEffect(stopContainer(clientState.config, id)); toast.ok("Container stopped."); await refreshData(); }
+		catch (err) { toast.error(formatApiFailure(err)); }
 	}
 	async function handleRemoveContainer(id: string): Promise<void> {
-		dataError = ""; dataNotice = "";
 		try {
 			await runApiEffect(removeContainer(clientState.config, id));
 			const currentActive = activeWorkload;
@@ -427,33 +450,40 @@
 				pendingContainerActivationId = null;
 				activeRuntimeContainerSnapshot = null;
 			}
-			dataNotice = "Container removed.";
+			toast.ok("Container removed.");
 			await refreshData();
 		}
-		catch (err) { dataError = formatApiFailure(err); }
+		catch (err) { toast.error(formatApiFailure(err)); }
 	}
 
 	function openSandbox(id: string): void {
 		activeWorkload = { kind: "sandbox", id };
-		dataError = ""; dataNotice = "";
 	}
 
 	function openContainer(id: string): void {
 		activeWorkload = { kind: "container", id };
 		activeRuntimeContainerSnapshot = containers.find((c) => c.id === id) ?? null;
 		pendingContainerActivationId = null;
-		dataError = ""; dataNotice = "";
 	}
 
 	function replaceActiveContainer(id: string): void {
 		activeWorkload = { kind: "container", id };
 		pendingContainerActivationId = id;
-		dataError = "";
 	}
 
 	// Load data after login
 	$effect(() => {
 		if (clientState.isAuthenticated) void refreshData();
+	});
+
+	$effect(() => {
+		if (!clientState.isAuthenticated) {
+			return;
+		}
+		const interval = setInterval(() => {
+			void refreshData({ includeImages: false, showLoading: false, notifyOnError: false });
+		}, 5000);
+		return () => clearInterval(interval);
 	});
 </script>
 
@@ -571,8 +601,6 @@
 				{containers}
 				{images}
 				loading={dataLoading}
-				errorMessage={dataError}
-				notice={dataNotice}
 				onOpen={(id) => openSandbox(id)}
 				onOpenContainer={(id) => openContainer(id)}
 				onRestart={(id) => void handleRestart(id)}

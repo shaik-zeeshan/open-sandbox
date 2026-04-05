@@ -1002,7 +1002,7 @@ func TestListContainersEndpoint(t *testing.T) {
 	original := commandRunner
 	defer func() { commandRunner = original }()
 	commandRunner = func(context.Context, string, ...string) (string, string, error) {
-		return `{"ID":"cid-123","Image":"ubuntu:24.04","Names":"sandbox-one","Ports":"0.0.0.0:3000->3000/tcp","Status":"Up 5 minutes","Labels":"open-sandbox.managed=true"}` + "\n", "", nil
+		return `{"ID":"cid-123","Image":"ubuntu:24.04","Names":"sandbox-one","Ports":"0.0.0.0:3000->3000/tcp","Status":"Up 5 minutes","Labels":"open-sandbox.managed=true,open-sandbox.owner_id=admin-user"}` + "\n", "", nil
 	}
 
 	s := newTestServer(&mockDocker{})
@@ -1057,6 +1057,43 @@ func TestListContainersFiltersToCurrentUser(t *testing.T) {
 	}
 	if bytes.Contains(w.Body.Bytes(), []byte(`"other-sandbox"`)) || bytes.Contains(w.Body.Bytes(), []byte(`"compose-unowned"`)) {
 		t.Fatalf("expected unowned containers to be filtered out: %s", w.Body.String())
+	}
+}
+
+func TestListContainersFiltersAdminsToOwnedContainers(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return strings.Join([]string{
+			`{"ID":"owned-sandbox","Image":"ubuntu:24.04","Names":"mine","Status":"Up 1 minute","Labels":"open-sandbox.managed=true,open-sandbox.owner_id=admin-user"}`,
+			`{"ID":"other-sandbox","Image":"ubuntu:24.04","Names":"other","Status":"Up 1 minute","Labels":"open-sandbox.managed=true,open-sandbox.owner_id=member-2"}`,
+		}, "\n"), "", nil
+	}
+
+	sandboxStore := &mockSandboxStore{
+		listSandboxesFn: func(context.Context) ([]store.Sandbox, error) {
+			return []store.Sandbox{
+				{ID: "sandbox-1", ContainerID: "owned-sandbox", OwnerID: "admin-user", OwnerUsername: "admin"},
+				{ID: "sandbox-2", ContainerID: "other-sandbox", OwnerID: "member-2", OwnerUsername: "bob"},
+			}, nil
+		},
+	}
+
+	s := newTestServerWithStore(&mockDocker{}, sandboxStore)
+	req := httptest.NewRequest(http.MethodGet, "/api/containers", nil)
+	setAuthHeader(t, req)
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"owned-sandbox"`)) {
+		t.Fatalf("expected owned admin container in response: %s", w.Body.String())
+	}
+	if bytes.Contains(w.Body.Bytes(), []byte(`"other-sandbox"`)) {
+		t.Fatalf("expected other user's container to be filtered out for admin: %s", w.Body.String())
 	}
 }
 
@@ -1150,6 +1187,9 @@ func TestListContainersAdminFiltersToManagedWorkloads(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(projectDir, "docker-compose.yml"), []byte("services:\n  cache:\n    image: redis:7\n"), 0o600); err != nil {
 		t.Fatalf("expected compose file: %v", err)
+	}
+	if err := s.writeComposeProjectOwnerMetadata(projectDir, AuthIdentity{UserID: "admin-user", Username: "admin"}); err != nil {
+		t.Fatalf("expected owner metadata to be written: %v", err)
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/containers", nil)
@@ -1252,7 +1292,10 @@ func TestResetComposeContainerEndpoint(t *testing.T) {
 	}()
 
 	callCount := 0
-	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+	commandRunner = func(_ context.Context, _ string, args ...string) (string, string, error) {
+		if len(args) > 0 && args[0] == "stats" {
+			return "", "", nil
+		}
 		callCount++
 		if callCount == 1 {
 			return `{"ID":"compose-old","Image":"redis:7","Names":"demo-cache-1","Status":"Up 1 minute","Labels":"com.docker.compose.project=demo,com.docker.compose.service=cache"}` + "\n", "", nil
@@ -1276,6 +1319,9 @@ func TestResetComposeContainerEndpoint(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(projectDir, "docker-compose.yml"), []byte("services:\n  cache:\n    image: redis:7\n"), 0o600); err != nil {
 		t.Fatalf("expected compose file: %v", err)
+	}
+	if err := s.writeComposeProjectOwnerMetadata(projectDir, AuthIdentity{UserID: "admin-user", Username: "admin"}); err != nil {
+		t.Fatalf("expected owner metadata to be written: %v", err)
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/containers/compose-old/reset", bytes.NewBufferString(`{}`))
@@ -1730,6 +1776,34 @@ func TestListSandboxesFiltersToCurrentUser(t *testing.T) {
 	}
 }
 
+func TestListSandboxesFiltersAdminsToOwnedSandboxes(t *testing.T) {
+	sandboxStore := &mockSandboxStore{
+		listSandboxesFn: func(context.Context) ([]store.Sandbox, error) {
+			return []store.Sandbox{
+				{ID: "sandbox-1", Name: "mine", ContainerID: "c1", OwnerID: "admin-user", OwnerUsername: "admin", Status: "running"},
+				{ID: "sandbox-2", Name: "other", ContainerID: "c2", OwnerID: "member-2", OwnerUsername: "bob", Status: "running"},
+			}, nil
+		},
+	}
+
+	s := newTestServerWithStore(&mockDocker{}, sandboxStore)
+	req := httptest.NewRequest(http.MethodGet, "/api/sandboxes", nil)
+	setAuthHeader(t, req)
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if bytes.Contains(w.Body.Bytes(), []byte(`"sandbox-2"`)) {
+		t.Fatalf("expected other user's sandbox to be filtered out for admin: %s", w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"sandbox-1"`)) {
+		t.Fatalf("expected admin-owned sandbox in response: %s", w.Body.String())
+	}
+}
+
 func TestSandboxAccessRejectsOtherUsers(t *testing.T) {
 	sandboxStore := &mockSandboxStore{
 		getSandboxFn: func(context.Context, string) (store.Sandbox, error) {
@@ -1768,7 +1842,7 @@ func TestSandboxExecEndpointUsesSandboxContainer(t *testing.T) {
 
 	sandboxStore := &mockSandboxStore{
 		getSandboxFn: func(context.Context, string) (store.Sandbox, error) {
-			return store.Sandbox{ID: "sandbox-1", ContainerID: "sandbox-container"}, nil
+			return store.Sandbox{ID: "sandbox-1", ContainerID: "sandbox-container", OwnerID: "admin-user", OwnerUsername: "admin"}, nil
 		},
 	}
 
@@ -1886,7 +1960,7 @@ func TestSandboxTerminalWebSocket(t *testing.T) {
 
 	sandboxStore := &mockSandboxStore{
 		getSandboxFn: func(context.Context, string) (store.Sandbox, error) {
-			return store.Sandbox{ID: "sandbox-1", ContainerID: "sandbox-container", WorkspaceDir: "/workspace"}, nil
+			return store.Sandbox{ID: "sandbox-1", ContainerID: "sandbox-container", WorkspaceDir: "/workspace", OwnerID: "admin-user", OwnerUsername: "admin"}, nil
 		},
 	}
 

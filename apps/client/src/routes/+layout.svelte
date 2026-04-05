@@ -1,6 +1,7 @@
 <script lang="ts">
 	import './layout.css';
 	import favicon from '$lib/assets/favicon.svg';
+	import Toaster from '$lib/components/Toaster.svelte';
 
 	let { children } = $props();
 </script>
@@ -12,3 +13,4 @@
 	<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
 </svelte:head>
 {@render children()}
+<Toaster />

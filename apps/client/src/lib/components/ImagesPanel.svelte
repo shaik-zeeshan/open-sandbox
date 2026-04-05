@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from "svelte";
+	import { toast } from "$lib/toast.svelte";
 	import Combobox from "./Combobox.svelte";
 	import CodeEditor from "./CodeEditor.svelte";
 	import {
@@ -25,8 +26,6 @@
 
 	let images = $state<ImageSummary[]>([]);
 	let loading = $state(false);
-	let errorMessage = $state("");
-	let notice = $state("");
 
 	let createMethod = $state<ImageCreateMethod>("pull");
 	let createPullImage = $state("");
@@ -102,11 +101,10 @@
 
 	async function refreshImages(): Promise<void> {
 		loading = true;
-		errorMessage = "";
 		try {
 			images = await runApiEffect(listImages(config));
 		} catch (error) {
-			errorMessage = formatApiFailure(error);
+			toast.error(formatApiFailure(error));
 		} finally {
 			loading = false;
 		}
@@ -152,8 +150,6 @@
 
 	async function submitCreate(): Promise<void> {
 		createLoading = true;
-		errorMessage = "";
-		notice = "";
 		resetPipelineState();
 		createStep = "Preparing";
 
@@ -177,7 +173,7 @@
 				);
 				appendCreateLog(pulled.output);
 				appendCreateLog(`Image ready: ${pulled.image}`);
-				notice = `Image ready: ${pulled.image}`;
+				toast.ok(`Image ready: ${pulled.image}`);
 			}
 
 			if (createMethod === "build-context") {
@@ -216,7 +212,7 @@
 				if (buildError.length > 0) {
 					throw new Error(buildError);
 				}
-				notice = `Image ready: ${tag}`;
+				toast.ok(`Image ready: ${tag}`);
 			}
 
 			if (createMethod === "build-inline") {
@@ -255,13 +251,13 @@
 				if (buildError.length > 0) {
 					throw new Error(buildError);
 				}
-				notice = `Image ready: ${tag}`;
+				toast.ok(`Image ready: ${tag}`);
 			}
 
 			createStep = "Done";
 			await refreshImages();
 		} catch (error) {
-			errorMessage = formatApiFailure(error);
+			toast.error(formatApiFailure(error));
 		} finally {
 			createLoading = false;
 		}
@@ -279,15 +275,13 @@
 		}
 
 		loading = true;
-		errorMessage = "";
-		notice = "";
 		deleteConfirmId = null;
 		try {
 			await runApiEffect(removeImage(config, image.id, false));
-			notice = "Image removed.";
+			toast.ok("Image removed.");
 			await refreshImages();
 		} catch (error) {
-			errorMessage = formatApiFailure(error);
+			toast.error(formatApiFailure(error));
 		} finally {
 			loading = false;
 		}
@@ -319,13 +313,6 @@
 			{loading ? "Refreshing..." : "Refresh"}
 		</button>
 	</div>
-
-	{#if errorMessage}
-		<p class="alert-error">{errorMessage}</p>
-	{/if}
-	{#if notice}
-		<p class="alert-ok">{notice}</p>
-	{/if}
 
 	<div class="images-layout">
 		<section class="panel">

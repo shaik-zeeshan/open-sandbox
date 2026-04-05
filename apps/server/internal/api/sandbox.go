@@ -44,6 +44,7 @@ type ContainerSummary struct {
 	ServiceName  string            `json:"service_name,omitempty"`
 	Resettable   bool              `json:"resettable"`
 	Ports        []PortSummary     `json:"ports,omitempty"`
+	Usage        ResourceUsage     `json:"usage,omitempty"`
 }
 
 type PortSummary struct {
@@ -51,6 +52,12 @@ type PortSummary struct {
 	Public  int    `json:"public,omitempty"`
 	Type    string `json:"type"`
 	IP      string `json:"ip,omitempty"`
+}
+
+type ResourceUsage struct {
+	CPU     string `json:"cpu,omitempty"`
+	Memory  string `json:"memory,omitempty"`
+	Storage string `json:"storage,omitempty"`
 }
 
 type SandboxResponse struct {
@@ -108,6 +115,7 @@ type dockerContainerCLIRecord struct {
 	Image  string `json:"Image"`
 	Names  string `json:"Names"`
 	Ports  string `json:"Ports"`
+	Size   string `json:"Size"`
 	Status string `json:"Status"`
 	Labels string `json:"Labels"`
 }
@@ -132,11 +140,6 @@ func (s *Server) listContainers(c *gin.Context) {
 		return
 	}
 	containers = s.filterManagedRuntimeContainers(containers, managedComposeProjects)
-	if identity.IsAdmin() {
-		c.JSON(http.StatusOK, containers)
-		return
-	}
-
 	ownedContainerIDs, err := s.ownedRuntimeContainerIDs(c.Request.Context(), identity.UserID)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
@@ -544,7 +547,7 @@ func (s *Server) listSandboxes(c *gin.Context) {
 	stateByContainer, statusByContainer, portsByContainer := s.liveContainerState(c.Request.Context())
 	out := make([]SandboxResponse, 0, len(sandboxes))
 	for _, sandbox := range sandboxes {
-		if !identity.IsAdmin() && sandbox.OwnerID != identity.UserID {
+		if sandbox.OwnerID != identity.UserID {
 			continue
 		}
 		response := sandboxToResponse(sandbox)
@@ -920,7 +923,7 @@ func (s *Server) loadSandbox(c *gin.Context) (store.Sandbox, bool) {
 		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
 		return store.Sandbox{}, false
 	}
-	if !identity.IsAdmin() && sandbox.OwnerID != identity.UserID {
+	if sandbox.OwnerID != identity.UserID {
 		writeError(c, http.StatusNotFound, store.ErrSandboxNotFound)
 		return store.Sandbox{}, false
 	}
@@ -960,10 +963,6 @@ func (s *Server) loadAuthorizedContainer(c *gin.Context) (ContainerSummary, bool
 	if !s.runtimeContainerManagedByApp(target, managedComposeProjects) {
 		writeError(c, http.StatusNotFound, errors.New("container not found"))
 		return ContainerSummary{}, false
-	}
-
-	if identity.IsAdmin() {
-		return target, true
 	}
 
 	ownedContainerIDs, err := s.ownedRuntimeContainerIDs(c.Request.Context(), identity.UserID)
@@ -1113,9 +1112,6 @@ func (s *Server) runtimeContainerManagedByApp(item ContainerSummary, managedComp
 }
 
 func (s *Server) runtimeContainerVisibleToIdentity(item ContainerSummary, identity AuthIdentity, ownedContainerIDs map[string]struct{}, ownedComposeProjects map[string]struct{}) bool {
-	if identity.IsAdmin() {
-		return true
-	}
 	if item.Labels[labelOpenSandboxOwnerID] == identity.UserID {
 		return true
 	}

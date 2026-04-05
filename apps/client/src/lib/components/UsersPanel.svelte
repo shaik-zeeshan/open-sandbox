@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from "svelte";
+	import { toast } from "$lib/toast.svelte";
 	import {
 		createUser,
 		deleteUser,
@@ -23,8 +24,6 @@
 
 	let users = $state<UserSummary[]>([]);
 	let loading = $state(false);
-	let errorMessage = $state("");
-	let notice = $state("");
 
 	// Create form
 	let showCreateForm = $state(false);
@@ -44,11 +43,10 @@
 
 	async function refreshUsers(): Promise<void> {
 		loading = true;
-		errorMessage = "";
 		try {
 			users = await runApiEffect(listUsers(config));
 		} catch (error) {
-			errorMessage = formatApiFailure(error);
+			toast.error(formatApiFailure(error));
 		} finally {
 			loading = false;
 		}
@@ -56,8 +54,6 @@
 
 	async function submitCreate(): Promise<void> {
 		createLoading = true;
-		errorMessage = "";
-		notice = "";
 		try {
 			await runApiEffect(createUser(config, {
 				username: createUsername,
@@ -67,11 +63,11 @@
 			createUsername = "";
 			createPassword = "";
 			createRole = "member";
-			notice = "User created.";
+			toast.ok("User created.");
 			showCreateForm = false;
 			await refreshUsers();
 		} catch (error) {
-			errorMessage = formatApiFailure(error);
+			toast.error(formatApiFailure(error));
 		} finally {
 			createLoading = false;
 		}
@@ -79,15 +75,13 @@
 
 	async function submitPasswordReset(userId: string): Promise<void> {
 		resetLoadingUserId = userId;
-		errorMessage = "";
-		notice = "";
 		try {
 			await runApiEffect(updateUserPassword(config, userId, resetPasswords[userId] ?? ""));
 			resetPasswords = { ...resetPasswords, [userId]: "" };
 			showResetFor = null;
-			notice = "Password updated.";
+			toast.ok("Password updated.");
 		} catch (error) {
-			errorMessage = formatApiFailure(error);
+			toast.error(formatApiFailure(error));
 		} finally {
 			resetLoadingUserId = "";
 		}
@@ -106,15 +100,13 @@
 	}
 
 	async function removeUser(userId: string): Promise<void> {
-		errorMessage = "";
-		notice = "";
 		try {
 			await runApiEffect(deleteUser(config, userId));
-			notice = "User deleted.";
+			toast.ok("User deleted.");
 			deleteConfirmId = null;
 			await refreshUsers();
 		} catch (error) {
-			errorMessage = formatApiFailure(error);
+			toast.error(formatApiFailure(error));
 		}
 	}
 
@@ -147,16 +139,12 @@
 			<button
 				class="btn-primary btn-sm"
 				type="button"
-				onclick={() => { showCreateForm = !showCreateForm; errorMessage = ""; notice = ""; }}
+				onclick={() => { showCreateForm = !showCreateForm; }}
 			>
 				{showCreateForm ? "Cancel" : "+ New user"}
 			</button>
 		</div>
 	</div>
-
-	<!-- Alerts -->
-	{#if errorMessage}<p class="alert-error anim-fade-up">{errorMessage}</p>{/if}
-	{#if notice}<p class="alert-ok anim-fade-up">{notice}</p>{/if}
 
 	<!-- Create user form (collapsible) -->
 	{#if showCreateForm}

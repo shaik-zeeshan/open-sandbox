@@ -1,12 +1,19 @@
 <script lang="ts">
 	import type { PortSummary } from "$lib/api";
 
+	type ResourceUsageSummary = {
+		cpu?: string;
+		memory?: string;
+		storage?: string;
+	};
+
 	let {
 		name,
 		image,
 		status,
 		containerId,
 		ports = [],
+		usage,
 		createdAt = null,
 		metaLabel = "",
 		metaValue = "",
@@ -14,6 +21,7 @@
 		showReset = true,
 		deleteLabel = "Delete",
 		deleteTitle = "Delete workload",
+		animDelay = 0,
 		onOpen,
 		onRestart,
 		onReset,
@@ -25,6 +33,7 @@
 		status: string;
 		containerId: string;
 		ports?: PortSummary[];
+		usage?: ResourceUsageSummary;
 		createdAt?: number | null;
 		metaLabel?: string;
 		metaValue?: string;
@@ -32,6 +41,7 @@
 		showReset?: boolean;
 		deleteLabel?: string;
 		deleteTitle?: string;
+		animDelay?: number;
 		onOpen: () => void;
 		onRestart: () => void;
 		onReset: () => void;
@@ -58,282 +68,546 @@
 			.map(p => `http://localhost:${p.public}`);
 
 	const st = $derived(statusInfo(status));
+	const isRunning = $derived(st.cls === "ok");
+
 	const previewPorts = $derived(previewLinks(ports));
+	const usageEntries = $derived([
+		{ label: "CPU", value: usage?.cpu?.trim() ?? "" },
+		{ label: "MEM", value: usage?.memory?.trim() ?? "" },
+		{ label: "STO", value: usage?.storage?.trim() ?? "" }
+	].filter((entry) => entry.value.length > 0));
+
+	// ── Dropdown menu state ────────────────────────────────────────────────────
+	let menuOpen = $state(false);
+	let triggerEl = $state<HTMLButtonElement | null>(null);
+	let menuStyle = $state('');
+
+	function openMenu(e: MouseEvent) {
+		e.stopPropagation();
+		if (!triggerEl) return;
+		const r = triggerEl.getBoundingClientRect();
+		menuStyle = `top:${r.bottom + 4}px;right:${window.innerWidth - r.right}px`;
+		menuOpen = true;
+	}
+
+	function closeMenu() {
+		menuOpen = false;
+	}
+
+	function runAction(fn: () => void) {
+		return (e: MouseEvent) => {
+			e.stopPropagation();
+			menuOpen = false;
+			fn();
+		};
+	}
+
+	// Svelte action: mounts content into document.body so it's outside the table
+	function portal(node: HTMLElement) {
+		document.body.appendChild(node);
+		return {
+			destroy() { node.remove(); }
+		};
+	}
 </script>
 
-<div class="sandbox-card {isSelected ? 'sandbox-card--selected' : ''}" role="button" tabindex="0"
-	onclick={onOpen}
-	onkeydown={(e) => e.key === "Enter" && onOpen()}
->
-	<!-- Top row: name + status -->
-	<div class="card-header">
-		<div class="card-name-row">
-			<div class="status-dot status-dot--{st.cls}"></div>
-			<span class="card-name">{name}</span>
-		</div>
-		<span class="status-badge status-badge--{st.cls}">{st.label}</span>
-	</div>
+<svelte:document onclick={closeMenu} />
 
-	<!-- Image + meta -->
-	<div class="card-body">
-		<div class="card-meta-row">
-			<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-				<rect x="2" y="2" width="20" height="20" rx="5"/><path d="M16 8h.01"/><path d="M8 8h.01"/><path d="M12 8h.01"/><path d="M12 16a4 4 0 0 0 4-4H8a4 4 0 0 0 4 4z"/>
-			</svg>
-			<span class="card-image">{image}</span>
+{#if menuOpen}
+	<!-- Menu appended to <body> via portal action — completely outside the table,
+	     so no row/cell onclick can ever intercept it. -->
+	<div
+		use:portal
+		class="menu-portal"
+		role="menu"
+		tabindex="-1"
+		style={menuStyle}
+		onclick={(e) => e.stopPropagation()}
+		onkeydown={(e) => e.key === 'Escape' && closeMenu()}
+	>
+		<button class="menu-item" role="menuitem" type="button" onclick={runAction(onOpen)}>
+			<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+			Open
+		</button>
+		<button class="menu-item" role="menuitem" type="button" onclick={runAction(onRestart)}>
+			<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+			Restart
+		</button>
+		{#if showReset}
+			<button class="menu-item" role="menuitem" type="button" onclick={runAction(onReset)}>
+				<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+				Reset
+			</button>
+		{/if}
+		<div class="menu-sep" role="separator"></div>
+		<button class="menu-item menu-item--danger" role="menuitem" type="button" onclick={runAction(onDelete)}>
+			<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+			{deleteLabel}
+		</button>
+	</div>
+{/if}
+
+<tr
+	class="row {isSelected ? 'row--selected' : ''} anim-fade-up"
+	style="animation-delay: {animDelay}s"
+>
+	<!-- Name — clickable -->
+	<td class="cell cell-name cell-open" role="button" tabindex="0"
+		onclick={onOpen} onkeydown={(e) => e.key === 'Enter' && onOpen()}>
+		<div class="name-cell">
+			<div class="dot-wrap">
+				<span class="dot dot--{st.cls}"></span>
+				{#if st.cls === 'ok'}<span class="dot-ring"></span>{/if}
+			</div>
+			<div class="name-stack">
+				<span class="name-text">{name}</span>
+				{#if metaLabel && metaValue}
+					<span class="name-sub"><span class="name-sub-key">{metaLabel}</span>{metaValue}</span>
+				{/if}
+			</div>
 		</div>
-		{#if metaValue}
-			<div class="card-meta-row">
-				<span class="meta-label">{metaLabel}</span>
-				<span class="card-meta-value">{metaValue}</span>
-			</div>
-		{/if}
-		{#if createdAt !== null && createdAt > 0}
-			<div class="card-meta-row">
-				<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-					<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-				</svg>
-				<span class="card-date">{formatDate(createdAt)}</span>
-			</div>
-		{/if}
-		<div class="card-ports" class:card-ports--empty={previewPorts.length === 0}>
+	</td>
+
+	<!-- Image — clickable -->
+	<td class="cell cell-image cell-open" role="button" tabindex="-1"
+		onclick={onOpen}>
+		<span class="image-text" title={image}>{image}</span>
+	</td>
+
+	<!-- Status — clickable -->
+	<td class="cell cell-status cell-open" role="button" tabindex="-1"
+		onclick={onOpen}>
+		<span class="badge badge--{st.cls}">{st.label}</span>
+	</td>
+
+	<!-- Ports — NOT clickable (links inside) -->
+	<td class="cell cell-ports">
+		<div class="chips-row">
 			{#each previewPorts as port}
 				<a
 					class="port-chip"
 					href={port}
 					target="_blank"
 					rel="noreferrer"
-					onclick={(e) => e.stopPropagation()}
-				>
-					{port.replace("http://localhost:", ":")}
-				</a>
+					title={port}
+				>{port.replace("http://localhost:", ":")}</a>
 			{/each}
+			{#if previewPorts.length === 0}
+				<span class="nil">—</span>
+			{/if}
 		</div>
-		<div class="card-id">{containerId.slice(0, 12)}</div>
-	</div>
+	</td>
+
+	<!-- Usage — clickable -->
+	<td class="cell cell-usage cell-open" role="button" tabindex="-1"
+		onclick={onOpen}>
+		{#if usageEntries.length > 0}
+			<div class="chips-row">
+				{#each usageEntries as entry (entry.label)}
+					<span class="usage-chip">
+						<span class="usage-key">{entry.label}</span>
+						<span class="usage-val">{entry.value}</span>
+					</span>
+				{/each}
+			</div>
+		{:else}
+			<span class="nil">—</span>
+		{/if}
+	</td>
+
+	<!-- Created — clickable -->
+	<td class="cell cell-created cell-open" role="button" tabindex="-1"
+		onclick={onOpen}>
+		{#if createdAt !== null && createdAt > 0}
+			<span class="date-text">{formatDate(createdAt)}</span>
+		{:else}
+			<span class="nil">—</span>
+		{/if}
+	</td>
+
+	<!-- Container ID — clickable -->
+	<td class="cell cell-id cell-open" role="button" tabindex="-1"
+		onclick={onOpen}>
+		<span class="id-text">{containerId.slice(0, 12)}</span>
+	</td>
 
 	<!-- Actions -->
-	<div class="card-actions" onclick={(e) => e.stopPropagation()} role="presentation">
-		<button class="action-btn" type="button" onclick={onOpen} title="Open in terminal/files">
-			<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-				<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
-			</svg>
-			Open
-		</button>
-		<button class="action-btn" type="button" onclick={onRestart} title="Restart container">
-			<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-				<polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-			</svg>
-			Restart
-		</button>
-		{#if showReset}
-			<button class="action-btn" type="button" onclick={onReset} title="Reset workspace">
-				<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-					<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
-					<path d="M3 3v5h5"/>
+	<td class="cell cell-actions">
+		<div class="actions">
+
+			<!-- Stop (when running) / Start (when stopped/idle) -->
+			{#if isRunning}
+				<button class="act" type="button" onclick={onStop} title="Stop">
+					<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+						<rect x="3" y="3" width="18" height="18" rx="2"/>
+					</svg>
+					Stop
+				</button>
+			{:else}
+				<button class="act" type="button" onclick={onRestart} title="Start">
+					<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+						<polygon points="5 3 19 12 5 21 5 3"/>
+					</svg>
+					Start
+				</button>
+			{/if}
+
+				<!-- More menu trigger -->
+			<button
+				bind:this={triggerEl}
+				class="act act--icon"
+				type="button"
+				title="More actions"
+				aria-label="More actions"
+				aria-haspopup="menu"
+				aria-expanded={menuOpen}
+				onclick={openMenu}
+			>
+				<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>
 				</svg>
-				Reset
 			</button>
-		{/if}
-		<button class="action-btn" type="button" onclick={onStop} title="Stop container">
-			<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-				<rect x="3" y="3" width="18" height="18" rx="2"/>
-			</svg>
-			Stop
-		</button>
-		<button class="action-btn action-btn--danger" type="button" onclick={onDelete} title={deleteTitle}>
-			<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-				<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
-			</svg>
-			{deleteLabel}
-		</button>
-	</div>
-</div>
+
+		</div>
+	</td>
+</tr>
 
 <style>
-	.sandbox-card {
+	/* ── Row ──────────────────────────────────────────────────────────────────── */
+	.row {
 		background: var(--bg-surface);
-		border: 1px solid var(--border-dim);
-		border-radius: var(--radius-lg);
-		padding: 0.875rem;
-		cursor: pointer;
-		transition: border-color 0.18s, background 0.18s, box-shadow 0.18s, transform 0.15s var(--ease-snappy);
-		display: flex;
-		flex-direction: column;
-		gap: 0.625rem;
-		position: relative;
-		overflow: hidden;
-		height: 18rem;
-		max-width: 100%;
 	}
-	.sandbox-card::before {
-		content: '';
-		position: absolute;
-		inset: 0;
-		border-radius: inherit;
-		opacity: 0;
-		transition: opacity 0.2s;
-		background: radial-gradient(ellipse at 20% 20%, rgba(255,255,255,0.025) 0%, transparent 70%);
-		pointer-events: none;
-	}
-	.sandbox-card:hover {
-		border-color: var(--border-mid);
-		background: var(--bg-raised);
-		transform: translateY(-1px);
-		box-shadow: 0 4px 24px rgba(0,0,0,0.4);
-	}
-	.sandbox-card:hover::before { opacity: 1; }
-	.sandbox-card--selected {
-		border-color: var(--border-hi);
-		background: var(--bg-raised);
-		box-shadow: 0 0 0 1px var(--border-mid), 0 4px 32px rgba(0,0,0,0.5);
-	}
-	.sandbox-card--selected::before { opacity: 1; }
 
-	.card-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 0.5rem;
+	.row--selected {
+		background: var(--bg-raised);
 	}
-	.card-name-row {
+
+	/* Cells that open the sandbox on click */
+	.cell-open {
+		cursor: pointer;
+	}
+
+	/* ── Cells ────────────────────────────────────────────────────────────────── */
+	.cell {
+		padding: 0.7rem 0.875rem;
+		vertical-align: middle;
+		border-bottom: 1px solid var(--border-dim);
+	}
+
+	/* Accent stripe via inset box-shadow on first cell */
+	.cell-name {
+		box-shadow: inset 2px 0 0 transparent;
+		transition: box-shadow 0.15s;
+	}
+	.row:hover .cell-name {
+		box-shadow: inset 2px 0 0 var(--border-hi);
+	}
+	.row--selected .cell-name {
+		box-shadow: inset 2px 0 0 var(--status-ok);
+	}
+
+	.cell-image   { max-width: 14rem; overflow: hidden; }
+	.cell-status  { white-space: nowrap; }
+	.cell-ports   { white-space: nowrap; }
+	.cell-created { white-space: nowrap; }
+	.cell-id      { white-space: nowrap; }
+	.cell-actions {
+		text-align: right;
+		white-space: nowrap;
+		padding-right: 0.75rem;
+	}
+
+	/* ── Actions row ──────────────────────────────────────────────────────────── */
+	.actions {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.25rem;
+		justify-content: flex-end;
+	}
+
+	/* ── Name cell ────────────────────────────────────────────────────────────── */
+	.name-cell {
 		display: flex;
 		align-items: center;
-		gap: 0.45rem;
+		gap: 0.5rem;
 		min-width: 0;
 	}
-	.status-dot {
-		width: 6px;
-		height: 6px;
-		border-radius: 50%;
-		flex-shrink: 0;
-	}
-	.status-dot--ok    { background: var(--status-ok); box-shadow: 0 0 6px rgba(74,222,128,0.5); }
-	.status-dot--error { background: var(--status-error); }
-	.status-dot--idle  { background: var(--status-idle); }
 
-	.card-name {
+	/* Status dot */
+	.dot-wrap {
+		position: relative;
+		width: 10px;
+		height: 10px;
+		flex-shrink: 0;
+		display: grid;
+		place-items: center;
+	}
+
+	.dot {
+		display: block;
+		width: 7px;
+		height: 7px;
+		border-radius: 50%;
+		position: relative;
+		z-index: 1;
+	}
+	.dot--ok    { background: var(--status-ok); }
+	.dot--error { background: var(--status-error); }
+	.dot--idle  { background: var(--status-idle); }
+
+	.dot-ring {
+		position: absolute;
+		inset: -2px;
+		border-radius: 50%;
+		border: 1.5px solid rgba(74, 222, 128, 0.35);
+		animation: pulse-ring 2.4s ease-out infinite;
+	}
+
+	@keyframes pulse-ring {
+		0%   { transform: scale(0.6); opacity: 1; }
+		70%  { transform: scale(1.6); opacity: 0; }
+		100% { transform: scale(1.6); opacity: 0; }
+	}
+
+	/* Name stack */
+	.name-stack {
+		display: flex;
+		flex-direction: column;
+		gap: 0.15rem;
+		min-width: 0;
+	}
+
+	.name-text {
 		font-family: var(--font-mono);
-		font-size: 0.78rem;
+		font-size: 0.74rem;
 		font-weight: 500;
 		color: var(--text-primary);
+		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
-		white-space: nowrap;
+		line-height: 1.3;
 	}
-	.status-badge {
+
+	.name-sub {
+		font-family: var(--font-mono);
+		font-size: 0.6rem;
+		color: var(--text-muted);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		line-height: 1.2;
+	}
+
+	.name-sub-key {
+		font-size: 0.52rem;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		opacity: 0.6;
+		margin-right: 0.28rem;
+	}
+
+	/* ── Image ────────────────────────────────────────────────────────────────── */
+	.image-text {
+		font-family: var(--font-mono);
+		font-size: 0.67rem;
+		color: var(--text-secondary);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		display: block;
+	}
+
+	/* ── Status badge ─────────────────────────────────────────────────────────── */
+	.badge {
+		display: inline-block;
 		font-family: var(--font-mono);
 		font-size: 0.58rem;
 		font-weight: 400;
 		text-transform: uppercase;
-		letter-spacing: 0.06em;
-		padding: 0.15rem 0.5rem;
-		border-radius: 3px;
+		letter-spacing: 0.07em;
+		padding: 0.18rem 0.5rem;
+		border-radius: var(--radius-sm);
 		border: 1px solid transparent;
-		flex-shrink: 0;
+		line-height: 1.4;
 	}
-	.status-badge--ok    { color: var(--status-ok); border-color: var(--status-ok-border); background: var(--status-ok-bg); }
-	.status-badge--error { color: var(--status-error); border-color: var(--status-error-border); background: var(--status-error-bg); }
-	.status-badge--idle  { color: var(--text-muted); border-color: var(--border-dim); background: transparent; }
 
-	.card-body {
+	.badge--ok    { color: var(--status-ok);    border-color: var(--status-ok-border);    background: var(--status-ok-bg); }
+	.badge--error { color: var(--status-error); border-color: var(--status-error-border); background: var(--status-error-bg); }
+	.badge--idle  { color: var(--text-muted);   border-color: var(--border-dim);          background: transparent; }
+
+	/* ── Chips row ────────────────────────────────────────────────────────────── */
+	.chips-row {
 		display: flex;
-		flex-direction: column;
-		gap: 0.3rem;
-		flex: 1;
-	}
-	.card-meta-row {
-		display: flex;
+		flex-wrap: nowrap;
+		gap: 0.25rem;
 		align-items: center;
-		gap: 0.35rem;
-		color: var(--text-muted);
 	}
-	.card-image, .card-date, .card-meta-value, .meta-label {
-		font-family: var(--font-mono);
-		font-size: 0.65rem;
-	}
-	.card-image, .card-date, .card-meta-value {
-		color: var(--text-secondary);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-	.meta-label {
-		color: var(--text-muted);
-		text-transform: uppercase;
-		letter-spacing: 0.06em;
-	}
-	.card-id {
-		font-family: var(--font-mono);
-		font-size: 0.58rem;
-		color: var(--text-muted);
-		margin-top: 0.1rem;
-	}
-	.card-ports {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.3rem;
-		margin-top: 0.1rem;
-		min-height: 1.75rem;
-		max-height: 3.5rem;
-		overflow: hidden;
-		align-content: flex-start;
-	}
-	.card-ports--empty {
-		visibility: hidden;
-	}
+
 	.port-chip {
+		display: inline-block;
 		font-family: var(--font-mono);
-		font-size: 0.6rem;
+		font-size: 0.62rem;
 		color: var(--text-secondary);
 		background: var(--bg-overlay);
 		border: 1px solid var(--border-mid);
-		border-radius: 3px;
-		padding: 0.1rem 0.4rem;
+		border-radius: var(--radius-sm);
+		padding: 0.12rem 0.4rem;
 		text-decoration: none;
-		transition: color 0.12s, border-color 0.12s;
+		white-space: nowrap;
+		transition: color 0.1s, border-color 0.1s, background 0.1s;
+		line-height: 1.5;
 	}
+
 	.port-chip:hover {
 		color: var(--text-primary);
 		border-color: var(--border-hi);
+		background: var(--accent-dim);
 	}
 
-	/* Actions */
-	.card-actions {
-		display: flex;
-		align-items: center;
-		gap: 0.3rem;
-		flex-wrap: wrap;
-		margin-top: 0.25rem;
-		padding-top: 0.625rem;
-		border-top: 1px solid var(--border-dim);
-		margin-top: auto;
-		min-height: 3.2rem;
-		align-content: flex-start;
+	.usage-chip {
+		display: inline-flex;
+		align-items: baseline;
+		gap: 0.28rem;
+		padding: 0.12rem 0.4rem;
+		border-radius: var(--radius-sm);
+		border: 1px solid var(--border-mid);
+		background: var(--bg-overlay);
+		font-family: var(--font-mono);
+		white-space: nowrap;
+		line-height: 1.5;
 	}
-	.action-btn {
+
+	.usage-key {
+		font-size: 0.5rem;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--text-muted);
+	}
+
+	.usage-val {
+		font-size: 0.62rem;
+		color: var(--text-accent);
+		font-weight: 500;
+	}
+
+	/* ── Date / ID ────────────────────────────────────────────────────────────── */
+	.date-text {
+		font-family: var(--font-mono);
+		font-size: 0.63rem;
+		color: var(--text-secondary);
+		white-space: nowrap;
+	}
+
+	.id-text {
+		font-family: var(--font-mono);
+		font-size: 0.62rem;
+		color: var(--text-muted);
+		letter-spacing: 0.03em;
+	}
+
+	.nil {
+		font-family: var(--font-mono);
+		font-size: 0.62rem;
+		color: var(--text-muted);
+		opacity: 0.3;
+	}
+
+	/* ── Action buttons ───────────────────────────────────────────────────────── */
+	.act {
 		display: inline-flex;
 		align-items: center;
-		gap: 0.3rem;
+		gap: 0.28rem;
 		background: transparent;
 		border: 1px solid var(--border-dim);
 		border-radius: var(--radius-sm);
 		color: var(--text-secondary);
 		font-family: var(--font-mono);
 		font-size: 0.6rem;
-		padding: 0.2rem 0.5rem;
+		padding: 0.22rem 0.5rem;
 		cursor: pointer;
-		transition: color 0.12s, border-color 0.12s, background 0.12s;
+		transition: color 0.1s, border-color 0.1s, background 0.1s;
 		white-space: nowrap;
+		line-height: 1;
 	}
-	.action-btn:hover {
+
+	.act:hover {
 		color: var(--text-primary);
 		border-color: var(--border-mid);
 		background: var(--accent-dim);
 	}
-	.action-btn--danger:hover {
+
+	/* Icon-only more button */
+	.act--icon {
+		padding: 0.22rem 0.35rem;
+		color: var(--text-muted);
+	}
+	.act--icon:hover,
+	.act--icon-active {
+		color: var(--text-primary);
+		border-color: var(--border-mid);
+		background: var(--accent-dim);
+	}
+
+	/* ── Dropdown menu portal ─────────────────────────────────────────────────── */
+	/* Rendered outside the table, positioned with fixed + getBoundingClientRect  */
+	:global(.menu-portal) {
+		position: fixed;
+		z-index: 9999;
+		min-width: 9rem;
+		background: var(--bg-overlay);
+		border: 1px solid var(--border-hi);
+		border-radius: var(--radius-md);
+		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.3);
+		padding: 0.25rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.05rem;
+		color: inherit;
+		animation: menu-in 0.1s var(--ease-snappy) both;
+	}
+
+	@keyframes menu-in {
+		from { opacity: 0; transform: translateY(-4px) scale(0.97); }
+		to   { opacity: 1; transform: translateY(0) scale(1); }
+	}
+
+
+
+	:global(.menu-portal .menu-item) {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		width: 100%;
+		padding: 0.38rem 0.55rem;
+		background: transparent;
+		border: none;
+		border-radius: var(--radius-sm);
+		color: var(--text-secondary);
+		font-family: var(--font-mono);
+		font-size: 0.65rem;
+		text-align: left;
+		cursor: pointer;
+		transition: color 0.08s, background 0.08s;
+		white-space: nowrap;
+	}
+
+	:global(.menu-portal .menu-item:hover) {
+		color: var(--text-primary);
+		background: var(--accent-dim);
+	}
+
+	:global(.menu-portal .menu-item--danger) {
+		color: var(--text-muted);
+	}
+
+	:global(.menu-portal .menu-item--danger:hover) {
 		color: var(--status-error);
-		border-color: var(--status-error-border);
 		background: var(--status-error-bg);
+	}
+
+	:global(.menu-portal .menu-sep) {
+		height: 1px;
+		background: var(--border-dim);
+		margin: 0.2rem 0.25rem;
 	}
 </style>

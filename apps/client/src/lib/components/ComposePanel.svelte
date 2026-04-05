@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { untrack } from "svelte";
+	import { toast } from "$lib/toast.svelte";
 	import CodeEditor from "./CodeEditor.svelte";
 	import {
 		composeDown,
@@ -27,8 +28,6 @@
 	let loading = $state(false);
 	let step = $state("Idle");
 	let logs = $state("");
-	let errorMessage = $state("");
-	let notice = $state("");
 	let statusServiceNames = $state<string[]>([]);
 	let logsViewport = $state<HTMLPreElement | null>(null);
 
@@ -140,8 +139,6 @@
 
 	async function runComposeUp(): Promise<void> {
 		loading = true;
-		errorMessage = "";
-		notice = "";
 		logs = "";
 		step = "Preparing";
 
@@ -179,10 +176,10 @@
 			}
 
 			step = "Done";
-			notice = "Compose project started.";
+			toast.ok("Compose project started.");
 			appendLog("Compose up complete.");
 		} catch (error) {
-			errorMessage = formatApiFailure(error);
+			toast.error(formatApiFailure(error));
 			step = "Failed";
 		} finally {
 			loading = false;
@@ -191,8 +188,6 @@
 
 	async function runComposeStatus(): Promise<void> {
 		loading = true;
-		errorMessage = "";
-		notice = "";
 		step = "Fetching status";
 
 		try {
@@ -207,10 +202,10 @@
 			const result = await runApiEffect(composeStatus(config, request));
 			statusServiceNames = extractServiceNamesFromStatus(result.services);
 			appendLog(result.raw || JSON.stringify(result.services, null, 2));
-			notice = "Compose status loaded.";
+			toast.ok("Compose status loaded.");
 			step = "Done";
 		} catch (error) {
-			errorMessage = formatApiFailure(error);
+			toast.error(formatApiFailure(error));
 			step = "Failed";
 		} finally {
 			loading = false;
@@ -219,8 +214,6 @@
 
 	async function runComposeDown(): Promise<void> {
 		loading = true;
-		errorMessage = "";
-		notice = "";
 		step = "Running compose down";
 
 		try {
@@ -242,10 +235,10 @@
 			if (result.stderr.trim().length > 0) {
 				appendLog(result.stderr);
 			}
-			notice = "Compose project stopped.";
+			toast.ok("Compose project stopped.");
 			step = "Done";
 		} catch (error) {
-			errorMessage = formatApiFailure(error);
+			toast.error(formatApiFailure(error));
 			step = "Failed";
 		} finally {
 			loading = false;
@@ -272,13 +265,6 @@
 			<h1 class="compose-title">Compose</h1>
 		</div>
 	</div>
-
-	{#if errorMessage}
-		<p class="alert-error">{errorMessage}</p>
-	{/if}
-	{#if notice}
-		<p class="alert-ok">{notice}</p>
-	{/if}
 
 	<section class="panel">
 		<div class="panel-header">

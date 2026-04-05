@@ -12,13 +12,13 @@
 		runApiEffect
 	} from "$lib/api";
 	import { beginAuthCheck, clearAuth, clientState, setAuthSession } from "$lib/stores.svelte";
+	import { toast } from "$lib/toast.svelte";
 
 	type HealthState = "unknown" | "checking" | "ok" | "error";
 
 	let health = $state<HealthState>("unknown");
 	let healthMessage = $state("Waiting...");
 	let healthTimer: ReturnType<typeof setTimeout> | null = null;
-	let pageError = $state("");
 
 	async function checkHealth(): Promise<void> {
 		health = "checking";
@@ -35,7 +35,6 @@
 
 	async function restoreSession(): Promise<void> {
 		beginAuthCheck();
-		pageError = "";
 		try {
 			const session = await runApiEffect(getSession({ baseUrl: clientState.baseUrl }), { notifyAuthError: false });
 			setAuthSession({
@@ -51,7 +50,7 @@
 
 			const message = formatApiFailure(error);
 			clearAuth();
-			if (!message.startsWith("Unauthorized:")) pageError = message;
+			if (!message.startsWith("Unauthorized:")) toast.error(message);
 		}
 	}
 
@@ -143,10 +142,6 @@
 					<h1 class="users-page-title">User Access</h1>
 				</div>
 			</div>
-
-			{#if pageError}
-				<p class="alert-error">{pageError}</p>
-			{/if}
 
 			{#if clientState.role === "admin"}
 				<UsersPanel

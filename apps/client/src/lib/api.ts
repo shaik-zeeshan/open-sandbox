@@ -149,6 +149,13 @@ export interface ContainerSummary {
 	service_name?: string;
 	resettable: boolean;
 	ports?: PortSummary[];
+	usage?: ResourceUsageSummary;
+}
+
+export interface ResourceUsageSummary {
+	cpu?: string;
+	memory?: string;
+	storage?: string;
 }
 
 export interface PortSummary {
@@ -551,13 +558,29 @@ export const formatApiFailure = (error: unknown): string => {
 	if (isRecord(error) && typeof error._tag === "string") {
 		switch (error._tag) {
 			case "AuthError":
-				return typeof error.message === "string" ? error.message : "Unauthorized";
-			case "ApiError":
-				return typeof error.message === "string"
-					? error.message
+				return typeof error.message === "string" ? error.message : "Unauthorized.";
+			case "ApiError": {
+				const msg = typeof error.message === "string" ? error.message.trim() : "";
+				const status = typeof error.status === "number" ? error.status : 0;
+				if (msg.length > 0) {
+					// Prepend status code for non-generic messages so it's easier to debug
+					return status >= 400 && status < 600 && !msg.includes(String(status))
+						? `${status}: ${msg}`
+						: msg;
+				}
+				return status > 0
+					? `Server error ${status}.`
 					: "Server returned an unexpected response.";
-			case "NetworkError":
-				return typeof error.message === "string" ? error.message : "Network request failed.";
+			}
+			case "NetworkError": {
+				const msg = typeof error.message === "string" ? error.message.trim() : "";
+				if (msg.length === 0) return "Network request failed.";
+				// Make fetch errors friendlier
+				if (msg.toLowerCase().includes("failed to fetch") || msg.toLowerCase().includes("networkerror")) {
+					return "Unable to reach the server. Check your connection or API endpoint.";
+				}
+				return msg;
+			}
 		}
 	}
 
@@ -565,7 +588,7 @@ export const formatApiFailure = (error: unknown): string => {
 		return error.message;
 	}
 
-	return "Unexpected error";
+	return "An unexpected error occurred.";
 };
 
 export const healthCheck = (config: ApiConfig): Effect.Effect<{ status: string }, ApiFailure, HttpClient.HttpClient> =>

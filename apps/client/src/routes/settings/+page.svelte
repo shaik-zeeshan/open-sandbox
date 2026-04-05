@@ -12,13 +12,13 @@
 		updateUserPassword
 	} from "$lib/api";
 	import { beginAuthCheck, clearAuth, clientState, setAuthSession, setBaseUrl } from "$lib/stores.svelte";
+	import { toast } from "$lib/toast.svelte";
 
 	type HealthState = "unknown" | "checking" | "ok" | "error";
 
 	let health = $state<HealthState>("unknown");
 	let healthMessage = $state("Waiting...");
 	let healthTimer: ReturnType<typeof setTimeout> | null = null;
-	let pageError = $state("");
 
 	// Endpoint settings
 	let endpointValue = $state(clientState.baseUrl);
@@ -31,7 +31,6 @@
 	let confirmPassword = $state("");
 	let passwordLoading = $state(false);
 	let passwordError = $state("");
-	let passwordSuccess = $state("");
 
 	const isValidUrl = (v: string): boolean => {
 		try { new URL(v); return true; } catch { return false; }
@@ -48,7 +47,6 @@
 
 	async function changePassword(): Promise<void> {
 		passwordError = "";
-		passwordSuccess = "";
 		if (newPassword !== confirmPassword) {
 			passwordError = "Passwords do not match.";
 			return;
@@ -60,7 +58,7 @@
 		passwordLoading = true;
 		try {
 			await runApiEffect(updateUserPassword(clientState.config, clientState.userId, newPassword));
-			passwordSuccess = "Password updated successfully.";
+			toast.ok("Password updated successfully.");
 			currentPassword = "";
 			newPassword = "";
 			confirmPassword = "";
@@ -86,7 +84,6 @@
 
 	async function restoreSession(): Promise<void> {
 		beginAuthCheck();
-		pageError = "";
 		try {
 			const session = await runApiEffect(getSession({ baseUrl: clientState.baseUrl }), { notifyAuthError: false });
 			setAuthSession({
@@ -102,7 +99,7 @@
 
 			const message = formatApiFailure(error);
 			clearAuth();
-			if (!message.startsWith("Unauthorized:")) pageError = message;
+			if (!message.startsWith("Unauthorized:")) toast.error(message);
 		}
 	}
 
@@ -199,10 +196,6 @@
 					<h1 class="settings-title">Settings</h1>
 				</div>
 			</div>
-
-			{#if pageError}
-				<p class="alert-error">{pageError}</p>
-			{/if}
 
 			<!-- Connection Settings -->
 			<section class="settings-section panel">
@@ -306,13 +299,10 @@
 									placeholder="Repeat new password"
 								/>
 							</label>
-							{#if passwordError}
-								<p class="alert-error">{passwordError}</p>
-							{/if}
-							{#if passwordSuccess}
-								<p class="alert-ok">{passwordSuccess}</p>
-							{/if}
-							<div class="form-footer">
+						{#if passwordError}
+							<p class="alert-error">{passwordError}</p>
+						{/if}
+						<div class="form-footer">
 								<button class="btn-primary btn-sm" type="submit" disabled={passwordLoading || !newPassword || !confirmPassword}>
 									{passwordLoading ? "Saving..." : "Update password"}
 								</button>

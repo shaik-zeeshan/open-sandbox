@@ -4,13 +4,21 @@
 	import PortsEditor from "./PortsEditor.svelte";
 	import type { ContainerSummary, ImageSummary, PortSummary, Sandbox } from "$lib/api";
 
+	type ResourceUsageSummary = {
+		cpu?: string;
+		memory?: string;
+		storage?: string;
+	};
+
+	type WorkloadContainerSummary = ContainerSummary & {
+		usage?: ResourceUsageSummary;
+	};
+
 	let {
 		sandboxes,
 		containers,
 		images,
 		loading,
-		errorMessage,
-		notice,
 		onOpen,
 		onRestart,
 		onReset,
@@ -40,8 +48,6 @@
 		containers: ContainerSummary[];
 		images: ImageSummary[];
 		loading: boolean;
-		errorMessage: string;
-		notice: string;
 		onOpen: (id: string) => void;
 		onRestart: (id: string) => void;
 		onReset: (id: string) => void;
@@ -82,27 +88,63 @@
 		).map((tag: string) => ({ value: tag, label: tag }))
 	);
 	let workloadSearch = $state("");
+	let workloadKindFilter = $state<"all" | "sandbox" | "container">("all");
+	let workloadStatusFilter = $state("all");
 	const sandboxContainerIDs = $derived(new Set(sandboxes.map((sandbox: Sandbox) => sandbox.id)));
-	const runtimeContainers = $derived(containers.filter((container: ContainerSummary) => !sandboxContainerIDs.has(container.id)));
+	const runtimeContainers = $derived(containers.filter((container: ContainerSummary) => !sandboxContainerIDs.has(container.id)) as WorkloadContainerSummary[]);
 
-	type WorkloadCardItem = {
-		key: string;
-		kind: "sandbox" | "container";
-		id: string;
+	const toTitleCase = (value: string): string =>
+		value
+			.split(/[-_\s]+/)
+			.filter(Boolean)
+			.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+			.join(" ");
+
+	const normalizedStatus = (value: string): { value: string; label: string } => {
+		const normalized = value.trim().toLowerCase();
+		if (normalized.includes("up") || normalized.includes("running")) {
+			return { value: "running", label: "Running" };
+		}
+		if (normalized.includes("exit") || normalized.includes("dead") || normalized.includes("error")) {
+			return { value: "stopped", label: "Stopped" };
+		}
+		if (normalized.length === 0) {
+			return { value: "unknown", label: "Unknown" };
+		}
+		return { value: normalized, label: toTitleCase(value.trim()) };
+	};
+
+	const workloadStatusOptions = [
+		{ value: "running", label: "Running" },
+		{ value: "stopped", label: "Stopped" },
+		{ value: "idle", label: "Idle" },
+		{ value: "unknown", label: "Unknown" }
+	] as const;
+
+		type WorkloadCardItem = {
+			key: string;
+			kind: "sandbox" | "container";
+			id: string;
 		name: string;
 		image: string;
 		status: string;
 		containerId: string;
 		ports: PortSummary[];
-		createdAt: number | null;
-		metaLabel: string;
-		metaValue: string;
-		canReset: boolean;
-		searchText: string;
-	};
+		usage?: ResourceUsageSummary;
+			createdAt: number | null;
+			metaLabel: string;
+			metaValue: string;
+			canReset: boolean;
+			statusFilterValue: string;
+			statusFilterLabel: string;
+			searchText: string;
+		};
 
 	const workloads = $derived.by<WorkloadCardItem[]>(() => {
-		const sandboxItems = sandboxes.map((sandbox: Sandbox) => ({
+		const sandboxItems = sandboxes.map((sandbox: Sandbox) => {
+			const backingContainer = containers.find((c: ContainerSummary) => c.id === sandbox.id) as WorkloadContainerSummary | undefined;
+			const statusFilter = normalizedStatus(sandbox.status);
+			return {
 			key: `sandbox:${sandbox.id}`,
 			kind: "sandbox" as const,
 			id: sandbox.id,
@@ -110,19 +152,24 @@
 			image: sandbox.image,
 			status: sandbox.status,
 			containerId: sandbox.container_id,
-			ports: containers.find((c: ContainerSummary) => c.id === sandbox.id)?.ports ?? sandbox.ports ?? [],
+			ports: backingContainer?.ports ?? sandbox.ports ?? [],
+			usage: backingContainer?.usage,
 			createdAt: sandbox.created_at,
 			metaLabel: sandbox.owner_username ? "Owner" : "",
 			metaValue: sandbox.owner_username ?? "",
 			canReset: true,
+			statusFilterValue: statusFilter.value,
+			statusFilterLabel: statusFilter.label,
 			searchText: [sandbox.name, sandbox.image, sandbox.owner_username ?? "", sandbox.id, sandbox.container_id].join(" ").toLowerCase()
-		}));
+			};
+		});
 
-		const containerItems = runtimeContainers.map((container: ContainerSummary) => {
+		const containerItems = runtimeContainers.map((container: WorkloadContainerSummary) => {
 			const composeProject = container.project_name ?? "";
 			const composeService = container.service_name ?? "";
 			const primaryName = container.names[0] ?? container.id.slice(0, 12);
 			const metaValue = composeProject ? `${composeProject}${composeService ? ` / ${composeService}` : ""}` : "Runtime container";
+			const statusFilter = normalizedStatus(container.state || container.status);
 			return {
 				key: `container:${container.id}`,
 				kind: "container" as const,
@@ -132,10 +179,13 @@
 				status: container.status,
 				containerId: container.container_id,
 				ports: container.ports ?? [],
+				usage: container.usage,
 				createdAt: container.created ?? null,
 				metaLabel: composeProject ? "Compose" : "Type",
 				metaValue,
 				canReset: container.resettable,
+				statusFilterValue: statusFilter.value,
+				statusFilterLabel: statusFilter.label,
 				searchText: [primaryName, container.image, metaValue, container.id, container.container_id, ...(container.names ?? [])].join(" ").toLowerCase()
 			};
 		});
@@ -151,13 +201,53 @@
 
 	const filteredWorkloads = $derived.by(() => {
 		const query = workloadSearch.trim().toLowerCase();
-		if (query.length === 0) {
-			return workloads;
-		}
-		return workloads.filter((item) => item.searchText.includes(query));
+		return workloads.filter((item) => {
+			if (workloadKindFilter !== "all" && item.kind !== workloadKindFilter) {
+				return false;
+			}
+			if (workloadStatusFilter !== "all" && item.statusFilterValue !== workloadStatusFilter) {
+				return false;
+			}
+			if (query.length > 0 && !item.searchText.includes(query)) {
+				return false;
+			}
+			return true;
+		});
 	});
 
 	const workloadCount = $derived(workloads.length);
+
+	// Pagination
+	const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
+	let pageSize = $state<10 | 25 | 50>(10);
+	let currentPage = $state(1);
+
+	// Reset to page 1 whenever filters/search change
+	$effect(() => {
+		// touch reactive deps
+		workloadSearch; workloadKindFilter; workloadStatusFilter; pageSize;
+		currentPage = 1;
+	});
+
+	const totalPages = $derived(Math.max(1, Math.ceil(filteredWorkloads.length / pageSize)));
+	const pagedWorkloads = $derived(filteredWorkloads.slice((currentPage - 1) * pageSize, currentPage * pageSize));
+
+	const goTo = (page: number) => {
+		currentPage = Math.max(1, Math.min(page, totalPages));
+	};
+
+	// Build visible page numbers: always show first, last, current ±1, with ellipsis
+	const pageNumbers = $derived.by(() => {
+		if (totalPages <= 7) return Array.from({ length: totalPages }, (_, i) => i + 1);
+		const pages: (number | '…')[] = [];
+		const add = (n: number) => { if (!pages.includes(n)) pages.push(n); };
+		add(1);
+		if (currentPage > 3) pages.push('…');
+		for (let p = Math.max(2, currentPage - 1); p <= Math.min(totalPages - 1, currentPage + 1); p++) add(p);
+		if (currentPage < totalPages - 2) pages.push('…');
+		add(totalPages);
+		return pages;
+	});
 </script>
 
 <div class="list-view anim-fade-up">
@@ -171,9 +261,36 @@
 		</div>
 		<div class="list-actions">
 			<label class="search-field" aria-label="Search workloads">
-				<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+				<svg class="search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
 				<input class="search-input" bind:value={workloadSearch} placeholder="Search workloads..." />
+				{#if workloadSearch.length > 0}
+					<button class="search-clear" type="button" onclick={() => workloadSearch = ""} title="Clear search" aria-label="Clear search">
+						<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+							<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+						</svg>
+					</button>
+				{/if}
 			</label>
+			<div class="filter-group" aria-label="Filter workloads">
+				<label class="filter-field">
+					<span class="filter-label">Type</span>
+					<select class="filter-select" bind:value={workloadKindFilter}>
+						<option value="all">All</option>
+						<option value="sandbox">Sandboxes</option>
+						<option value="container">Containers</option>
+					</select>
+				</label>
+				<span class="filter-sep" aria-hidden="true"></span>
+				<label class="filter-field">
+					<span class="filter-label">Status</span>
+					<select class="filter-select" bind:value={workloadStatusFilter}>
+						<option value="all">All</option>
+						{#each workloadStatusOptions as option (option.value)}
+							<option value={option.value}>{option.label}</option>
+						{/each}
+					</select>
+				</label>
+			</div>
 			<button class="btn-ghost btn-sm" type="button" onclick={onRefresh} disabled={loading}>
 				{#if loading}
 					<svg class="spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.22-8.56"/></svg>
@@ -189,11 +306,7 @@
 		</div>
 	</div>
 
-	<!-- Alerts -->
-	{#if errorMessage}<p class="alert-error anim-fade-up">{errorMessage}</p>{/if}
-	{#if notice}<p class="alert-ok anim-fade-up">{notice}</p>{/if}
-
-	<!-- Card grid -->
+	<!-- Workload table list -->
 	{#if workloadCount === 0 && !showCreateForm}
 		<div class="empty-state anim-fade-up anim-delay-1">
 			<div class="empty-icon">
@@ -216,31 +329,106 @@
 			<p class="empty-sub">Try a different name, image, or workload id.</p>
 		</div>
 	{:else}
-		<div class="sandbox-grid">
-			{#each filteredWorkloads as workload, i (workload.key)}
-				<div class="anim-fade-up" style="animation-delay: {i * 0.035}s">
-					<SandboxCard
-						name={workload.name}
-						image={workload.image}
-						status={workload.status}
-						containerId={workload.containerId}
-						ports={workload.ports}
-						createdAt={workload.createdAt}
-						metaLabel={workload.metaLabel}
-						metaValue={workload.metaValue}
-						isSelected={false}
-						showReset={workload.canReset}
-						deleteLabel={workload.kind === "sandbox" ? "Delete" : "Remove"}
-						deleteTitle={workload.kind === "sandbox" ? "Delete sandbox" : "Remove container"}
-						onOpen={() => workload.kind === "sandbox" ? onOpen(workload.id) : onOpenContainer(workload.id)}
-						onRestart={() => workload.kind === "sandbox" ? onRestart(workload.id) : onRestartContainer(workload.id)}
-						onReset={() => workload.kind === "sandbox" ? onReset(workload.id) : onResetContainer(workload.id)}
-						onStop={() => workload.kind === "sandbox" ? onStop(workload.id) : onStopContainer(workload.id)}
-						onDelete={() => workload.kind === "sandbox" ? onDelete(workload.id) : onRemoveContainer(workload.id)}
-					/>
-				</div>
-			{/each}
+		<div class="sandbox-table-wrap">
+			<table class="sandbox-table">
+				<thead>
+					<tr class="thead-row">
+						<th class="th">Name</th>
+						<th class="th">Image</th>
+						<th class="th">Status</th>
+						<th class="th">Ports</th>
+						<th class="th">Usage</th>
+						<th class="th">Created</th>
+						<th class="th">Container ID</th>
+						<th class="th th-actions"></th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each pagedWorkloads as workload, i (workload.key)}
+						<SandboxCard
+							name={workload.name}
+							image={workload.image}
+							status={workload.status}
+							containerId={workload.containerId}
+							ports={workload.ports}
+							usage={workload.usage}
+							createdAt={workload.createdAt}
+							metaLabel={workload.metaLabel}
+							metaValue={workload.metaValue}
+							isSelected={false}
+							showReset={workload.canReset}
+							deleteLabel={workload.kind === "sandbox" ? "Delete" : "Remove"}
+							deleteTitle={workload.kind === "sandbox" ? "Delete sandbox" : "Remove container"}
+							animDelay={i * 0.035}
+							onOpen={() => workload.kind === "sandbox" ? onOpen(workload.id) : onOpenContainer(workload.id)}
+							onRestart={() => workload.kind === "sandbox" ? onRestart(workload.id) : onRestartContainer(workload.id)}
+							onReset={() => workload.kind === "sandbox" ? onReset(workload.id) : onResetContainer(workload.id)}
+							onStop={() => workload.kind === "sandbox" ? onStop(workload.id) : onStopContainer(workload.id)}
+							onDelete={() => workload.kind === "sandbox" ? onDelete(workload.id) : onRemoveContainer(workload.id)}
+						/>
+					{/each}
+				</tbody>
+			</table>
 		</div>
+
+		<!-- Pagination bar -->
+		{#if totalPages > 1 || filteredWorkloads.length > PAGE_SIZE_OPTIONS[0]}
+			<div class="pagination">
+				<div class="pagination-info">
+					<span class="pg-label">
+						{((currentPage - 1) * pageSize) + 1}–{Math.min(currentPage * pageSize, filteredWorkloads.length)} of {filteredWorkloads.length}
+					</span>
+				</div>
+
+				<div class="pagination-controls">
+					<!-- Prev -->
+					<button
+						class="pg-btn pg-btn--nav"
+						type="button"
+						onclick={() => goTo(currentPage - 1)}
+						disabled={currentPage === 1}
+						aria-label="Previous page"
+					>
+						<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+					</button>
+
+					<!-- Page numbers -->
+					{#each pageNumbers as p}
+						{#if p === '…'}
+							<span class="pg-ellipsis">…</span>
+						{:else}
+							<button
+								class="pg-btn {currentPage === p ? 'pg-btn--active' : ''}"
+								type="button"
+								onclick={() => goTo(p as number)}
+								aria-label="Page {p}"
+								aria-current={currentPage === p ? 'page' : undefined}
+							>{p}</button>
+						{/if}
+					{/each}
+
+					<!-- Next -->
+					<button
+						class="pg-btn pg-btn--nav"
+						type="button"
+						onclick={() => goTo(currentPage + 1)}
+						disabled={currentPage === totalPages}
+						aria-label="Next page"
+					>
+						<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+					</button>
+				</div>
+
+				<div class="pagination-size">
+					<span class="pg-label">Rows</span>
+					<select class="pg-size-select" bind:value={pageSize}>
+						{#each PAGE_SIZE_OPTIONS as size}
+							<option value={size}>{size}</option>
+						{/each}
+					</select>
+				</div>
+			</div>
+		{/if}
 	{/if}
 </div>
 
@@ -353,7 +541,7 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: 1rem;
-		padding-bottom: 0.875rem;
+		padding-bottom: 1rem;
 		border-bottom: 1px solid var(--border-dim);
 	}
 
@@ -393,12 +581,27 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 0.45rem;
-		padding: 0.45rem 0.65rem;
-		border: 1px solid var(--border-dim);
+		padding: 0.38rem 0.625rem;
+		border: 1px solid var(--border-mid);
 		border-radius: var(--radius-md);
-		background: var(--bg-surface);
+		background: var(--bg-raised);
 		color: var(--text-muted);
 		min-width: min(22rem, 40vw);
+		transition: border-color 0.15s, box-shadow 0.15s;
+	}
+
+	.search-field:focus-within {
+		border-color: var(--border-focus);
+		box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.04);
+	}
+
+	.search-icon {
+		flex-shrink: 0;
+		transition: color 0.15s;
+	}
+
+	.search-field:focus-within .search-icon {
+		color: var(--text-secondary);
 	}
 
 	.search-input {
@@ -413,6 +616,27 @@
 
 	.search-input::placeholder {
 		color: var(--text-muted);
+	}
+
+	.search-clear {
+		display: grid;
+		place-items: center;
+		width: 18px;
+		height: 18px;
+		background: var(--bg-overlay);
+		border: 1px solid var(--border-mid);
+		border-radius: 3px;
+		color: var(--text-muted);
+		cursor: pointer;
+		padding: 0;
+		flex-shrink: 0;
+		transition: color 0.1s, background 0.1s, border-color 0.1s;
+	}
+
+	.search-clear:hover {
+		color: var(--text-primary);
+		background: var(--accent-dim);
+		border-color: var(--border-hi);
 	}
 
 	/* Empty state */
@@ -452,18 +676,125 @@
 		color: var(--text-muted);
 	}
 
-	/* Card grid */
-	.sandbox-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(320px, 320px));
-		gap: 0.875rem;
+	.filter-group {
+		display: inline-flex;
 		align-items: stretch;
-		justify-content: start;
+		border: 1px solid var(--border-mid);
+		border-radius: var(--radius-md);
+		background: var(--bg-raised);
+		overflow: hidden;
 	}
 
-	.sandbox-grid > :global(.anim-fade-up) {
-		height: 100%;
-		display: flex;
+	.filter-field {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+		padding: 0.38rem 0.625rem;
+	}
+
+	.filter-sep {
+		width: 1px;
+		background: var(--border-mid);
+		align-self: stretch;
+		flex-shrink: 0;
+	}
+
+	.filter-label {
+		font-family: var(--font-mono);
+		font-size: 0.58rem;
+		color: var(--text-muted);
+		text-transform: uppercase;
+		letter-spacing: 0.07em;
+		white-space: nowrap;
+		flex-shrink: 0;
+	}
+
+	.filter-select {
+		border: 0;
+		outline: 0;
+		background: transparent;
+		color: var(--text-primary);
+		font-family: var(--font-mono);
+		font-size: 0.7rem;
+		min-width: 6.5rem;
+		cursor: pointer;
+	}
+
+	.filter-select:disabled {
+		color: var(--text-muted);
+	}
+
+	/* ── Table ────────────────────────────────────────────────────────────────── */
+	.sandbox-table-wrap {
+		/* No overflow:hidden — would clip the actions dropdown.
+		   Rounded border is achieved via border-separate on the table itself. */
+		position: relative;
+	}
+
+	.sandbox-table {
+		width: 100%;
+		/* separate + spacing:0 lets border-radius work without a clipping wrapper */
+		border-collapse: separate;
+		border-spacing: 0;
+		border: 1px solid var(--border-dim);
+		border-radius: var(--radius-lg);
+		font-family: var(--font-mono);
+		font-size: 0.7rem;
+	}
+
+	/* Header */
+	.thead-row {
+		background: var(--bg-base);
+	}
+
+	.th {
+		padding: 0.5rem 0.875rem;
+		text-align: left;
+		font-size: 0.58rem;
+		font-weight: 500;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-muted);
+		white-space: nowrap;
+		border-bottom: 1px solid var(--border-dim);
+	}
+
+	/* Round the header corners to match the table border-radius */
+	.th:first-child { border-top-left-radius: var(--radius-lg); }
+	.th:last-child  { border-top-right-radius: var(--radius-lg); }
+
+	/* min-width hints on header cells — auto layout respects these */
+	.th:nth-child(1) { min-width: 11rem; } /* Name */
+	.th:nth-child(2) { min-width: 10rem; } /* Image */
+	.th:nth-child(3) { min-width: 5.5rem; } /* Status */
+	.th:nth-child(4) { min-width: 5rem;  } /* Ports */
+	.th:nth-child(5) { min-width: 9rem;  } /* Usage */
+	.th:nth-child(6) { min-width: 8rem;  } /* Created */
+	.th:nth-child(7) { min-width: 6.5rem;} /* Container ID */
+	.th:nth-child(8) { min-width: 9rem; } /* Actions — Open + Stop/Start + ⋯ */
+
+	.th-actions {
+		text-align: right;
+	}
+
+	/* Body rows */
+	.sandbox-table tbody :global(tr) {
+		transition: background 0.12s;
+	}
+
+	.sandbox-table tbody :global(tr:hover) {
+		background: var(--bg-raised) !important;
+	}
+
+	/* Remove bottom border on last row's cells, round its outer corners */
+	.sandbox-table tbody :global(tr:last-child td) {
+		border-bottom: none;
+	}
+	.sandbox-table tbody :global(tr:last-child td:first-child) {
+		border-bottom-left-radius: var(--radius-lg);
+	}
+	.sandbox-table tbody :global(tr:last-child td:last-child) {
+		border-bottom-right-radius: var(--radius-lg);
 	}
 
 	/* Backdrop */
@@ -660,6 +991,115 @@
 		background: var(--bg-surface);
 	}
 
+	/* ── Pagination ─────────────────────────────────────────────────────────── */
+	.pagination {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.75rem;
+		padding: 0.625rem 0.25rem 0.125rem;
+		flex-wrap: wrap;
+	}
+
+	.pagination-info {
+		flex: 0 0 auto;
+	}
+
+	.pagination-controls {
+		display: flex;
+		align-items: center;
+		gap: 0.2rem;
+		flex-wrap: nowrap;
+	}
+
+	.pagination-size {
+		display: flex;
+		align-items: center;
+		gap: 0.45rem;
+		flex: 0 0 auto;
+	}
+
+	.pg-label {
+		font-family: var(--font-mono);
+		font-size: 0.62rem;
+		color: var(--text-muted);
+		white-space: nowrap;
+	}
+
+	.pg-btn {
+		display: inline-grid;
+		place-items: center;
+		min-width: 26px;
+		height: 26px;
+		padding: 0 0.35rem;
+		background: transparent;
+		border: 1px solid transparent;
+		border-radius: var(--radius-sm);
+		color: var(--text-muted);
+		font-family: var(--font-mono);
+		font-size: 0.62rem;
+		cursor: pointer;
+		transition: color 0.1s, background 0.1s, border-color 0.1s;
+		line-height: 1;
+	}
+
+	.pg-btn:hover:not(:disabled) {
+		color: var(--text-primary);
+		background: var(--accent-dim);
+		border-color: var(--border-mid);
+	}
+
+	.pg-btn:disabled {
+		opacity: 0.25;
+		cursor: not-allowed;
+	}
+
+	.pg-btn--active {
+		color: var(--text-primary);
+		background: var(--bg-overlay);
+		border-color: var(--border-hi);
+		cursor: default;
+	}
+
+	.pg-btn--active:hover {
+		background: var(--bg-overlay);
+		border-color: var(--border-hi);
+		color: var(--text-primary);
+	}
+
+	.pg-btn--nav {
+		color: var(--text-secondary);
+	}
+
+	.pg-ellipsis {
+		display: inline-grid;
+		place-items: center;
+		min-width: 26px;
+		height: 26px;
+		font-family: var(--font-mono);
+		font-size: 0.62rem;
+		color: var(--text-muted);
+		letter-spacing: 0.05em;
+		user-select: none;
+	}
+
+	.pg-size-select {
+		border: 1px solid var(--border-mid);
+		border-radius: var(--radius-sm);
+		background: var(--bg-raised);
+		color: var(--text-primary);
+		font-family: var(--font-mono);
+		font-size: 0.62rem;
+		padding: 0.2rem 0.45rem;
+		outline: none;
+		cursor: pointer;
+		transition: border-color 0.1s;
+	}
+
+	.pg-size-select:focus {
+		border-color: var(--border-focus);
+	}
+
 	/* Shared */
 	.btn-ghost { display: inline-flex; align-items: center; gap: 0.35rem; }
 	.btn-primary { display: inline-flex; align-items: center; gap: 0.4rem; }
@@ -671,8 +1111,11 @@
 		.list-header { align-items: stretch; flex-direction: column; }
 		.list-actions { width: 100%; flex-wrap: wrap; }
 		.search-field { min-width: 100%; }
-		.sandbox-grid { grid-template-columns: 1fr; }
+		.filter-group { width: 100%; }
+		.filter-field { flex: 1 1 10rem; }
+		.sandbox-table-wrap { overflow-x: auto; }
 		.drawer { width: 100vw; }
 		.form-row-2 { grid-template-columns: 1fr; }
+		.pagination { flex-direction: column; align-items: flex-start; gap: 0.5rem; }
 	}
 </style>

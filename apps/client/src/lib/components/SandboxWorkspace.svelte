@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onDestroy, onMount, tick } from "svelte";
+	import { toast } from "$lib/toast.svelte";
 	import SandboxTerminal from "$lib/components/SandboxTerminal.svelte";
 	import AnsiToHtml from "ansi-to-html";
 	import {
@@ -50,8 +51,6 @@
 	}>();
 
 	let activeTab = $state<WorkspaceTab>("overview");
-	let errorMessage = $state("");
-	let notice = $state("");
 
 	const defaultUploadPath = (workspaceDir: string): string => {
 		const normalized = workspaceDir === "/" ? "" : workspaceDir.replace(/\/+$/, "");
@@ -184,7 +183,6 @@
 
 	async function loadPath(pathToLoad: string): Promise<void> {
 		readLoading = true;
-		errorMessage = "";
 		try {
 			filePayload = workloadKind === "sandbox"
 				? await readSandboxFile(config, targetId, pathToLoad.trim())
@@ -192,7 +190,7 @@
 			browsePath = pathToLoad.trim();
 			editorContent = filePayload.kind === "file" ? filePayload.content ?? "" : "";
 		} catch (error) {
-			errorMessage = formatApiFailure(error);
+			toast.error(formatApiFailure(error));
 		} finally {
 			readLoading = false;
 		}
@@ -201,17 +199,16 @@
 	async function submitSaveFile(): Promise<void> {
 		if (filePayload?.kind !== "file") return;
 		saveLoading = true;
-		errorMessage = ""; notice = "";
 		try {
 			if (workloadKind === "sandbox") {
 				await saveSandboxFile(config, targetId, browsePath, editorContent);
 			} else {
 				await saveContainerFile(config, backingContainerId, browsePath, editorContent);
 			}
-			notice = "File saved.";
+			toast.ok("File saved.");
 			filePayload = { ...filePayload, content: editorContent };
 		} catch (error) {
-			errorMessage = formatApiFailure(error);
+			toast.error(formatApiFailure(error));
 		} finally {
 			saveLoading = false;
 		}
@@ -220,17 +217,16 @@
 	async function submitUploadFile(): Promise<void> {
 		if (uploadFile === null) return;
 		uploadLoading = true;
-		errorMessage = ""; notice = "";
 		try {
 			if (workloadKind === "sandbox") {
 				await uploadSandboxFile(config, targetId, uploadPath.trim(), uploadFile);
 			} else {
 				await uploadContainerFile(config, backingContainerId, uploadPath.trim(), uploadFile);
 			}
-			notice = "File uploaded.";
+			toast.ok("File uploaded.");
 			await loadPath(filePayload?.kind === "directory" ? browsePath : parentPath(uploadPath));
 		} catch (error) {
-			errorMessage = formatApiFailure(error);
+			toast.error(formatApiFailure(error));
 		} finally {
 			uploadLoading = false;
 		}
@@ -244,7 +240,6 @@
 	async function startLogs(): Promise<void> {
 		stopLogs();
 		logEntries = [];
-		errorMessage = "";
 		const controller = new AbortController();
 		logsAbortController = controller;
 		streaming = true;
@@ -274,7 +269,7 @@
 			if (buffer.trim()) parseSseBlock(buffer);
 		} catch (error) {
 			if (!(error instanceof DOMException && error.name === "AbortError")) {
-				errorMessage = error instanceof Error ? error.message : "Failed to stream logs.";
+				toast.error(error instanceof Error ? error.message : "Failed to stream logs.");
 			}
 		} finally {
 			if (logsAbortController === controller) logsAbortController = null;
@@ -297,7 +292,6 @@
 
 	async function handleAction(action: "restart" | "reset" | "stop" | "delete"): Promise<void> {
 		actionLoading = action;
-		errorMessage = ""; notice = "";
 		try {
 			if (action === "restart") {
 				if (workloadKind === "sandbox") {
@@ -305,12 +299,12 @@
 				} else {
 					await runApiEffect(restartContainer(config, targetId));
 				}
-				notice = "Restarted.";
+				toast.ok("Restarted.");
 				await Promise.resolve(onRefresh());
 			} else if (action === "reset") {
 				if (workloadKind === "sandbox") {
 					await runApiEffect(resetSandbox(config, targetId));
-					notice = "Reset to clean workspace.";
+					toast.ok("Reset to clean workspace.");
 					await Promise.resolve(onRefresh());
 					await loadPath(workspaceDirValue);
 				} else {
@@ -319,7 +313,7 @@
 					}
 					const result = await runApiEffect(resetContainer(config, targetId));
 					onContainerReplaced(result.id);
-					notice = "Container reset.";
+					toast.ok("Container reset.");
 					await Promise.resolve(onRefresh());
 					await tick();
 					await loadPath(browsePath);
@@ -330,7 +324,7 @@
 				} else {
 					await runApiEffect(stopContainer(config, targetId));
 				}
-				notice = "Stopped.";
+				toast.ok("Stopped.");
 				await Promise.resolve(onRefresh());
 			} else if (action === "delete") {
 				if (workloadKind === "sandbox") {
@@ -341,7 +335,7 @@
 				onDeleted();
 			}
 		} catch (error) {
-			errorMessage = formatApiFailure(error);
+			toast.error(formatApiFailure(error));
 		} finally {
 			actionLoading = null;
 		}
@@ -425,18 +419,6 @@
 			</button>
 		{/each}
 	</div>
-
-	<!-- ── Alerts ─────────────────────────────────────────────────────────────── -->
-	{#if errorMessage}
-		<div class="alert-wrap">
-			<p class="alert-error anim-fade-up">{errorMessage}</p>
-		</div>
-	{/if}
-	{#if notice}
-		<div class="alert-wrap">
-			<p class="alert-ok anim-fade-up">{notice}</p>
-		</div>
-	{/if}
 
 	<!-- ── Tab content ────────────────────────────────────────────────────────── -->
 	<div class="tab-content">
