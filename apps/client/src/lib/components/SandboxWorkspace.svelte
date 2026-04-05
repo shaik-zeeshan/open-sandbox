@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onDestroy, onMount, tick } from "svelte";
+	import { dispatchAuthErrorEvent } from "$lib/client/browser";
 	import { toast } from "$lib/toast.svelte";
 	import SandboxTerminal from "$lib/components/SandboxTerminal.svelte";
 	import AnsiToHtml from "ansi-to-html";
@@ -185,8 +186,8 @@
 		readLoading = true;
 		try {
 			filePayload = workloadKind === "sandbox"
-				? await readSandboxFile(config, targetId, pathToLoad.trim())
-				: await readContainerFile(config, backingContainerId, pathToLoad.trim());
+				? await runApiEffect(readSandboxFile(config, targetId, pathToLoad.trim()))
+				: await runApiEffect(readContainerFile(config, backingContainerId, pathToLoad.trim()));
 			browsePath = pathToLoad.trim();
 			editorContent = filePayload.kind === "file" ? filePayload.content ?? "" : "";
 		} catch (error) {
@@ -201,9 +202,9 @@
 		saveLoading = true;
 		try {
 			if (workloadKind === "sandbox") {
-				await saveSandboxFile(config, targetId, browsePath, editorContent);
+				await runApiEffect(saveSandboxFile(config, targetId, browsePath, editorContent));
 			} else {
-				await saveContainerFile(config, backingContainerId, browsePath, editorContent);
+				await runApiEffect(saveContainerFile(config, backingContainerId, browsePath, editorContent));
 			}
 			toast.ok("File saved.");
 			filePayload = { ...filePayload, content: editorContent };
@@ -219,9 +220,9 @@
 		uploadLoading = true;
 		try {
 			if (workloadKind === "sandbox") {
-				await uploadSandboxFile(config, targetId, uploadPath.trim(), uploadFile);
+				await runApiEffect(uploadSandboxFile(config, targetId, uploadPath.trim(), uploadFile));
 			} else {
-				await uploadContainerFile(config, backingContainerId, uploadPath.trim(), uploadFile);
+				await runApiEffect(uploadContainerFile(config, backingContainerId, uploadPath.trim(), uploadFile));
 			}
 			toast.ok("File uploaded.");
 			await loadPath(filePayload?.kind === "directory" ? browsePath : parentPath(uploadPath));
@@ -252,7 +253,7 @@
 			const token = config.token?.trim() ?? "";
 			if (token.length) headers.set("Authorization", `Bearer ${token}`);
 			const response = await fetch(url, { credentials: "include", headers, signal: controller.signal });
-			if (response.status === 401) window.dispatchEvent(new CustomEvent("open-sandbox:auth-error"));
+			if (response.status === 401) dispatchAuthErrorEvent();
 			if (!response.ok || !response.body) throw new Error(`Unable to stream logs: HTTP ${response.status}`);
 			const reader = response.body.getReader();
 			const decoder = new TextDecoder();

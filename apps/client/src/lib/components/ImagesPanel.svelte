@@ -190,7 +190,7 @@
 				createStep = "Building image";
 				appendCreateLog(`Building ${tag} from ${contextPath}`);
 				let buildError = "";
-				await buildImageStream(
+				await runApiEffect(buildImageStream(
 					config,
 					{
 						context_path: contextPath,
@@ -208,7 +208,7 @@
 							appendCreateLog(`Image ready: ${event.data.trim()}`);
 						}
 					}
-				);
+				));
 				if (buildError.length > 0) {
 					throw new Error(buildError);
 				}
@@ -229,7 +229,7 @@
 				createStep = "Building image";
 				appendCreateLog(`Building ${tag} from inline Dockerfile`);
 				let buildError = "";
-				await buildImageStream(
+				await runApiEffect(buildImageStream(
 					config,
 					{
 						dockerfile: "Dockerfile",
@@ -247,7 +247,7 @@
 							appendCreateLog(`Image ready: ${event.data.trim()}`);
 						}
 					}
-				);
+				));
 				if (buildError.length > 0) {
 					throw new Error(buildError);
 				}

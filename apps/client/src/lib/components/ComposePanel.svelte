@@ -155,14 +155,14 @@
 			appendLog(`Starting docker compose up (project: ${request.project_name})...`);
 			let composeError = "";
 
-			const result = await composeUpStream(config, request, (event) => {
+			const result = await runApiEffect(composeUpStream(config, request, (event) => {
 				if ((event.event === "stdout" || event.event === "stderr") && event.data.length > 0) {
 					appendLog(event.data);
 				}
 				if (event.event === "error") {
 					composeError = event.data.trim();
 				}
-			});
+			}));
 
 			if (result.stdout.trim().length > 0) {
 				appendLog(result.stdout);
