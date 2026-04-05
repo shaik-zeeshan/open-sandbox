@@ -2,7 +2,25 @@ import { browser } from "$app/environment";
 import type { ApiConfig } from "$lib/api";
 
 const BASE_URL_KEY = "open-sandbox.base-url";
-const DEFAULT_BASE_URL = (import.meta.env.VITE_SANDBOX_BASE_URL as string | undefined)?.trim() || "http://localhost:8080";
+
+const resolveDefaultBaseUrl = (): string => {
+	const configured = (import.meta.env.VITE_SANDBOX_BASE_URL as string | undefined)?.trim() || "http://localhost:8080";
+	if (!browser) {
+		return configured;
+	}
+
+	if (configured === "/") {
+		return window.location.origin;
+	}
+
+	if (configured.startsWith("/")) {
+		return new URL(configured, `${window.location.origin}/`).toString().replace(/\/+$/, "");
+	}
+
+	return configured;
+};
+
+const DEFAULT_BASE_URL = resolveDefaultBaseUrl();
 
 const readStorage = (key: string, fallback: string): string => {
 	if (!browser) {
