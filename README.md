@@ -127,16 +127,3 @@ For image-based deploys, replace the build step with `docker compose pull`.
 
 If you need a backup before upgrading, back up `${OPEN_SANDBOX_DATA_DIR}` and any host Docker volumes or images you want to preserve.
 
-## Operations
-
-Operational hardening guidance is in `docs/operations.md`.
-
-Phase 5 small-cluster control-plane and worker protocol notes are in `docs/small-cluster-protocol.md`.
-
-It includes:
-
-- reverse proxy examples for SSE and WebSockets
-- backup and restore commands for persistent state
-- maintenance cleanup commands and retention controls
-- `/metrics` exposure and structured logging notes
-- default runtime resource limits
