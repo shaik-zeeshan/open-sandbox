@@ -92,6 +92,7 @@ type UserStore interface {
 
 type Server struct {
 	docker          DockerAPI
+	runtime         workloadRuntime
 	auth            AuthConfig
 	router          *gin.Engine
 	sandboxStore    SandboxStore
@@ -251,6 +252,7 @@ func NewServer(dockerClient DockerAPI, authConfig AuthConfig) *Server {
 
 func NewServerWithStore(dockerClient DockerAPI, authConfig AuthConfig, sandboxStore SandboxStore) *Server {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	workspaceRoot := resolveWorkspaceRoot()
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(requestIDMiddleware())
@@ -281,9 +283,10 @@ func NewServerWithStore(dockerClient DockerAPI, authConfig AuthConfig, sandboxSt
 		logger:          logger,
 		metrics:         newOperationalMetrics(),
 		runtimeLimits:   loadRuntimeLimitsFromEnv(),
-		workspaceRoot:   resolveWorkspaceRoot(),
+		workspaceRoot:   workspaceRoot,
 		execWaitTimeout: loadExecWaitTimeout(),
 	}
+	s.runtime = newDockerRuntime(dockerClient, func() string { return s.workspaceRoot })
 	s.registerRoutes()
 	return s
 }
@@ -866,7 +869,7 @@ func (s *Server) createContainer(c *gin.Context) {
 
 	started := false
 	if req.Start {
-		if err := s.docker.ContainerStart(c.Request.Context(), created.ID, container.StartOptions{}); err != nil {
+		if err := s.runtime.StartWorkload(c.Request.Context(), created.ID, container.StartOptions{}); err != nil {
 			s.logLifecycleFailure("start_container", err, slog.String("container_id", created.ID), slog.String("managed_id", managedID))
 			writeError(c, http.StatusInternalServerError, fmt.Errorf("start container: %w", err))
 			return
@@ -1040,7 +1043,7 @@ func (s *Server) streamTerminalForContainer(c *gin.Context, containerID string, 
 			if message.Cols == 0 || message.Rows == 0 {
 				continue
 			}
-			if err := s.docker.ContainerExecResize(c.Request.Context(), execID, container.ResizeOptions{Width: message.Cols, Height: message.Rows}); err != nil {
+			if err := s.runtime.ExecResize(c.Request.Context(), execID, container.ResizeOptions{Width: message.Cols, Height: message.Rows}); err != nil {
 				cleanup.Do(cleanupSession)
 				return
 			}
@@ -1067,12 +1070,12 @@ func (s *Server) startInteractiveExec(
 		AttachStderr: true,
 	}
 
-	created, err := s.docker.ContainerExecCreate(ctx, containerID, execConfig)
+	created, err := s.runtime.ExecCreate(ctx, containerID, execConfig)
 	if err != nil {
 		return "", dockertypes.HijackedResponse{}, fmt.Errorf("create interactive exec: %w", err)
 	}
 
-	attached, err := s.docker.ContainerExecAttach(ctx, created.ID, container.ExecAttachOptions{Tty: true, ConsoleSize: consoleSize})
+	attached, err := s.runtime.ExecAttach(ctx, created.ID, container.ExecAttachOptions{Tty: true, ConsoleSize: consoleSize})
 	if err != nil {
 		return "", dockertypes.HijackedResponse{}, fmt.Errorf("attach interactive exec: %w", err)
 	}
@@ -1108,20 +1111,20 @@ func (s *Server) runContainerExec(ctx context.Context, containerID string, req E
 		AttachStderr: !req.Detach,
 	}
 
-	created, err := s.docker.ContainerExecCreate(ctx, containerID, execConfig)
+	created, err := s.runtime.ExecCreate(ctx, containerID, execConfig)
 	if err != nil {
 		return ExecResponse{}, fmt.Errorf("create exec: %w", err)
 	}
 
 	if req.Detach {
-		if err := s.docker.ContainerExecStart(ctx, created.ID, container.ExecStartOptions{Detach: true, Tty: req.TTY}); err != nil {
+		if err := s.runtime.ExecStart(ctx, created.ID, container.ExecStartOptions{Detach: true, Tty: req.TTY}); err != nil {
 			return ExecResponse{}, fmt.Errorf("start detached exec: %w", err)
 		}
 
 		return ExecResponse{ExecID: created.ID, Detached: true}, nil
 	}
 
-	attached, err := s.docker.ContainerExecAttach(ctx, created.ID, container.ExecAttachOptions{Tty: req.TTY})
+	attached, err := s.runtime.ExecAttach(ctx, created.ID, container.ExecAttachOptions{Tty: req.TTY})
 	if err != nil {
 		return ExecResponse{}, fmt.Errorf("attach exec: %w", err)
 	}
@@ -1164,7 +1167,7 @@ func (s *Server) waitForExec(ctx context.Context, execID string) (container.Exec
 	defer ticker.Stop()
 
 	for {
-		inspect, err := s.docker.ContainerExecInspect(ctx, execID)
+		inspect, err := s.runtime.ExecInspect(ctx, execID)
 		if err != nil {
 			return container.ExecInspect{}, fmt.Errorf("inspect exec: %w", err)
 		}
@@ -1324,20 +1327,7 @@ func (s *Server) prepareComposeProject(req ComposeRequest) (composeProjectContex
 }
 
 func (s *Server) existingComposeProject(projectName string) (composeProjectContext, error) {
-	sanitized := sanitizeComposeProjectName(projectName)
-	if sanitized == "" {
-		return composeProjectContext{}, errors.New("compose project name is required")
-	}
-	projectDir := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", sanitized)
-	composeFile := filepath.Join(projectDir, "docker-compose.yml")
-	if _, err := os.Stat(composeFile); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return composeProjectContext{}, fmt.Errorf("compose project %q not found", sanitized)
-		}
-		return composeProjectContext{}, fmt.Errorf("inspect compose project: %w", err)
-	}
-
-	return composeProjectContext{ProjectName: sanitized, ProjectDir: projectDir, ComposeFile: composeFile}, nil
+	return existingComposeProjectAt(s.workspaceRoot, projectName)
 }
 
 func (s *Server) composeProjectContextForName(projectName string) composeProjectContext {

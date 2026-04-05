@@ -344,7 +344,7 @@ func (s *Server) cleanupComposeProjects(runtimeContainers map[string]ContainerSu
 
 	activeProjects := map[string]struct{}{}
 	for _, item := range runtimeContainers {
-		if project := strings.TrimSpace(item.Labels["com.docker.compose.project"]); project != "" {
+		if project := s.runtime.ProjectName(item); project != "" {
 			activeProjects[project] = struct{}{}
 		}
 	}

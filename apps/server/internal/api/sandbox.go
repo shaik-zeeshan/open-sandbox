@@ -112,7 +112,7 @@ func (s *Server) listContainers(c *gin.Context) {
 		return
 	}
 
-	containers, err := s.listRuntimeContainers(c.Request.Context())
+	containers, err := s.runtime.ListWorkloads(c.Request.Context())
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
@@ -135,7 +135,7 @@ func (s *Server) listContainers(c *gin.Context) {
 
 	visible := make([]ContainerSummary, 0, len(containers))
 	for _, item := range containers {
-		if runtimeContainerVisibleToIdentity(item, identity, ownedContainerIDs, ownedComposeProjects) {
+		if s.runtimeContainerVisibleToIdentity(item, identity, ownedContainerIDs, ownedComposeProjects) {
 			visible = append(visible, item)
 		}
 	}
@@ -149,18 +149,18 @@ func (s *Server) restartContainer(c *gin.Context) {
 		return
 	}
 
-	inspect, err := s.docker.ContainerInspect(c.Request.Context(), target.ID)
+	inspect, err := s.runtime.InspectWorkload(c.Request.Context(), target.ID)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 	if inspect.State != nil && inspect.State.Running {
-		if err := s.docker.ContainerStop(c.Request.Context(), target.ID, container.StopOptions{}); err != nil {
+		if err := s.runtime.StopWorkload(c.Request.Context(), target.ID, container.StopOptions{}); err != nil {
 			writeError(c, http.StatusInternalServerError, err)
 			return
 		}
 	}
-	if err := s.docker.ContainerStart(c.Request.Context(), target.ID, container.StartOptions{}); err != nil {
+	if err := s.runtime.StartWorkload(c.Request.Context(), target.ID, container.StartOptions{}); err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
@@ -183,40 +183,13 @@ func (s *Server) resetContainer(c *gin.Context) {
 		return
 	}
 
-	if projectName := strings.TrimSpace(target.Labels["com.docker.compose.project"]); projectName != "" {
-		serviceName := strings.TrimSpace(target.Labels["com.docker.compose.service"])
-		project, err := s.existingComposeProject(projectName)
+	if result, handled, err := s.runtime.ResetWorkload(c.Request.Context(), target); handled {
 		if err != nil {
-			writeError(c, http.StatusBadRequest, err)
-			return
-		}
-		composeReq := ComposeRequest{ProjectName: project.ProjectName}
-		if serviceName != "" {
-			composeReq.Services = []string{serviceName}
-		}
-		args := buildComposeArgs(project, composeReq, "up", "-d", "--force-recreate")
-		stdout, stderr, err := commandRunnerInDir(c.Request.Context(), project.ProjectDir, "docker", args...)
-		if err != nil {
-			writeErrorWithDetails(c, http.StatusInternalServerError, "compose reset failed", "command_failed", strings.TrimSpace(stderr))
+			writeErrorWithDetails(c, http.StatusInternalServerError, "compose reset failed", "command_failed", strings.TrimSpace(result.Stderr))
 			return
 		}
 
-		replacementID := target.ID
-		containers, listErr := s.listRuntimeContainers(c.Request.Context())
-		if listErr == nil {
-			for _, item := range containers {
-				if item.Labels["com.docker.compose.project"] != project.ProjectName {
-					continue
-				}
-				if serviceName != "" && item.Labels["com.docker.compose.service"] != serviceName {
-					continue
-				}
-				replacementID = item.ID
-				break
-			}
-		}
-
-		c.JSON(http.StatusOK, gin.H{"container_id": replacementID, "reset": true, "stdout": stdout, "stderr": stderr})
+		c.JSON(http.StatusOK, gin.H{"container_id": result.WorkloadID, "reset": true, "stdout": result.Stdout, "stderr": result.Stderr})
 		return
 	}
 
@@ -249,7 +222,7 @@ func (s *Server) resetContainer(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, err)
 		return
 	}
-	if err := s.docker.ContainerRemove(c.Request.Context(), target.ID, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil {
+	if err := s.runtime.RemoveWorkload(c.Request.Context(), target.ID, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
@@ -259,7 +232,7 @@ func (s *Server) resetContainer(c *gin.Context) {
 		return
 	}
 	if createReq.Start {
-		if err := s.docker.ContainerStart(c.Request.Context(), created.ID, container.StartOptions{}); err != nil {
+		if err := s.runtime.StartWorkload(c.Request.Context(), created.ID, container.StartOptions{}); err != nil {
 			writeError(c, http.StatusInternalServerError, fmt.Errorf("start container: %w", err))
 			return
 		}
@@ -274,7 +247,7 @@ func (s *Server) stopContainer(c *gin.Context) {
 		return
 	}
 
-	if err := s.docker.ContainerStop(c.Request.Context(), target.ID, container.StopOptions{}); err != nil {
+	if err := s.runtime.StopWorkload(c.Request.Context(), target.ID, container.StopOptions{}); err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
@@ -293,7 +266,7 @@ func (s *Server) removeContainer(c *gin.Context) {
 	}
 
 	force, _ := strconv.ParseBool(c.DefaultQuery("force", "true"))
-	if err := s.docker.ContainerRemove(c.Request.Context(), target.ID, container.RemoveOptions{Force: force, RemoveVolumes: true}); err != nil {
+	if err := s.runtime.RemoveWorkload(c.Request.Context(), target.ID, container.RemoveOptions{Force: force, RemoveVolumes: true}); err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
@@ -401,7 +374,7 @@ func (s *Server) createSandbox(c *gin.Context) {
 	volumeName := ""
 	if workspaceDir != "" {
 		volumeName = "open-sandbox-" + sandboxID[:12]
-		_, err = s.docker.VolumeCreate(c.Request.Context(), volume.CreateOptions{
+		_, err = s.runtime.CreateVolume(c.Request.Context(), volume.CreateOptions{
 			Name: volumeName,
 			Labels: map[string]string{
 				"open-sandbox.managed":    "true",
@@ -472,7 +445,7 @@ func (s *Server) createSandbox(c *gin.Context) {
 		return
 	}
 
-	if err := s.docker.ContainerStart(c.Request.Context(), created.ID, container.StartOptions{}); err != nil {
+	if err := s.runtime.StartWorkload(c.Request.Context(), created.ID, container.StartOptions{}); err != nil {
 		s.logLifecycleFailure("start_sandbox", err, slog.String("sandbox_id", sandboxID), slog.String("container_id", created.ID))
 		writeError(c, http.StatusInternalServerError, fmt.Errorf("start sandbox container: %w", err))
 		return
@@ -518,7 +491,7 @@ func (s *Server) createSandbox(c *gin.Context) {
 	}
 
 	if err := s.sandboxStore.CreateSandbox(c.Request.Context(), sandboxRecord); err != nil {
-		_ = s.docker.ContainerRemove(c.Request.Context(), created.ID, container.RemoveOptions{Force: true, RemoveVolumes: true})
+		_ = s.runtime.RemoveWorkload(c.Request.Context(), created.ID, container.RemoveOptions{Force: true, RemoveVolumes: true})
 		s.logLifecycleFailure("persist_sandbox", err, slog.String("sandbox_id", sandboxID), slog.String("container_id", created.ID))
 		writeError(c, http.StatusInternalServerError, fmt.Errorf("persist sandbox: %w", err))
 		return
@@ -591,20 +564,20 @@ func (s *Server) restartSandbox(c *gin.Context) {
 		return
 	}
 
-	inspect, err := s.docker.ContainerInspect(c.Request.Context(), sandbox.ContainerID)
+	inspect, err := s.runtime.InspectWorkload(c.Request.Context(), sandbox.ContainerID)
 	if err != nil {
 		s.logLifecycleFailure("restart_sandbox", err, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 	if inspect.State != nil && inspect.State.Running {
-		if err := s.docker.ContainerStop(c.Request.Context(), sandbox.ContainerID, container.StopOptions{}); err != nil {
+		if err := s.runtime.StopWorkload(c.Request.Context(), sandbox.ContainerID, container.StopOptions{}); err != nil {
 			s.logLifecycleFailure("restart_sandbox", err, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 			writeError(c, http.StatusInternalServerError, err)
 			return
 		}
 	}
-	if err := s.docker.ContainerStart(c.Request.Context(), sandbox.ContainerID, container.StartOptions{}); err != nil {
+	if err := s.runtime.StartWorkload(c.Request.Context(), sandbox.ContainerID, container.StartOptions{}); err != nil {
 		s.logLifecycleFailure("restart_sandbox", err, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 		writeError(c, http.StatusInternalServerError, err)
 		return
@@ -621,14 +594,14 @@ func (s *Server) resetSandbox(c *gin.Context) {
 		return
 	}
 
-	inspect, err := s.docker.ContainerInspect(c.Request.Context(), sandbox.ContainerID)
+	inspect, err := s.runtime.InspectWorkload(c.Request.Context(), sandbox.ContainerID)
 	if err != nil {
 		s.logLifecycleFailure("reset_sandbox", err, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 	if inspect.State == nil || !inspect.State.Running {
-		if err := s.docker.ContainerStart(c.Request.Context(), sandbox.ContainerID, container.StartOptions{}); err != nil {
+		if err := s.runtime.StartWorkload(c.Request.Context(), sandbox.ContainerID, container.StartOptions{}); err != nil {
 			s.logLifecycleFailure("reset_sandbox", err, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 			writeError(c, http.StatusInternalServerError, err)
 			return
@@ -697,7 +670,7 @@ func (s *Server) stopSandbox(c *gin.Context) {
 		return
 	}
 
-	if err := s.docker.ContainerStop(c.Request.Context(), sandbox.ContainerID, container.StopOptions{}); err != nil {
+	if err := s.runtime.StopWorkload(c.Request.Context(), sandbox.ContainerID, container.StopOptions{}); err != nil {
 		s.logLifecycleFailure("stop_sandbox", err, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 		writeError(c, http.StatusInternalServerError, err)
 		return
@@ -722,8 +695,8 @@ func (s *Server) deleteSandbox(c *gin.Context) {
 		return
 	}
 
-	_ = s.docker.ContainerStop(c.Request.Context(), sandbox.ContainerID, container.StopOptions{})
-	if err := s.docker.ContainerRemove(c.Request.Context(), sandbox.ContainerID, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil {
+	_ = s.runtime.StopWorkload(c.Request.Context(), sandbox.ContainerID, container.StopOptions{})
+	if err := s.runtime.RemoveWorkload(c.Request.Context(), sandbox.ContainerID, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil {
 		s.logLifecycleFailure("delete_sandbox", err, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 		writeError(c, http.StatusInternalServerError, err)
 		return
@@ -843,7 +816,7 @@ func (s *Server) writeSandboxFile(c *gin.Context) {
 }
 
 func (s *Server) streamLogsForContainer(c *gin.Context, containerID string, follow bool, tail string) {
-	reader, err := s.docker.ContainerLogs(c.Request.Context(), containerID, container.LogsOptions{
+	reader, err := s.runtime.Logs(c.Request.Context(), containerID, container.LogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 		Follow:     follow,
@@ -870,7 +843,7 @@ func (s *Server) streamLogsForContainer(c *gin.Context, containerID string, foll
 	stdoutWriter := &sseChunkWriter{ctx: c, stream: "stdout", mu: mu}
 	stderrWriter := &sseChunkWriter{ctx: c, stream: "stderr", mu: mu}
 
-	inspect, err := s.docker.ContainerInspect(c.Request.Context(), containerID)
+	inspect, err := s.runtime.InspectWorkload(c.Request.Context(), containerID)
 	if err != nil {
 		s.logStreamFailure("log_stream_inspect", err, slog.String("container_id", containerID))
 		writeError(c, http.StatusInternalServerError, err)
@@ -969,7 +942,7 @@ func (s *Server) loadAuthorizedContainer(c *gin.Context) (ContainerSummary, bool
 		writeError(c, http.StatusInternalServerError, err)
 		return ContainerSummary{}, false
 	}
-	if !runtimeContainerVisibleToIdentity(target, identity, ownedContainerIDs, ownedComposeProjects) {
+	if !s.runtimeContainerVisibleToIdentity(target, identity, ownedContainerIDs, ownedComposeProjects) {
 		writeError(c, http.StatusNotFound, errors.New("container not found"))
 		return ContainerSummary{}, false
 	}
@@ -1025,14 +998,14 @@ func (s *Server) ownedComposeProjects(userID string) (map[string]struct{}, error
 	return owned, nil
 }
 
-func runtimeContainerVisibleToIdentity(item ContainerSummary, identity AuthIdentity, ownedContainerIDs map[string]struct{}, ownedComposeProjects map[string]struct{}) bool {
+func (s *Server) runtimeContainerVisibleToIdentity(item ContainerSummary, identity AuthIdentity, ownedContainerIDs map[string]struct{}, ownedComposeProjects map[string]struct{}) bool {
 	if identity.IsAdmin() {
 		return true
 	}
 	if item.Labels[labelOpenSandboxOwnerID] == identity.UserID {
 		return true
 	}
-	if projectName := strings.TrimSpace(item.Labels["com.docker.compose.project"]); projectName != "" {
+	if projectName := s.runtime.ProjectName(item); projectName != "" {
 		_, ok := ownedComposeProjects[projectName]
 		if ok {
 			return true
@@ -1043,7 +1016,7 @@ func runtimeContainerVisibleToIdentity(item ContainerSummary, identity AuthIdent
 }
 
 func (s *Server) readContainerFileByID(ctx context.Context, containerID string, filePath string) (FileReadResponse, error) {
-	reader, stat, err := s.docker.CopyFromContainer(ctx, containerID, filePath)
+	reader, stat, err := s.runtime.CopyFrom(ctx, containerID, filePath)
 	if err != nil {
 		return FileReadResponse{}, fmt.Errorf("copy file from container: %w", err)
 	}
@@ -1094,7 +1067,7 @@ func (s *Server) writeContainerFileByID(ctx context.Context, containerID string,
 		return err
 	}
 
-	if err := s.docker.CopyToContainer(ctx, containerID, targetDir, archiveReader, container.CopyToContainerOptions{AllowOverwriteDirWithFile: true}); err != nil {
+	if err := s.runtime.CopyTo(ctx, containerID, targetDir, archiveReader, container.CopyToContainerOptions{AllowOverwriteDirWithFile: true}); err != nil {
 		return fmt.Errorf("copy file to container: %w", err)
 	}
 
@@ -1106,7 +1079,7 @@ func (s *Server) liveContainerState(ctx context.Context) (map[string]string, map
 	statusByContainer := map[string]string{}
 	portsByContainer := map[string][]PortSummary{}
 
-	containers, err := s.listRuntimeContainers(ctx)
+	containers, err := s.runtime.ListWorkloads(ctx)
 	if err != nil {
 		return stateByContainer, statusByContainer, portsByContainer
 	}
@@ -1121,7 +1094,7 @@ func (s *Server) liveContainerState(ctx context.Context) (map[string]string, map
 }
 
 func (s *Server) runtimeContainersByID(ctx context.Context) (map[string]ContainerSummary, error) {
-	containers, err := s.listRuntimeContainers(ctx)
+	containers, err := s.runtime.ListWorkloads(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1130,58 +1103,6 @@ func (s *Server) runtimeContainersByID(ctx context.Context) (map[string]Containe
 		byID[item.ID] = item
 	}
 	return byID, nil
-}
-
-func (s *Server) listRuntimeContainers(ctx context.Context) ([]ContainerSummary, error) {
-	stdout, stderr, err := commandRunner(ctx, "docker", "ps", "-a", "--no-trunc", "--format", "{{json .}}")
-	if err != nil {
-		return nil, fmt.Errorf("docker ps failed: %w: %s", err, strings.TrimSpace(stderr))
-	}
-
-	lines := strings.Split(strings.TrimSpace(stdout), "\n")
-	out := make([]ContainerSummary, 0, len(lines))
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		var record dockerContainerCLIRecord
-		if err := json.Unmarshal([]byte(line), &record); err != nil {
-			return nil, fmt.Errorf("decode docker ps line: %w", err)
-		}
-
-		names := make([]string, 0)
-		for _, name := range strings.Split(record.Names, ",") {
-			trimmed := strings.TrimSpace(name)
-			if trimmed != "" {
-				names = append(names, trimmed)
-			}
-		}
-		sort.Strings(names)
-
-		out = append(out, ContainerSummary{
-			ID:      strings.TrimSpace(record.ID),
-			Names:   names,
-			Image:   strings.TrimSpace(record.Image),
-			State:   dockerCLIStatusState(record.Status),
-			Status:  strings.TrimSpace(record.Status),
-			Created: 0,
-			Labels:  parseDockerLabels(record.Labels),
-			Ports:   parseDockerCLIPorts(record.Ports),
-		})
-	}
-
-	sort.Slice(out, func(i, j int) bool {
-		left := out[i].Names
-		right := out[j].Names
-		if len(left) == 0 || len(right) == 0 {
-			return out[i].ID < out[j].ID
-		}
-		return left[0] < right[0]
-	})
-
-	return out, nil
 }
 
 func (s *Server) resolveSandboxWorkdir(ctx context.Context, imageRef string, requestedWorkdir string) (string, error) {
@@ -1237,7 +1158,7 @@ func (s *Server) createContainerWithAutoPull(
 	hostConfig *container.HostConfig,
 	containerName string,
 ) (container.CreateResponse, error) {
-	created, err := s.docker.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, containerName)
+	created, err := s.runtime.CreateWorkload(ctx, containerConfig, hostConfig, nil, nil, containerName)
 	if err == nil {
 		return created, nil
 	}
@@ -1256,7 +1177,7 @@ func (s *Server) createContainerWithAutoPull(
 		return container.CreateResponse{}, fmt.Errorf("read pull output: %w", pullErr)
 	}
 
-	created, err = s.docker.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, containerName)
+	created, err = s.runtime.CreateWorkload(ctx, containerConfig, hostConfig, nil, nil, containerName)
 	if err != nil {
 		return container.CreateResponse{}, fmt.Errorf("create container after pull: %w", err)
 	}
