@@ -1,11 +1,8 @@
 <script lang="ts">
 	import SandboxCard from "./SandboxCard.svelte";
 	import Combobox from "./Combobox.svelte";
-	import CodeEditor from "./CodeEditor.svelte";
 	import PortsEditor from "./PortsEditor.svelte";
-	import type { ContainerSummary, ImageSearchResult, ImageSummary, PortSummary, Sandbox } from "$lib/api";
-
-	type CreateMethod = "existing" | "pull" | "build-context" | "build-inline" | "compose";
+	import type { ContainerSummary, ImageSummary, PortSummary, Sandbox } from "$lib/api";
 
 	let {
 		sandboxes,
@@ -25,34 +22,17 @@
 		onStopContainer,
 		onRemoveContainer,
 		onRefresh,
+		composeHref = "/compose",
 		showCreateForm,
 		createName = $bindable(),
-		createMethod = $bindable(),
 		createExistingImage = $bindable(),
-		createPullImage = $bindable(),
-		createPullTag = $bindable(),
-		createPullSearchQuery = $bindable(),
-		createPullSearchResults,
-		createPullSelectedImage = $bindable(),
-		createPullSearchLoading,
-		createPullSearchError,
-		createBuildContextPath = $bindable(),
-		createBuildTag = $bindable(),
-		createInlineTag = $bindable(),
-		createInlineContent = $bindable(),
-		createComposeContent = $bindable(),
-		createComposeProjectName = $bindable(),
 		createRepoUrl = $bindable(),
 		createBranch = $bindable(),
 		createWorkdir = $bindable(),
 		createPorts = $bindable(),
 		createLoading,
-		createStep,
-		createLogs,
-		createResolvedImage,
+		createImageHref = "/images",
 		onToggleCreate,
-		onSearchImages,
-		onSelectPullImage,
 		onCreateSubmit,
 		onApplyPreset
 	} = $props<{
@@ -73,34 +53,17 @@
 		onStopContainer: (id: string) => void;
 		onRemoveContainer: (id: string) => void;
 		onRefresh: () => void;
+		composeHref?: string;
 		showCreateForm: boolean;
 		createName: string;
-		createMethod: CreateMethod;
 		createExistingImage: string;
-		createPullImage: string;
-		createPullTag: string;
-		createPullSearchQuery: string;
-		createPullSearchResults: ImageSearchResult[];
-		createPullSelectedImage: string;
-		createPullSearchLoading: boolean;
-		createPullSearchError: string;
-		createBuildContextPath: string;
-		createBuildTag: string;
-		createInlineTag: string;
-		createInlineContent: string;
-		createComposeContent: string;
-		createComposeProjectName: string;
 		createRepoUrl: string;
 		createBranch: string;
 		createWorkdir: string;
 		createPorts: string;
 		createLoading: boolean;
-		createStep: string;
-		createLogs: string;
-		createResolvedImage: string;
+		createImageHref?: string;
 		onToggleCreate: () => void;
-		onSearchImages: (query: string) => void;
-		onSelectPullImage: (imageName: string) => void;
 		onCreateSubmit: () => void;
 		onApplyPreset: (name: string, image: string) => void;
 	}>();
@@ -112,58 +75,12 @@
 		{ label: "Go",     name: "go-workspace",      image: "golang:1.24"  }
 	] as const;
 
-	const createMethods: Array<{ id: CreateMethod; label: string; description: string; icon: string }> = [
-		{
-			id: "existing",
-			label: "Existing image",
-			description: "Use a local tag already on the server",
-			icon: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>`
-		},
-		{
-			id: "pull",
-			label: "Pull image",
-			description: "Pull from Docker Hub or any registry",
-			icon: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`
-		},
-		{
-			id: "build-context",
-			label: "Build from context",
-			description: "Build from a server path with a Dockerfile",
-			icon: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`
-		},
-		{
-			id: "build-inline",
-			label: "Inline Dockerfile",
-			description: "Write a Dockerfile directly in the editor",
-			icon: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`
-		},
-		{
-			id: "compose",
-			label: "Docker Compose",
-			description: "Run services from a docker-compose.yml",
-			icon: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/><path d="M7 8h2M7 12h2M11 8h6M11 12h6"/></svg>`
-		}
-	];
-
 	// Build combobox options from local images
 	const localImageOptions = $derived(
 		Array.from(
 			new Set(images.flatMap((img: ImageSummary) => img.repo_tags.filter((t: string) => t !== "<none>:<none>"))) as Set<string>
 		).map((tag: string) => ({ value: tag, label: tag }))
 	);
-
-	// Build combobox options from pull search results
-	const pullSearchOptions = $derived(
-		createPullSearchResults.map((r: ImageSearchResult) => ({
-			value: r.name,
-			label: r.name,
-			description: `${r.stars} stars${r.official ? " · official" : ""}${r.automated ? " · automated" : ""}`,
-			badge: r.official ? "official" : undefined
-		}))
-	);
-
-	// ANSI stripping for pipeline log display (display only, not storage)
-	const stripAnsi = (str: string): string => str.replace(/\x1b\[[0-9;]*[mGKHF]/g, "");
 	let workloadSearch = $state("");
 	const sandboxContainerIDs = $derived(new Set(sandboxes.map((sandbox: Sandbox) => sandbox.container_id)));
 	const runtimeContainers = $derived(containers.filter((container: ContainerSummary) => !sandboxContainerIDs.has(container.id)));
@@ -265,6 +182,7 @@
 				{/if}
 				Refresh
 			</button>
+			<a class="btn-ghost btn-sm" href={composeHref}>Compose</a>
 			<button class="btn-primary btn-sm" type="button" onclick={onToggleCreate}>
 				{showCreateForm ? "Cancel" : "+ New sandbox"}
 			</button>
@@ -285,7 +203,7 @@
 			</div>
 			<p class="empty-title">{loading ? "Loading..." : "No workloads yet"}</p>
 			{#if !loading}
-				<p class="empty-sub">Create a sandbox or run a compose project to get started.</p>
+				<p class="empty-sub">Create a sandbox to get started.</p>
 				<button class="btn-ghost btn-sm" type="button" onclick={onToggleCreate}>+ New sandbox</button>
 			{/if}
 		</div>
@@ -295,7 +213,7 @@
 				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
 			</div>
 			<p class="empty-title">No workloads match</p>
-			<p class="empty-sub">Try a different name, image, compose project, or container id.</p>
+			<p class="empty-sub">Try a different name, image, or container id.</p>
 		</div>
 	{:else}
 		<div class="sandbox-grid">
@@ -354,140 +272,31 @@
 
 	<div class="drawer-body">
 		<fieldset class="create-fieldset" disabled={createLoading}>
-
-			{#if createMethod !== "compose"}
-				<!-- Name -->
-				<div class="form-section">
-					<label class="field-col">
-						<span class="section-label">Sandbox name</span>
-						<input class="field" bind:value={createName} placeholder="my-workspace" required />
-					</label>
-				</div>
-			{/if}
-
-			<!-- Method -->
 			<div class="form-section">
-				<span class="section-label">Image source</span>
-				<div class="method-grid">
-					{#each createMethods as method}
-						<button
-							class="method-card"
-							class:is-active={createMethod === method.id}
-							type="button"
-							onclick={() => createMethod = method.id}
-						>
-							<span class="method-icon">{@html method.icon}</span>
-							<div class="method-text">
-								<span class="method-label">{method.label}</span>
-								<span class="method-desc">{method.description}</span>
-							</div>
-						</button>
-					{/each}
-				</div>
+				<label class="field-col">
+					<span class="section-label">Sandbox name</span>
+					<input class="field" bind:value={createName} placeholder="my-workspace" required />
+				</label>
 			</div>
 
-			<!-- Method-specific fields -->
-			{#if createMethod === "existing"}
-				<div class="form-section">
-					<label class="field-col">
-						<span class="section-label">Local image</span>
-						<Combobox
-							bind:value={createExistingImage}
-							options={localImageOptions}
-							placeholder="Search local images..."
-							emptyText={localImageOptions.length === 0 ? "No local images available. Pull or build one first." : "No matches"}
-						/>
-						{#if localImageOptions.length === 0}
-							<span class="field-help">No local images yet. Use Pull or Build first.</span>
-						{/if}
-					</label>
-				</div>
-			{/if}
-
-			{#if createMethod === "pull"}
-				<div class="form-section">
-					<label class="field-col">
-						<span class="section-label">Search Docker Hub</span>
-						<Combobox
-							bind:value={createPullImage}
-							options={pullSearchOptions}
-							placeholder="Search images (e.g. ubuntu, node, python)..."
-							loading={createPullSearchLoading}
-							emptyText="Type to search Docker Hub"
-							onSearch={(q) => { createPullSearchQuery = q; onSearchImages(q); }}
-							onSelect={(opt) => { onSelectPullImage(opt.value); }}
-						/>
-						<span class="field-help">Search remote images or type your own image name directly.</span>
-					</label>
-					{#if createPullSearchError}
-						<p class="alert-error">{createPullSearchError}</p>
+			<div class="form-section">
+				<span class="section-label">Image</span>
+				<label class="field-col">
+					<Combobox
+						bind:value={createExistingImage}
+						options={localImageOptions}
+						placeholder="Search local images..."
+						emptyText={localImageOptions.length === 0 ? "No local images available." : "No matches"}
+					/>
+					{#if localImageOptions.length === 0}
+						<div class="create-image-empty">
+							<span class="field-help">No local images found. Create or pull one from the Images route.</span>
+							<a class="btn-ghost btn-xs" href={createImageHref}>Open Images</a>
+						</div>
 					{/if}
-					<label class="field-col">
-						<span class="section-label">Tag <span class="opt">(optional)</span></span>
-						<input class="field" bind:value={createPullTag} placeholder="latest" />
-					</label>
-				</div>
-			{/if}
+				</label>
+			</div>
 
-			{#if createMethod === "build-context"}
-				<div class="form-section">
-					<div class="form-row-2">
-						<label class="field-col">
-							<span class="section-label">Context path</span>
-							<input class="field" bind:value={createBuildContextPath} placeholder="apps/server" required />
-							<span class="field-help">Resolved on the server inside its workspace root. Must contain a <code class="inline-code">Dockerfile</code>.</span>
-						</label>
-						<label class="field-col">
-							<span class="section-label">Output tag</span>
-							<input class="field" bind:value={createBuildTag} placeholder="sandbox-app:latest" required />
-						</label>
-					</div>
-				</div>
-			{/if}
-
-			{#if createMethod === "build-inline"}
-				<div class="form-section">
-					<label class="field-col">
-						<span class="section-label">Output tag</span>
-						<input class="field" bind:value={createInlineTag} placeholder="sandbox-inline:latest" required />
-					</label>
-					<div class="field-col">
-						<span class="section-label">Dockerfile</span>
-						<CodeEditor
-							bind:value={createInlineContent}
-							language="dockerfile"
-							placeholder="FROM ubuntu:24.04&#10;WORKDIR /workspace"
-							minHeight="14rem"
-						/>
-					</div>
-				</div>
-			{/if}
-
-			{#if createMethod === "compose"}
-				<div class="form-section">
-					<div class="compose-note">
-						<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-						<span>Docker Compose runs services directly and stores the submitted project under <code class="inline-code">.open-sandbox/compose</code> inside the server workspace root.</span>
-					</div>
-					<label class="field-col">
-						<span class="section-label">Project name</span>
-						<input class="field" bind:value={createComposeProjectName} placeholder="my-project" required />
-						<span class="field-help">Used for the Docker Compose project name and the managed directory under <code class="inline-code">.open-sandbox/compose</code>.</span>
-					</label>
-					<div class="field-col">
-						<span class="section-label">docker-compose.yml</span>
-						<CodeEditor
-							bind:value={createComposeContent}
-							language="yaml"
-							placeholder="version: '3.8'&#10;services:&#10;  app:&#10;    image: ubuntu:24.04&#10;    command: sleep infinity"
-							minHeight="16rem"
-						/>
-					</div>
-				</div>
-			{/if}
-
-			<!-- Repo + Ports (not shown for compose — it manages its own services) -->
-			{#if createMethod !== "compose"}
 			<div class="form-section">
 				<span class="section-label form-section-title">Runtime options <span class="opt">(optional)</span></span>
 				<div class="form-row-2">
@@ -510,23 +319,8 @@
 					<PortsEditor bind:value={createPorts} />
 				</div>
 			</div>
-			{/if}
 
 		</fieldset>
-
-		<!-- Creation output -->
-		{#if createStep !== "Idle" || createResolvedImage || createLogs}
-			<div class="pipeline-panel">
-				<div class="pipeline-header">
-					<span class="pipeline-title">Creation output</span>
-					<span class="pipeline-step">{createStep}</span>
-				</div>
-				{#if createResolvedImage}
-					<p class="pipeline-image">Image: <code>{createResolvedImage}</code></p>
-				{/if}
-				<pre class="pipeline-log">{stripAnsi(createLogs) || "Waiting for pipeline..."}</pre>
-			</div>
-		{/if}
 	</div>
 
 	<div class="drawer-footer">
@@ -536,9 +330,7 @@
 		<button class="btn-primary" type="button" onclick={onCreateSubmit} disabled={createLoading}>
 			{#if createLoading}
 				<svg class="spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.22-8.56"/></svg>
-				{createStep}...
-			{:else if createMethod === "compose"}
-				Run compose
+				Creating...
 			{:else}
 				Create sandbox
 			{/if}
@@ -833,6 +625,18 @@
 		line-height: 1.45;
 	}
 
+	.create-image-empty {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.6rem;
+		flex-wrap: wrap;
+		padding: 0.45rem 0.5rem;
+		border: 1px solid var(--border-dim);
+		border-radius: var(--radius-sm);
+		background: var(--bg-raised);
+	}
+
 	.inline-code {
 		font-family: var(--font-mono);
 		font-size: 0.62rem;
@@ -843,141 +647,6 @@
 		color: var(--text-secondary);
 	}
 
-	.compose-note {
-		display: flex;
-		align-items: flex-start;
-		gap: 0.5rem;
-		padding: 0.625rem 0.75rem;
-		background: var(--status-warn-bg);
-		border: 1px solid var(--status-warn-border);
-		border-radius: var(--radius-md);
-		font-family: var(--font-mono);
-		font-size: 0.65rem;
-		color: var(--status-warn);
-		line-height: 1.5;
-	}
-
-	.compose-note svg {
-		flex-shrink: 0;
-		margin-top: 0.1rem;
-		color: var(--status-warn);
-	}
-
-	/* Method grid */
-	.method-grid {
-		display: grid;
-		grid-template-columns: 1fr 1fr;
-		gap: 0.45rem;
-	}
-
-	.method-card {
-		display: flex;
-		align-items: flex-start;
-		gap: 0.6rem;
-		padding: 0.7rem 0.75rem;
-		border-radius: var(--radius-md);
-		border: 1px solid var(--border-dim);
-		background: var(--bg-raised);
-		color: var(--text-secondary);
-		text-align: left;
-		cursor: pointer;
-		transition: border-color 0.12s, color 0.12s, background 0.12s;
-	}
-
-	.method-card:hover {
-		border-color: var(--border-mid);
-		color: var(--text-primary);
-	}
-
-	.method-card.is-active {
-		border-color: var(--border-hi);
-		background: var(--bg-overlay);
-		color: var(--text-primary);
-	}
-
-	.method-icon {
-		display: grid;
-		place-items: center;
-		flex-shrink: 0;
-		margin-top: 0.05rem;
-		color: inherit;
-	}
-
-	.method-text {
-		display: flex;
-		flex-direction: column;
-		gap: 0.15rem;
-	}
-
-	.method-label {
-		font-family: var(--font-mono);
-		font-size: 0.68rem;
-		color: inherit;
-		font-weight: 500;
-	}
-
-	.method-desc {
-		font-size: 0.65rem;
-		line-height: 1.4;
-		color: var(--text-muted);
-	}
-
-	/* Pipeline panel */
-	.pipeline-panel {
-		display: flex;
-		flex-direction: column;
-		gap: 0.5rem;
-		padding: 0.85rem;
-		border: 1px solid var(--border-dim);
-		border-radius: var(--radius-md);
-		background: var(--bg-raised);
-		margin-top: 1rem;
-	}
-
-	.pipeline-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 0.75rem;
-	}
-
-	.pipeline-title {
-		font-family: var(--font-mono);
-		font-size: 0.68rem;
-		color: var(--text-secondary);
-	}
-
-	.pipeline-step {
-		font-family: var(--font-mono);
-		font-size: 0.62rem;
-		color: var(--text-primary);
-		padding: 0.15rem 0.45rem;
-		border-radius: 999px;
-		border: 1px solid var(--border-dim);
-		background: var(--bg-surface);
-	}
-
-	.pipeline-image {
-		margin: 0;
-		font-family: var(--font-mono);
-		font-size: 0.65rem;
-		color: var(--text-muted);
-	}
-
-	.pipeline-log {
-		margin: 0;
-		max-height: 12rem;
-		overflow: auto;
-		padding: 0.75rem;
-		border-radius: var(--radius-sm);
-		background: var(--bg-surface);
-		border: 1px solid var(--border-dim);
-		font-family: var(--font-mono);
-		font-size: 0.68rem;
-		line-height: 1.5;
-		white-space: pre-wrap;
-		word-break: break-word;
-	}
 
 	/* Drawer footer */
 	.drawer-footer {
@@ -1004,7 +673,6 @@
 		.search-field { min-width: 100%; }
 		.sandbox-grid { grid-template-columns: 1fr; }
 		.drawer { width: 100vw; }
-		.method-grid { grid-template-columns: 1fr; }
 		.form-row-2 { grid-template-columns: 1fr; }
 	}
 </style>

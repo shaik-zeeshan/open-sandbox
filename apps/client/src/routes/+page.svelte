@@ -1,13 +1,10 @@
 <script lang="ts">
 	import { onMount } from "svelte";
-	import { browser } from "$app/environment";
 	import PageShell from "$lib/components/PageShell.svelte";
 	import SandboxesPanel from "$lib/components/SandboxesPanel.svelte";
 	import SandboxWorkspace from "$lib/components/SandboxWorkspace.svelte";
 	import {
 		bootstrap,
-		buildImageStream,
-		composeUpStream,
 		createSandbox,
 		deleteSandbox,
 		formatApiFailure,
@@ -21,24 +18,20 @@
 		logout,
 		refreshSession,
 		removeContainer,
-		pullImage,
 		resetContainer,
 		resetSandbox,
 		restartContainer,
 		restartSandbox,
 		runApiEffect,
-		searchImages,
 		stopContainer,
 		stopSandbox,
 		type ContainerSummary,
-		type ImageSearchResult,
 		type ImageSummary,
 		type Sandbox
 	} from "$lib/api";
-	import { beginAuthCheck, clearAuth, clientState, setAuthSession, setBaseUrl } from "$lib/stores.svelte";
+	import { beginAuthCheck, clearAuth, clientState, setAuthSession } from "$lib/stores.svelte";
 
 	type HealthState = "unknown" | "checking" | "ok" | "error";
-	type CreateMethod = "existing" | "pull" | "build-context" | "build-inline" | "compose";
 
 	// ── Sidebar collapse ───────────────────────────────────────────────────────
 	// (managed in PageShell, but we need nothing here for +page.svelte)
@@ -110,29 +103,12 @@
 	// ── Create form ────────────────────────────────────────────────────────────
 	let showCreateForm = $state(false);
 	let createName = $state("");
-	let createMethod = $state<CreateMethod>("existing");
 	let createExistingImage = $state("");
-	let createPullImage = $state("");
-	let createPullTag = $state("");
-	let createPullSearchQuery = $state("");
-	let createPullSearchResults = $state<ImageSearchResult[]>([]);
-	let createPullSelectedImage = $state("");
-	let createPullSearchLoading = $state(false);
-	let createPullSearchError = $state("");
-	let createBuildContextPath = $state("");
-	let createBuildTag = $state("");
-	let createInlineTag = $state("");
-	let createInlineContent = $state("");
-	let createComposeContent = $state("");
-	let createComposeProjectName = $state("");
 	let createRepoUrl = $state("");
 	let createBranch = $state("");
 	let createWorkdir = $state("");
 	let createPorts = $state("");
 	let createLoading = $state(false);
-	let createStep = $state("Idle");
-	let createLogs = $state("");
-	let createResolvedImage = $state("");
 
 	// ── Health ─────────────────────────────────────────────────────────────────
 	async function checkHealth(): Promise<void> {
@@ -281,64 +257,10 @@
 		images = [];
 	}
 
-	function resetCreatePipelineState(): void {
-		createStep = "Idle";
-		createLogs = "";
-		createResolvedImage = "";
-	}
-
-	function appendCreateLog(output: string): void {
-		const normalized = output.replace(/\r\n/g, "\n").trim();
-		if (normalized.length === 0) {
-			return;
-		}
-
-		createLogs = createLogs.length > 0 ? `${createLogs}\n${normalized}` : normalized;
-	}
-
 	function toggleCreateForm(): void {
 		showCreateForm = !showCreateForm;
 		if (!showCreateForm) {
-			resetCreatePipelineState();
 			dataError = "";
-		}
-	}
-
-	async function runImageSearch(queryOverride?: string): Promise<void> {
-		const query = (queryOverride ?? createPullSearchQuery).trim();
-		createPullSearchError = "";
-		if (query.length === 0) {
-			createPullSearchResults = [];
-			createPullSelectedImage = "";
-			createPullSearchError = "Search query is required.";
-			return;
-		}
-
-		createPullSearchLoading = true;
-		try {
-			const results = await runApiEffect(searchImages(clientState.config, query, 25));
-			createPullSearchResults = results;
-			const exactMatch = results.find((result) => result.name === createPullImage.trim()) ?? results[0] ?? null;
-			createPullSelectedImage = exactMatch?.name ?? "";
-			if (exactMatch !== null) {
-				createPullImage = exactMatch.name;
-			}
-			if (results.length === 0) {
-				createPullSearchError = `No Docker Hub results for ${query}.`;
-			}
-		} catch (err) {
-			createPullSearchResults = [];
-			createPullSelectedImage = "";
-			createPullSearchError = formatApiFailure(err);
-		} finally {
-			createPullSearchLoading = false;
-		}
-	}
-
-	function selectPullSearchImage(imageName: string): void {
-		createPullSelectedImage = imageName;
-		if (imageName.trim().length > 0) {
-			createPullImage = imageName;
 		}
 	}
 
@@ -376,151 +298,19 @@
 		createLoading = true;
 		dataError = "";
 		dataNotice = "";
-		resetCreatePipelineState();
-		createStep = "Preparing";
 		try {
 			const parseLines = (v: string) => v.split("\n").map((l) => l.trim()).filter(Boolean);
 			const sandboxName = createName.trim();
 			const workdir = createWorkdir.trim();
-			if (createMethod !== "compose" && sandboxName.length === 0) {
+			if (sandboxName.length === 0) {
 				throw new Error("Sandbox name is required.");
 			}
 
-			let resolvedImage = "";
-			switch (createMethod) {
-				case "existing": {
-					resolvedImage = createExistingImage.trim();
-					if (resolvedImage.length === 0) {
-						throw new Error("Choose an existing image.");
-					}
-					appendCreateLog(`Using local image ${resolvedImage}`);
-					break;
-				}
-				case "pull": {
-					const imageName = createPullImage.trim();
-					const imageTag = createPullTag.trim();
-					if (imageName.length === 0) {
-						throw new Error("Image name is required for pull.");
-					}
-
-					resolvedImage = imageTag.length > 0 ? `${imageName}:${imageTag}` : imageName;
-					createStep = "Pulling image";
-					appendCreateLog(`Pulling ${resolvedImage}`);
-					const pulled = await runApiEffect(pullImage(clientState.config, {
-						image: imageName,
-						tag: imageTag || undefined
-					}));
-					appendCreateLog(pulled.output);
-					appendCreateLog(`Image ready: ${pulled.image}`);
-					break;
-				}
-			case "build-context": {
-				const contextPath = createBuildContextPath.trim();
-				const tag = createBuildTag.trim();
-				if (contextPath.length === 0) {
-					throw new Error("Context path is required for image build.");
-				}
-				if (tag.length === 0) {
-					throw new Error("Image tag is required for image build.");
-				}
-
-				resolvedImage = tag;
-				createStep = "Building image";
-				appendCreateLog(`Building ${tag} from ${contextPath}`);
-				let buildError = "";
-				await buildImageStream(clientState.config, {
-					context_path: contextPath,
-					dockerfile: "Dockerfile",
-					tag
-				}, (event) => {
-					if ((event.event === "stdout" || event.event === "stderr") && event.data.length > 0) {
-						appendCreateLog(event.data);
-					}
-					if (event.event === "error") {
-						buildError = event.data.trim();
-					}
-					if (event.event === "done" && event.data.trim().length > 0) {
-						appendCreateLog(`Image ready: ${event.data.trim()}`);
-					}
-				});
-				if (buildError.length > 0) {
-					throw new Error(buildError);
-				}
-				break;
+			const resolvedImage = createExistingImage.trim();
+			if (resolvedImage.length === 0) {
+				throw new Error("Choose an existing image. Create one from the Images route first.");
 			}
-			case "build-inline": {
-				const dockerfileContent = createInlineContent.trim();
-				const tag = createInlineTag.trim();
-				if (dockerfileContent.length === 0) {
-					throw new Error("Dockerfile content is required.");
-				}
-				if (tag.length === 0) {
-					throw new Error("Image tag is required for inline build.");
-				}
 
-				resolvedImage = tag;
-				createStep = "Building image";
-				appendCreateLog(`Building ${tag} from inline Dockerfile`);
-				let buildError = "";
-				await buildImageStream(clientState.config, {
-					dockerfile: "Dockerfile",
-					dockerfile_content: dockerfileContent,
-					tag
-				}, (event) => {
-					if ((event.event === "stdout" || event.event === "stderr") && event.data.length > 0) {
-						appendCreateLog(event.data);
-					}
-					if (event.event === "error") {
-						buildError = event.data.trim();
-					}
-					if (event.event === "done" && event.data.trim().length > 0) {
-						appendCreateLog(`Image ready: ${event.data.trim()}`);
-					}
-				});
-				if (buildError.length > 0) {
-					throw new Error(buildError);
-				}
-				break;
-			}
-			case "compose": {
-				const content = createComposeContent.trim();
-				const projectName = createComposeProjectName.trim();
-				if (content.length === 0) {
-					throw new Error("docker-compose.yml content is required.");
-				}
-				if (projectName.length === 0) {
-					throw new Error("Compose project name is required.");
-				}
-
-				createStep = "Running compose";
-				appendCreateLog(`Starting docker compose (project: ${projectName})...`);
-				let composeError = "";
-				await composeUpStream(clientState.config, {
-					content,
-					project_name: projectName
-				}, (event) => {
-					if ((event.event === "stdout" || event.event === "stderr") && event.data.length > 0) {
-						appendCreateLog(event.data);
-					}
-					if (event.event === "error") {
-						composeError = event.data.trim();
-					}
-				});
-				if (composeError.length > 0) {
-					throw new Error(composeError);
-				}
-				createStep = "Done";
-				appendCreateLog("Compose up complete.");
-				showCreateForm = false;
-				await refreshData();
-				// Don't navigate into a sandbox — compose doesn't create one
-				return;
-			}
-		}
-
-		createResolvedImage = resolvedImage;
-		createStep = "Creating sandbox";
-			appendCreateLog(`Creating sandbox ${sandboxName} from ${resolvedImage}`);
 			const created = await runApiEffect(createSandbox(clientState.config, {
 				name: sandboxName,
 				image: resolvedImage,
@@ -530,15 +320,12 @@
 				workdir: workdir || undefined,
 				ports: parseLines(createPorts)
 			}));
-			createStep = "Done";
-			appendCreateLog(`Sandbox ready: ${created.id}`);
 			showCreateForm = false;
 			createRepoUrl = "";
 			createBranch = "";
 			createWorkdir = "";
 			createPorts = "";
 			await refreshData();
-			// Navigate directly into the new sandbox
 			activeWorkload = { kind: "sandbox", id: created.id };
 		} catch (err) {
 			dataError = formatApiFailure(err);
@@ -549,23 +336,8 @@
 
 	function applyPreset(name: string, image: string): void {
 		createName = name;
-		createMethod = "existing";
 		createExistingImage = image;
-		resetCreatePipelineState();
 	}
-
-	$effect(() => {
-		createMethod;
-		if (!createLoading) {
-			resetCreatePipelineState();
-		}
-	});
-
-	$effect(() => {
-		if (createPullSelectedImage.trim().length > 0 && createPullImage.trim() !== createPullSelectedImage.trim()) {
-			createPullSelectedImage = "";
-		}
-	});
 
 	// Sandbox list actions
 	async function handleRestart(id: string): Promise<void> {
@@ -750,34 +522,17 @@
 				onStopContainer={(id) => void handleStopContainer(id)}
 				onRemoveContainer={(id) => void handleRemoveContainer(id)}
 				onRefresh={() => void refreshData()}
+				composeHref="/compose"
 				{showCreateForm}
 				bind:createName
-				bind:createMethod
 				bind:createExistingImage
-				bind:createPullImage
-				bind:createPullTag
-				bind:createPullSearchQuery
-				{createPullSearchResults}
-				bind:createPullSelectedImage
-				{createPullSearchLoading}
-				{createPullSearchError}
-				bind:createBuildContextPath
-				bind:createBuildTag
-				bind:createInlineTag
-				bind:createInlineContent
-				bind:createComposeContent
-				bind:createComposeProjectName
 				bind:createRepoUrl
 				bind:createBranch
 				bind:createWorkdir
 				bind:createPorts
 				{createLoading}
-				{createStep}
-				{createLogs}
-				{createResolvedImage}
+				createImageHref="/images"
 				onToggleCreate={toggleCreateForm}
-				onSearchImages={(q) => void runImageSearch(q)}
-				onSelectPullImage={selectPullSearchImage}
 				onCreateSubmit={() => void submitCreate()}
 				onApplyPreset={(name, image) => applyPreset(name, image)}
 			/>
