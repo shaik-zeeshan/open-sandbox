@@ -217,6 +217,7 @@ type CreateContainerRequest struct {
 }
 
 type CreateContainerResponse struct {
+	ID          string   `json:"id"`
 	ContainerID string   `json:"container_id"`
 	Warnings    []string `json:"warnings"`
 	Started     bool     `json:"started"`
@@ -878,7 +879,7 @@ func (s *Server) createContainer(c *gin.Context) {
 	}
 	s.logLifecycleSuccess("create_container", slog.String("container_id", created.ID), slog.String("managed_id", managedID), slog.Bool("started", started))
 
-	c.JSON(http.StatusOK, CreateContainerResponse{ContainerID: created.ID, Warnings: created.Warnings, Started: started})
+	c.JSON(http.StatusOK, CreateContainerResponse{ID: managedID, ContainerID: created.ID, Warnings: created.Warnings, Started: started})
 }
 
 func isMissingImageError(err error) bool {
@@ -914,7 +915,7 @@ func (s *Server) execInContainer(c *gin.Context) {
 		return
 	}
 
-	resp, err := s.runContainerExec(c.Request.Context(), target.ID, req)
+	resp, err := s.runContainerExec(c.Request.Context(), target.ContainerID, req)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
@@ -942,7 +943,7 @@ func (s *Server) streamLogs(c *gin.Context) {
 
 	follow, _ := strconv.ParseBool(c.DefaultQuery("follow", "true"))
 	tail := c.DefaultQuery("tail", "100")
-	s.streamLogsForContainer(c, target.ID, follow, tail)
+	s.streamLogsForContainer(c, target.ContainerID, follow, tail)
 }
 
 func (s *Server) streamContainerTerminal(c *gin.Context) {
@@ -952,7 +953,7 @@ func (s *Server) streamContainerTerminal(c *gin.Context) {
 	}
 
 	workdir := strings.TrimSpace(c.Query("workdir"))
-	s.streamTerminalForContainer(c, target.ID, workdir)
+	s.streamTerminalForContainer(c, target.ContainerID, workdir)
 }
 
 func (s *Server) streamTerminalForContainer(c *gin.Context, containerID string, workdir string) {

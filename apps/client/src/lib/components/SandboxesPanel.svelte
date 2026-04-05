@@ -82,7 +82,7 @@
 		).map((tag: string) => ({ value: tag, label: tag }))
 	);
 	let workloadSearch = $state("");
-	const sandboxContainerIDs = $derived(new Set(sandboxes.map((sandbox: Sandbox) => sandbox.container_id)));
+	const sandboxContainerIDs = $derived(new Set(sandboxes.map((sandbox: Sandbox) => sandbox.id)));
 	const runtimeContainers = $derived(containers.filter((container: ContainerSummary) => !sandboxContainerIDs.has(container.id)));
 
 	type WorkloadCardItem = {
@@ -110,17 +110,17 @@
 			image: sandbox.image,
 			status: sandbox.status,
 			containerId: sandbox.container_id,
-			ports: containers.find((c: ContainerSummary) => c.id === sandbox.container_id)?.ports ?? sandbox.ports ?? [],
+			ports: containers.find((c: ContainerSummary) => c.id === sandbox.id)?.ports ?? sandbox.ports ?? [],
 			createdAt: sandbox.created_at,
 			metaLabel: sandbox.owner_username ? "Owner" : "",
 			metaValue: sandbox.owner_username ?? "",
 			canReset: true,
-			searchText: [sandbox.name, sandbox.image, sandbox.owner_username ?? "", sandbox.container_id].join(" ").toLowerCase()
+			searchText: [sandbox.name, sandbox.image, sandbox.owner_username ?? "", sandbox.id, sandbox.container_id].join(" ").toLowerCase()
 		}));
 
 		const containerItems = runtimeContainers.map((container: ContainerSummary) => {
-			const composeProject = container.labels["com.docker.compose.project"] ?? "";
-			const composeService = container.labels["com.docker.compose.service"] ?? "";
+			const composeProject = container.project_name ?? "";
+			const composeService = container.service_name ?? "";
 			const primaryName = container.names[0] ?? container.id.slice(0, 12);
 			const metaValue = composeProject ? `${composeProject}${composeService ? ` / ${composeService}` : ""}` : "Runtime container";
 			return {
@@ -130,13 +130,13 @@
 				name: primaryName,
 				image: container.image,
 				status: container.status,
-				containerId: container.id,
+				containerId: container.container_id,
 				ports: container.ports ?? [],
 				createdAt: container.created ?? null,
 				metaLabel: composeProject ? "Compose" : "Type",
 				metaValue,
-				canReset: composeProject.length > 0 || ((container.labels["open-sandbox.kind"] ?? "") === "direct" && (container.labels["open-sandbox.managed_id"] ?? "").length > 0),
-				searchText: [primaryName, container.image, metaValue, container.id, ...(container.names ?? [])].join(" ").toLowerCase()
+				canReset: container.resettable,
+				searchText: [primaryName, container.image, metaValue, container.id, container.container_id, ...(container.names ?? [])].join(" ").toLowerCase()
 			};
 		});
 
@@ -213,7 +213,7 @@
 				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
 			</div>
 			<p class="empty-title">No workloads match</p>
-			<p class="empty-sub">Try a different name, image, or container id.</p>
+			<p class="empty-sub">Try a different name, image, or workload id.</p>
 		</div>
 	{:else}
 		<div class="sandbox-grid">

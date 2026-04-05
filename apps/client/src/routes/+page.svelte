@@ -82,7 +82,7 @@
 		return activeRuntimeContainer ?? activeRuntimeContainerSnapshot;
 	});
 	const activeContainer = $derived(
-		activeVisibleRuntimeContainer ?? (activeSandbox ? (containers.find(c => c.id === activeSandbox.container_id) ?? null) : null)
+		activeVisibleRuntimeContainer ?? (activeSandbox ? (containers.find(c => c.id === activeSandbox.id) ?? null) : null)
 	);
 
 	$effect(() => {
@@ -356,8 +356,8 @@
 			const result = await runApiEffect(resetContainer(clientState.config, id));
 			const currentActive = activeWorkload;
 			if (currentActive?.kind === "container" && currentActive.id === id) {
-				activeWorkload = { kind: "container", id: result.container_id };
-				pendingContainerActivationId = result.container_id;
+				activeWorkload = { kind: "container", id: result.id };
+				pendingContainerActivationId = result.id;
 			}
 			dataNotice = "Container reset.";
 			await refreshData();

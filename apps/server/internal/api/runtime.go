@@ -40,9 +40,10 @@ type workloadRuntime interface {
 }
 
 type workloadResetResult struct {
-	WorkloadID string
-	Stdout     string
-	Stderr     string
+	WorkloadID  string
+	ContainerID string
+	Stdout      string
+	Stderr      string
 }
 
 type dockerRuntime struct {
@@ -82,15 +83,22 @@ func (r *dockerRuntime) ListWorkloads(ctx context.Context) ([]ContainerSummary, 
 		}
 		sort.Strings(names)
 
+		labels := parseDockerLabels(record.Labels)
+		containerID := strings.TrimSpace(record.ID)
 		out = append(out, ContainerSummary{
-			ID:      strings.TrimSpace(record.ID),
-			Names:   names,
-			Image:   strings.TrimSpace(record.Image),
-			State:   dockerCLIStatusState(record.Status),
-			Status:  strings.TrimSpace(record.Status),
-			Created: 0,
-			Labels:  parseDockerLabels(record.Labels),
-			Ports:   parseDockerCLIPorts(record.Ports),
+			ID:           containerWorkloadID(containerID, labels, names),
+			ContainerID:  containerID,
+			Names:        names,
+			Image:        strings.TrimSpace(record.Image),
+			State:        dockerCLIStatusState(record.Status),
+			Status:       strings.TrimSpace(record.Status),
+			Created:      0,
+			Labels:       labels,
+			WorkloadKind: containerWorkloadKind(labels),
+			ProjectName:  strings.TrimSpace(labels["com.docker.compose.project"]),
+			ServiceName:  strings.TrimSpace(labels["com.docker.compose.service"]),
+			Resettable:   containerResettable(labels),
+			Ports:        parseDockerCLIPorts(record.Ports),
 		})
 	}
 
@@ -189,7 +197,7 @@ func (r *dockerRuntime) ResetWorkload(ctx context.Context, target ContainerSumma
 
 	args := buildComposeArgs(project, req, "up", "-d", "--force-recreate")
 	stdout, stderr, err := commandRunnerInDir(ctx, project.ProjectDir, "docker", args...)
-	result := workloadResetResult{WorkloadID: target.ID, Stdout: stdout, Stderr: stderr}
+	result := workloadResetResult{WorkloadID: target.ID, ContainerID: target.ContainerID, Stdout: stdout, Stderr: stderr}
 	if err != nil {
 		return result, true, err
 	}
@@ -206,6 +214,7 @@ func (r *dockerRuntime) ResetWorkload(ctx context.Context, target ContainerSumma
 			continue
 		}
 		result.WorkloadID = item.ID
+		result.ContainerID = item.ContainerID
 		break
 	}
 

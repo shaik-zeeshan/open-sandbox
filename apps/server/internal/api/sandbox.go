@@ -30,14 +30,19 @@ import (
 )
 
 type ContainerSummary struct {
-	ID      string            `json:"id"`
-	Names   []string          `json:"names"`
-	Image   string            `json:"image"`
-	State   string            `json:"state"`
-	Status  string            `json:"status"`
-	Created int64             `json:"created"`
-	Labels  map[string]string `json:"labels"`
-	Ports   []PortSummary     `json:"ports,omitempty"`
+	ID           string            `json:"id"`
+	ContainerID  string            `json:"container_id"`
+	Names        []string          `json:"names"`
+	Image        string            `json:"image"`
+	State        string            `json:"state"`
+	Status       string            `json:"status"`
+	Created      int64             `json:"created"`
+	Labels       map[string]string `json:"labels"`
+	WorkloadKind string            `json:"workload_kind,omitempty"`
+	ProjectName  string            `json:"project_name,omitempty"`
+	ServiceName  string            `json:"service_name,omitempty"`
+	Resettable   bool              `json:"resettable"`
+	Ports        []PortSummary     `json:"ports,omitempty"`
 }
 
 type PortSummary struct {
@@ -149,27 +154,27 @@ func (s *Server) restartContainer(c *gin.Context) {
 		return
 	}
 
-	inspect, err := s.runtime.InspectWorkload(c.Request.Context(), target.ID)
+	inspect, err := s.runtime.InspectWorkload(c.Request.Context(), target.ContainerID)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 	if inspect.State != nil && inspect.State.Running {
-		if err := s.runtime.StopWorkload(c.Request.Context(), target.ID, container.StopOptions{}); err != nil {
+		if err := s.runtime.StopWorkload(c.Request.Context(), target.ContainerID, container.StopOptions{}); err != nil {
 			writeError(c, http.StatusInternalServerError, err)
 			return
 		}
 	}
-	if err := s.runtime.StartWorkload(c.Request.Context(), target.ID, container.StartOptions{}); err != nil {
+	if err := s.runtime.StartWorkload(c.Request.Context(), target.ContainerID, container.StartOptions{}); err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 
 	if s.sandboxStore != nil {
-		_ = s.sandboxStore.UpdateSandboxStatusByContainerID(c.Request.Context(), target.ID, "running")
+		_ = s.sandboxStore.UpdateSandboxStatusByContainerID(c.Request.Context(), target.ContainerID, "running")
 	}
 
-	c.JSON(http.StatusOK, gin.H{"container_id": target.ID, "restarted": true})
+	c.JSON(http.StatusOK, gin.H{"id": target.ID, "container_id": target.ContainerID, "restarted": true})
 }
 
 func (s *Server) resetContainer(c *gin.Context) {
@@ -189,7 +194,7 @@ func (s *Server) resetContainer(c *gin.Context) {
 			return
 		}
 
-		c.JSON(http.StatusOK, gin.H{"container_id": result.WorkloadID, "reset": true, "stdout": result.Stdout, "stderr": result.Stderr})
+		c.JSON(http.StatusOK, gin.H{"id": result.WorkloadID, "container_id": result.ContainerID, "reset": true, "stdout": result.Stdout, "stderr": result.Stderr})
 		return
 	}
 
@@ -222,7 +227,7 @@ func (s *Server) resetContainer(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, err)
 		return
 	}
-	if err := s.runtime.RemoveWorkload(c.Request.Context(), target.ID, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil {
+	if err := s.runtime.RemoveWorkload(c.Request.Context(), target.ContainerID, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
@@ -238,7 +243,7 @@ func (s *Server) resetContainer(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{"container_id": created.ID, "reset": true})
+	c.JSON(http.StatusOK, gin.H{"id": target.ID, "container_id": created.ID, "reset": true})
 }
 
 func (s *Server) stopContainer(c *gin.Context) {
@@ -247,16 +252,16 @@ func (s *Server) stopContainer(c *gin.Context) {
 		return
 	}
 
-	if err := s.runtime.StopWorkload(c.Request.Context(), target.ID, container.StopOptions{}); err != nil {
+	if err := s.runtime.StopWorkload(c.Request.Context(), target.ContainerID, container.StopOptions{}); err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 
 	if s.sandboxStore != nil {
-		_ = s.sandboxStore.UpdateSandboxStatusByContainerID(c.Request.Context(), target.ID, "stopped")
+		_ = s.sandboxStore.UpdateSandboxStatusByContainerID(c.Request.Context(), target.ContainerID, "stopped")
 	}
 
-	c.JSON(http.StatusOK, gin.H{"container_id": target.ID, "stopped": true})
+	c.JSON(http.StatusOK, gin.H{"id": target.ID, "container_id": target.ContainerID, "stopped": true})
 }
 
 func (s *Server) removeContainer(c *gin.Context) {
@@ -266,7 +271,7 @@ func (s *Server) removeContainer(c *gin.Context) {
 	}
 
 	force, _ := strconv.ParseBool(c.DefaultQuery("force", "true"))
-	if err := s.runtime.RemoveWorkload(c.Request.Context(), target.ID, container.RemoveOptions{Force: force, RemoveVolumes: true}); err != nil {
+	if err := s.runtime.RemoveWorkload(c.Request.Context(), target.ContainerID, container.RemoveOptions{Force: force, RemoveVolumes: true}); err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
@@ -278,10 +283,10 @@ func (s *Server) removeContainer(c *gin.Context) {
 	}
 
 	if s.sandboxStore != nil {
-		_ = s.sandboxStore.DeleteSandboxByContainerID(c.Request.Context(), target.ID)
+		_ = s.sandboxStore.DeleteSandboxByContainerID(c.Request.Context(), target.ContainerID)
 	}
 
-	c.JSON(http.StatusOK, gin.H{"container_id": target.ID, "removed": true})
+	c.JSON(http.StatusOK, gin.H{"id": target.ID, "container_id": target.ContainerID, "removed": true})
 }
 
 func (s *Server) readContainerFile(c *gin.Context) {
@@ -296,7 +301,7 @@ func (s *Server) readContainerFile(c *gin.Context) {
 		return
 	}
 
-	response, err := s.readContainerFileByID(c.Request.Context(), target.ID, filePath)
+	response, err := s.readContainerFileByID(c.Request.Context(), target.ContainerID, filePath)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
@@ -317,11 +322,11 @@ func (s *Server) writeContainerFile(c *gin.Context) {
 			writeError(c, http.StatusBadRequest, err)
 			return
 		}
-		if err := s.writeContainerFileByID(c.Request.Context(), target.ID, req.TargetPath, path.Base(req.TargetPath), strings.NewReader(req.Content)); err != nil {
+		if err := s.writeContainerFileByID(c.Request.Context(), target.ContainerID, req.TargetPath, path.Base(req.TargetPath), strings.NewReader(req.Content)); err != nil {
 			writeError(c, http.StatusInternalServerError, err)
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"container_id": target.ID, "path": req.TargetPath, "saved": true})
+		c.JSON(http.StatusOK, gin.H{"id": target.ID, "container_id": target.ContainerID, "path": req.TargetPath, "saved": true})
 		return
 	}
 
@@ -338,12 +343,12 @@ func (s *Server) writeContainerFile(c *gin.Context) {
 	}
 	defer file.Close()
 
-	if err := s.writeContainerFileByID(c.Request.Context(), target.ID, targetPath, header.Filename, file); err != nil {
+	if err := s.writeContainerFileByID(c.Request.Context(), target.ContainerID, targetPath, header.Filename, file); err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"container_id": target.ID, "path": targetPath, "uploaded": true})
+	c.JSON(http.StatusOK, gin.H{"id": target.ID, "container_id": target.ContainerID, "path": targetPath, "uploaded": true})
 }
 
 func (s *Server) createSandbox(c *gin.Context) {
@@ -904,9 +909,9 @@ func (s *Server) loadSandbox(c *gin.Context) (store.Sandbox, bool) {
 }
 
 func (s *Server) loadAuthorizedContainer(c *gin.Context) (ContainerSummary, bool) {
-	containerID := strings.TrimSpace(c.Param("id"))
-	if containerID == "" {
-		writeError(c, http.StatusBadRequest, errors.New("container id is required"))
+	workloadID := strings.TrimSpace(c.Param("id"))
+	if workloadID == "" {
+		writeError(c, http.StatusBadRequest, errors.New("workload id is required"))
 		return ContainerSummary{}, false
 	}
 
@@ -922,7 +927,7 @@ func (s *Server) loadAuthorizedContainer(c *gin.Context) (ContainerSummary, bool
 		return ContainerSummary{}, false
 	}
 
-	target, exists := containersByID[containerID]
+	target, exists := containersByID[workloadID]
 	if !exists {
 		writeError(c, http.StatusNotFound, errors.New("container not found"))
 		return ContainerSummary{}, false
@@ -1011,7 +1016,7 @@ func (s *Server) runtimeContainerVisibleToIdentity(item ContainerSummary, identi
 			return true
 		}
 	}
-	_, ok := ownedContainerIDs[item.ID]
+	_, ok := ownedContainerIDs[item.ContainerID]
 	return ok
 }
 
@@ -1085,9 +1090,9 @@ func (s *Server) liveContainerState(ctx context.Context) (map[string]string, map
 	}
 
 	for _, item := range containers {
-		stateByContainer[item.ID] = strings.TrimSpace(item.State)
-		statusByContainer[item.ID] = strings.TrimSpace(item.Status)
-		portsByContainer[item.ID] = item.Ports
+		stateByContainer[item.ContainerID] = strings.TrimSpace(item.State)
+		statusByContainer[item.ContainerID] = strings.TrimSpace(item.Status)
+		portsByContainer[item.ContainerID] = item.Ports
 	}
 
 	return stateByContainer, statusByContainer, portsByContainer
@@ -1098,9 +1103,10 @@ func (s *Server) runtimeContainersByID(ctx context.Context) (map[string]Containe
 	if err != nil {
 		return nil, err
 	}
-	byID := make(map[string]ContainerSummary, len(containers))
+	byID := make(map[string]ContainerSummary, len(containers)*2)
 	for _, item := range containers {
 		byID[item.ID] = item
+		byID[item.ContainerID] = item
 	}
 	return byID, nil
 }
@@ -1393,6 +1399,46 @@ func parseDockerLabels(raw string) map[string]string {
 		}
 	}
 	return labels
+}
+
+func containerWorkloadKind(labels map[string]string) string {
+	if sandboxID := strings.TrimSpace(labels[labelOpenSandboxSandboxID]); sandboxID != "" {
+		return managedKindSandbox
+	}
+	if managedID := strings.TrimSpace(labels[labelOpenSandboxManagedID]); managedID != "" {
+		if kind := strings.TrimSpace(labels[labelOpenSandboxKind]); kind != "" {
+			return kind
+		}
+	}
+	if projectName := strings.TrimSpace(labels["com.docker.compose.project"]); projectName != "" {
+		return "compose"
+	}
+	return "runtime"
+}
+
+func containerResettable(labels map[string]string) bool {
+	return strings.TrimSpace(labels["com.docker.compose.project"]) != "" || (strings.TrimSpace(labels[labelOpenSandboxKind]) == managedKindDirect && strings.TrimSpace(labels[labelOpenSandboxManagedID]) != "")
+}
+
+func containerWorkloadID(containerID string, labels map[string]string, names []string) string {
+	if sandboxID := strings.TrimSpace(labels[labelOpenSandboxSandboxID]); sandboxID != "" {
+		return sandboxID
+	}
+	if managedID := strings.TrimSpace(labels[labelOpenSandboxManagedID]); managedID != "" {
+		return managedID
+	}
+	projectName := strings.TrimSpace(labels["com.docker.compose.project"])
+	if projectName == "" {
+		return containerID
+	}
+	parts := []string{"compose", projectName}
+	if serviceName := strings.TrimSpace(labels["com.docker.compose.service"]); serviceName != "" {
+		parts = append(parts, serviceName)
+	}
+	if len(names) > 0 && strings.TrimSpace(names[0]) != "" {
+		parts = append(parts, strings.TrimSpace(names[0]))
+	}
+	return strings.Join(parts, ":")
 }
 
 func parseDockerCLIPorts(raw string) []PortSummary {
