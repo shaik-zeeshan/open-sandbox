@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path"
@@ -452,6 +453,7 @@ func (s *Server) createSandbox(c *gin.Context) {
 	if workspaceDir != "" {
 		hostConfig.Binds = []string{fmt.Sprintf("%s:%s", volumeName, workspaceDir)}
 	}
+	s.runtimeLimits.apply(hostConfig)
 
 	if len(req.Ports) > 0 {
 		exposedPorts, portBindings, err := nat.ParsePortSpecs(req.Ports)
@@ -465,11 +467,13 @@ func (s *Server) createSandbox(c *gin.Context) {
 
 	created, err := s.createContainerWithAutoPull(c.Request.Context(), req.Image, containerConfig, hostConfig, containerName)
 	if err != nil {
+		s.logLifecycleFailure("create_sandbox", err, slog.String("sandbox_id", sandboxID), slog.String("image", req.Image))
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 
 	if err := s.docker.ContainerStart(c.Request.Context(), created.ID, container.StartOptions{}); err != nil {
+		s.logLifecycleFailure("start_sandbox", err, slog.String("sandbox_id", sandboxID), slog.String("container_id", created.ID))
 		writeError(c, http.StatusInternalServerError, fmt.Errorf("start sandbox container: %w", err))
 		return
 	}
@@ -492,6 +496,7 @@ func (s *Server) createSandbox(c *gin.Context) {
 			return
 		}
 		if execResp.ExitCode != 0 {
+			s.logLifecycleFailure("clone_sandbox_repo", errors.New(strings.TrimSpace(execResp.Stderr)), slog.String("sandbox_id", sandboxID), slog.String("container_id", created.ID))
 			writeErrorWithDetails(c, http.StatusBadRequest, "clone repository failed", "git_clone_failed", strings.TrimSpace(execResp.Stderr))
 			return
 		}
@@ -514,9 +519,11 @@ func (s *Server) createSandbox(c *gin.Context) {
 
 	if err := s.sandboxStore.CreateSandbox(c.Request.Context(), sandboxRecord); err != nil {
 		_ = s.docker.ContainerRemove(c.Request.Context(), created.ID, container.RemoveOptions{Force: true, RemoveVolumes: true})
+		s.logLifecycleFailure("persist_sandbox", err, slog.String("sandbox_id", sandboxID), slog.String("container_id", created.ID))
 		writeError(c, http.StatusInternalServerError, fmt.Errorf("persist sandbox: %w", err))
 		return
 	}
+	s.logLifecycleSuccess("create_sandbox", slog.String("sandbox_id", sandboxID), slog.String("container_id", created.ID), slog.String("owner_id", identity.UserID))
 
 	c.JSON(http.StatusOK, sandboxToResponse(sandboxRecord))
 }
@@ -586,21 +593,25 @@ func (s *Server) restartSandbox(c *gin.Context) {
 
 	inspect, err := s.docker.ContainerInspect(c.Request.Context(), sandbox.ContainerID)
 	if err != nil {
+		s.logLifecycleFailure("restart_sandbox", err, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 	if inspect.State != nil && inspect.State.Running {
 		if err := s.docker.ContainerStop(c.Request.Context(), sandbox.ContainerID, container.StopOptions{}); err != nil {
+			s.logLifecycleFailure("restart_sandbox", err, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 			writeError(c, http.StatusInternalServerError, err)
 			return
 		}
 	}
 	if err := s.docker.ContainerStart(c.Request.Context(), sandbox.ContainerID, container.StartOptions{}); err != nil {
+		s.logLifecycleFailure("restart_sandbox", err, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 
 	_ = s.sandboxStore.UpdateSandboxStatus(c.Request.Context(), sandbox.ID, "running")
+	s.logLifecycleSuccess("restart_sandbox", slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 	c.JSON(http.StatusOK, gin.H{"id": sandbox.ID, "restarted": true})
 }
 
@@ -612,11 +623,13 @@ func (s *Server) resetSandbox(c *gin.Context) {
 
 	inspect, err := s.docker.ContainerInspect(c.Request.Context(), sandbox.ContainerID)
 	if err != nil {
+		s.logLifecycleFailure("reset_sandbox", err, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 	if inspect.State == nil || !inspect.State.Running {
 		if err := s.docker.ContainerStart(c.Request.Context(), sandbox.ContainerID, container.StartOptions{}); err != nil {
+			s.logLifecycleFailure("reset_sandbox", err, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 			writeError(c, http.StatusInternalServerError, err)
 			return
 		}
@@ -643,10 +656,12 @@ func (s *Server) resetSandbox(c *gin.Context) {
 		cleanupCmd := []string{"sh", "-lc", fmt.Sprintf("rm -rf %s/* %s/.[!.]* %s/..?* 2>/dev/null || true", shellQuote(cleanupTargetPath), shellQuote(cleanupTargetPath), shellQuote(cleanupTargetPath))}
 		cleanupResp, err := s.runContainerExec(c.Request.Context(), sandbox.ContainerID, ExecRequest{Cmd: cleanupCmd})
 		if err != nil {
+			s.logLifecycleFailure("reset_sandbox", err, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 			writeError(c, http.StatusInternalServerError, fmt.Errorf("reset workspace: %w", err))
 			return
 		}
 		if cleanupResp.ExitCode != 0 {
+			s.logLifecycleFailure("reset_sandbox", errors.New(strings.TrimSpace(cleanupResp.Stderr)), slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 			writeErrorWithDetails(c, http.StatusInternalServerError, "reset workspace failed", "workspace_reset_failed", strings.TrimSpace(cleanupResp.Stderr))
 			return
 		}
@@ -660,16 +675,19 @@ func (s *Server) resetSandbox(c *gin.Context) {
 		cloneCmd = append(cloneCmd, repoURL, repoTargetPath)
 		cloneResp, cloneErr := s.runContainerExec(c.Request.Context(), sandbox.ContainerID, ExecRequest{Cmd: cloneCmd})
 		if cloneErr != nil {
+			s.logLifecycleFailure("reset_sandbox", cloneErr, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 			writeError(c, http.StatusInternalServerError, fmt.Errorf("re-clone repository: %w", cloneErr))
 			return
 		}
 		if cloneResp.ExitCode != 0 {
+			s.logLifecycleFailure("reset_sandbox", errors.New(strings.TrimSpace(cloneResp.Stderr)), slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 			writeErrorWithDetails(c, http.StatusInternalServerError, "re-clone repository failed", "git_clone_failed", strings.TrimSpace(cloneResp.Stderr))
 			return
 		}
 	}
 
 	_ = s.sandboxStore.UpdateSandboxStatus(c.Request.Context(), sandbox.ID, "running")
+	s.logLifecycleSuccess("reset_sandbox", slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 	c.JSON(http.StatusOK, gin.H{"id": sandbox.ID, "reset": true})
 }
 
@@ -680,6 +698,7 @@ func (s *Server) stopSandbox(c *gin.Context) {
 	}
 
 	if err := s.docker.ContainerStop(c.Request.Context(), sandbox.ContainerID, container.StopOptions{}); err != nil {
+		s.logLifecycleFailure("stop_sandbox", err, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
@@ -688,10 +707,12 @@ func (s *Server) stopSandbox(c *gin.Context) {
 
 	updated, err := s.sandboxStore.GetSandbox(c.Request.Context(), sandbox.ID)
 	if err != nil {
+		s.logLifecycleFailure("stop_sandbox", err, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 
+	s.logLifecycleSuccess("stop_sandbox", slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 	c.JSON(http.StatusOK, sandboxToResponse(updated))
 }
 
@@ -703,15 +724,18 @@ func (s *Server) deleteSandbox(c *gin.Context) {
 
 	_ = s.docker.ContainerStop(c.Request.Context(), sandbox.ContainerID, container.StopOptions{})
 	if err := s.docker.ContainerRemove(c.Request.Context(), sandbox.ContainerID, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil {
+		s.logLifecycleFailure("delete_sandbox", err, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 
 	if err := s.sandboxStore.DeleteSandbox(c.Request.Context(), sandbox.ID); err != nil {
+		s.logLifecycleFailure("delete_sandbox", err, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 
+	s.logLifecycleSuccess("delete_sandbox", slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 	c.JSON(http.StatusOK, gin.H{"id": sandbox.ID, "deleted": true})
 }
 
@@ -826,6 +850,7 @@ func (s *Server) streamLogsForContainer(c *gin.Context, containerID string, foll
 		Tail:       tail,
 	})
 	if err != nil {
+		s.logStreamFailure("log_stream_open", err, slog.String("container_id", containerID))
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
@@ -847,17 +872,20 @@ func (s *Server) streamLogsForContainer(c *gin.Context, containerID string, foll
 
 	inspect, err := s.docker.ContainerInspect(c.Request.Context(), containerID)
 	if err != nil {
+		s.logStreamFailure("log_stream_inspect", err, slog.String("container_id", containerID))
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 
 	if inspect.Config != nil && inspect.Config.Tty {
 		if _, err := io.Copy(stdoutWriter, reader); err != nil {
+			s.logStreamFailure("log_stream_copy", err, slog.String("container_id", containerID))
 			emitSSE(c, mu, "error", err.Error())
 			flusher.Flush()
 			return
 		}
 	} else if _, err := stdcopy.StdCopy(stdoutWriter, stderrWriter, reader); err != nil {
+		s.logStreamFailure("log_stream_copy", err, slog.String("container_id", containerID))
 		emitSSE(c, mu, "error", err.Error())
 		flusher.Flush()
 		return

@@ -1,0 +1,43 @@
+services:
+  server:
+    build:
+      context: ./apps/server
+    restart: unless-stopped
+    mem_limit: 1g
+    cpus: 1.0
+    pids_limit: 256
+    environment:
+      PORT: "8080"
+      SANDBOX_DB_PATH: /data/open-sandbox.db
+      SANDBOX_JWT_SECRET: ${SANDBOX_JWT_SECRET:?set SANDBOX_JWT_SECRET in .env}
+      SANDBOX_WORKSPACE_DIR: ${OPEN_SANDBOX_DATA_DIR:?set OPEN_SANDBOX_DATA_DIR in .env}/workspace
+      SANDBOX_RUNTIME_MEMORY_LIMIT: ${SANDBOX_RUNTIME_MEMORY_LIMIT:-4g}
+      SANDBOX_RUNTIME_CPU_LIMIT: ${SANDBOX_RUNTIME_CPU_LIMIT:-2}
+      SANDBOX_RUNTIME_PIDS_LIMIT: ${SANDBOX_RUNTIME_PIDS_LIMIT:-512}
+      SANDBOX_MAINTENANCE_ARTIFACT_MAX_AGE: ${SANDBOX_MAINTENANCE_ARTIFACT_MAX_AGE:-168h}
+      SANDBOX_MAINTENANCE_MISSING_SANDBOX_MAX_AGE: ${SANDBOX_MAINTENANCE_MISSING_SANDBOX_MAX_AGE:-24h}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${OPEN_SANDBOX_DATA_DIR:?set OPEN_SANDBOX_DATA_DIR in .env}/db:/data
+      - ${OPEN_SANDBOX_DATA_DIR:?set OPEN_SANDBOX_DATA_DIR in .env}/workspace:${OPEN_SANDBOX_DATA_DIR:?set OPEN_SANDBOX_DATA_DIR in .env}/workspace
+
+  client:
+    build:
+      context: .
+      dockerfile: apps/client/Dockerfile
+      args:
+        VITE_SANDBOX_BASE_URL: /
+    depends_on:
+      server:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 128
+    ports:
+      - "${OPEN_SANDBOX_HTTP_PORT:-3000}:80"

@@ -849,6 +849,39 @@ func TestCreateContainerEndpointParsesPortBindings(t *testing.T) {
 	}
 }
 
+func TestCreateContainerEndpointAppliesRuntimeLimits(t *testing.T) {
+	t.Setenv("SANDBOX_RUNTIME_MEMORY_LIMIT", "512m")
+	t.Setenv("SANDBOX_RUNTIME_CPU_LIMIT", "1.5")
+	t.Setenv("SANDBOX_RUNTIME_PIDS_LIMIT", "256")
+
+	m := &mockDocker{
+		containerCreateFn: func(_ context.Context, _ *container.Config, hostConfig *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, _ string) (container.CreateResponse, error) {
+			if hostConfig.Resources.Memory != 512_000_000 {
+				t.Fatalf("expected memory limit 512000000, got %d", hostConfig.Resources.Memory)
+			}
+			if hostConfig.Resources.NanoCPUs != 1_500_000_000 {
+				t.Fatalf("expected cpu limit 1500000000, got %d", hostConfig.Resources.NanoCPUs)
+			}
+			if hostConfig.Resources.PidsLimit == nil || *hostConfig.Resources.PidsLimit != 256 {
+				t.Fatalf("expected pids limit 256, got %+v", hostConfig.Resources.PidsLimit)
+			}
+			return container.CreateResponse{ID: "limited-container"}, nil
+		},
+	}
+
+	s := newTestServer(m)
+	req := httptest.NewRequest(http.MethodPost, "/api/containers/create", bytes.NewBufferString(`{"image":"alpine:latest","start":false}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+}
+
 func TestCreateContainerEndpointAutoPullsMissingImage(t *testing.T) {
 	createCalls := 0
 	pullCalled := false
@@ -1756,6 +1789,96 @@ func TestLogStreamEndpoint(t *testing.T) {
 	body := w.Body.String()
 	if !bytes.Contains([]byte(body), []byte("event: stdout")) || !bytes.Contains([]byte(body), []byte("event: stderr")) {
 		t.Fatalf("expected stdout/stderr events in stream: %s", body)
+	}
+}
+
+func TestMetricsEndpointReportsLifecycleCounters(t *testing.T) {
+	s := newTestServer(&mockDocker{})
+	s.metrics.recordLifecycle("create_sandbox", "success")
+	s.metrics.recordCleanupRun("success")
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `open_sandbox_sandbox_lifecycle_total{operation="create_sandbox",result="success"} 1`) {
+		t.Fatalf("expected lifecycle metric, got %s", body)
+	}
+	if !strings.Contains(body, `open_sandbox_cleanup_runs_total{result="success"} 1`) {
+		t.Fatalf("expected cleanup metric, got %s", body)
+	}
+}
+
+func TestMaintenanceCleanupRemovesStaleArtifacts(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	composeDir := filepath.Join(workspaceRoot, ".open-sandbox", "compose", "stale-project")
+	if err := os.MkdirAll(composeDir, 0o700); err != nil {
+		t.Fatalf("create compose dir: %v", err)
+	}
+	staleSpecDir := filepath.Join(workspaceRoot, ".open-sandbox", "containers")
+	if err := os.MkdirAll(staleSpecDir, 0o700); err != nil {
+		t.Fatalf("create direct spec dir: %v", err)
+	}
+	staleSpecPath := filepath.Join(staleSpecDir, "ctr-stale.json")
+	if err := os.WriteFile(staleSpecPath, []byte(`{"image":"alpine:3.20"}`), 0o600); err != nil {
+		t.Fatalf("write direct spec: %v", err)
+	}
+	oldTime := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(composeDir, oldTime, oldTime); err != nil {
+		t.Fatalf("touch compose dir: %v", err)
+	}
+	if err := os.Chtimes(staleSpecPath, oldTime, oldTime); err != nil {
+		t.Fatalf("touch direct spec: %v", err)
+	}
+
+	deletedSandboxID := ""
+	sandboxStore := &mockSandboxStore{
+		listSandboxesFn: func(context.Context) ([]store.Sandbox, error) {
+			return []store.Sandbox{{ID: "missing-sandbox", ContainerID: "gone-container", UpdatedAt: time.Now().Add(-48 * time.Hour).Unix()}}, nil
+		},
+		deleteSandboxFn: func(_ context.Context, sandboxID string) error {
+			deletedSandboxID = sandboxID
+			return nil
+		},
+	}
+
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return "", "", nil
+	}
+
+	s := newTestServerWithStore(&mockDocker{containerListFn: func(context.Context, container.ListOptions) ([]container.Summary, error) {
+		return nil, nil
+	}}, sandboxStore)
+	s.workspaceRoot = workspaceRoot
+
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/maintenance/cleanup", bytes.NewBufferString(`{"dry_run":false,"max_artifact_age":"24h","max_missing_sandbox_age":"24h"}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if deletedSandboxID != "missing-sandbox" {
+		t.Fatalf("expected missing sandbox record to be deleted, got %q", deletedSandboxID)
+	}
+	if _, err := os.Stat(staleSpecPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected stale direct spec to be removed, got err=%v", err)
+	}
+	if _, err := os.Stat(composeDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected stale compose dir to be removed, got err=%v", err)
+	}
+	if !strings.Contains(w.Body.String(), `"direct_container_specs":1`) || !strings.Contains(w.Body.String(), `"compose_projects":1`) {
+		t.Fatalf("expected cleanup response counts, got %s", w.Body.String())
 	}
 }
 

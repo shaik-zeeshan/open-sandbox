@@ -96,6 +96,9 @@ type Server struct {
 	router          *gin.Engine
 	sandboxStore    SandboxStore
 	userStore       UserStore
+	logger          *slog.Logger
+	metrics         *operationalMetrics
+	runtimeLimits   runtimeLimits
 	workspaceRoot   string
 	execWaitTimeout time.Duration
 }
@@ -275,6 +278,9 @@ func NewServerWithStore(dockerClient DockerAPI, authConfig AuthConfig, sandboxSt
 		router:          r,
 		sandboxStore:    sandboxStore,
 		userStore:       userStore,
+		logger:          logger,
+		metrics:         newOperationalMetrics(),
+		runtimeLimits:   loadRuntimeLimitsFromEnv(),
 		workspaceRoot:   resolveWorkspaceRoot(),
 		execWaitTimeout: loadExecWaitTimeout(),
 	}
@@ -288,6 +294,7 @@ func (s *Server) Router() *gin.Engine {
 
 func (s *Server) registerRoutes() {
 	s.router.GET("/health", s.health)
+	s.router.GET("/metrics", s.metricsHandler)
 	s.router.GET("/auth/setup", s.setupStatus)
 	s.router.POST("/auth/bootstrap", s.bootstrap)
 	s.router.POST("/auth/login", s.login)
@@ -341,6 +348,8 @@ func (s *Server) registerRoutes() {
 		api.GET("/sandboxes/:id/logs", s.streamSandboxLogs)
 		api.GET("/sandboxes/:id/files", s.readSandboxFile)
 		api.PUT("/sandboxes/:id/files", s.writeSandboxFile)
+
+		api.POST("/admin/maintenance/cleanup", s.runMaintenanceCleanup)
 	}
 
 	secured.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
@@ -845,10 +854,12 @@ func (s *Server) createContainer(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, err)
 		return
 	}
+	s.runtimeLimits.apply(hostConfig)
 
 	created, err := s.createContainerWithAutoPull(c.Request.Context(), req.Image, containerConfig, hostConfig, req.Name)
 	if err != nil {
 		_ = os.Remove(s.directContainerSpecPath(managedID))
+		s.logLifecycleFailure("create_container", err, slog.String("managed_id", managedID), slog.String("image", req.Image))
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
@@ -856,11 +867,13 @@ func (s *Server) createContainer(c *gin.Context) {
 	started := false
 	if req.Start {
 		if err := s.docker.ContainerStart(c.Request.Context(), created.ID, container.StartOptions{}); err != nil {
+			s.logLifecycleFailure("start_container", err, slog.String("container_id", created.ID), slog.String("managed_id", managedID))
 			writeError(c, http.StatusInternalServerError, fmt.Errorf("start container: %w", err))
 			return
 		}
 		started = true
 	}
+	s.logLifecycleSuccess("create_container", slog.String("container_id", created.ID), slog.String("managed_id", managedID), slog.Bool("started", started))
 
 	c.JSON(http.StatusOK, CreateContainerResponse{ContainerID: created.ID, Warnings: created.Warnings, Started: started})
 }
@@ -956,12 +969,14 @@ func (s *Server) streamTerminalForContainer(c *gin.Context, containerID string, 
 
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
+		s.logStreamFailure("terminal_websocket_upgrade", err, slog.String("container_id", containerID))
 		return
 	}
 	conn.SetReadLimit(1 << 20)
 
 	execID, attached, err := s.startInteractiveExec(c.Request.Context(), containerID, workdir, cols, rows)
 	if err != nil {
+		s.logStreamFailure("terminal_exec", err, slog.String("container_id", containerID))
 		_ = conn.WriteControl(
 			websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "terminal setup failed"),
