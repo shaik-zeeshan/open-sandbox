@@ -266,6 +266,16 @@ func newTestServerWithStore(d DockerAPI, sandboxStore SandboxStore) *Server {
 	return NewServerWithStore(d, AuthConfig{JWTSecret: []byte("jwt-secret"), TokenTTL: time.Minute, Issuer: "open-sandbox"}, sandboxStore)
 }
 
+func newSQLiteStoreForAPITest(t *testing.T) *store.SQLiteStore {
+	t.Helper()
+	sqliteStore, err := store.OpenSQLite(filepath.Join(t.TempDir(), "server-test.db"))
+	if err != nil {
+		t.Fatalf("failed to open sqlite store: %v", err)
+	}
+	t.Cleanup(func() { _ = sqliteStore.Close() })
+	return sqliteStore
+}
+
 func signedTestToken(t *testing.T) string {
 	return signedTokenFor(t, AuthIdentity{UserID: "admin-user", Username: "admin", Role: roleAdmin})
 }
@@ -296,6 +306,73 @@ func setAuthHeader(t *testing.T, req *http.Request) {
 	t.Helper()
 	signed := signedTestToken(t)
 	req.Header.Set("Authorization", "Bearer "+signed)
+}
+
+func TestListWorkersIncludesLocalWorker(t *testing.T) {
+	store := newSQLiteStoreForAPITest(t)
+	s := newTestServerWithStore(&mockDocker{}, store)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/workers", nil)
+	setAuthHeader(t, req)
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var workers []map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &workers); err != nil {
+		t.Fatalf("failed to decode workers response: %v", err)
+	}
+	if len(workers) == 0 {
+		t.Fatal("expected at least one worker")
+	}
+	if workers[0]["id"] != localRuntimeWorkerID {
+		t.Fatalf("expected first worker id %q, got %#v", localRuntimeWorkerID, workers[0]["id"])
+	}
+}
+
+func TestWorkerRegisterAndHeartbeat(t *testing.T) {
+	t.Setenv("SANDBOX_WORKER_SHARED_SECRET", "worker-secret")
+	store := newSQLiteStoreForAPITest(t)
+	s := newTestServerWithStore(&mockDocker{}, store)
+
+	registerBody := `{"worker_id":"worker-2","name":"worker-2","advertise_address":"http://10.0.0.2:8080","execution_mode":"docker","version":"v1","heartbeat_ttl_seconds":20}`
+	registerReq := httptest.NewRequest(http.MethodPost, "/control/workers/register", strings.NewReader(registerBody))
+	registerReq.Header.Set("Content-Type", "application/json")
+	registerReq.Header.Set(workerAuthHeader, "worker-secret")
+	registerW := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(registerW, registerReq)
+
+	if registerW.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d: %s", registerW.Code, registerW.Body.String())
+	}
+
+	heartbeatBody := `{"status":"active","advertise_address":"http://10.0.0.2:9090","version":"v2"}`
+	heartbeatReq := httptest.NewRequest(http.MethodPost, "/control/workers/worker-2/heartbeat", strings.NewReader(heartbeatBody))
+	heartbeatReq.Header.Set("Content-Type", "application/json")
+	heartbeatReq.Header.Set(workerAuthHeader, "worker-secret")
+	heartbeatW := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(heartbeatW, heartbeatReq)
+
+	if heartbeatW.Code != http.StatusOK {
+		t.Fatalf("expected heartbeat 200, got %d: %s", heartbeatW.Code, heartbeatW.Body.String())
+	}
+
+	worker, err := store.GetRuntimeWorker(t.Context(), "worker-2")
+	if err != nil {
+		t.Fatalf("failed to get registered worker: %v", err)
+	}
+	if worker.AdvertiseAddress != "http://10.0.0.2:9090" {
+		t.Fatalf("expected heartbeat to update advertise address, got %q", worker.AdvertiseAddress)
+	}
+	if worker.Version != "v2" {
+		t.Fatalf("expected heartbeat to update version, got %q", worker.Version)
+	}
 }
 
 func TestHealthEndpointIsPublic(t *testing.T) {

@@ -16,9 +16,49 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/shaik-zeeshan/open-sandbox/internal/store"
 )
 
 type workloadRuntime interface {
+	ListWorkloads(ctx context.Context) ([]ContainerSummary, error)
+	InspectWorkload(ctx context.Context, workerID string, workloadID string) (container.InspectResponse, error)
+	CreateWorkload(ctx context.Context, workerID string, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *ocispec.Platform, workloadName string) (container.CreateResponse, error)
+	StartWorkload(ctx context.Context, workerID string, workloadID string, options container.StartOptions) error
+	StopWorkload(ctx context.Context, workerID string, workloadID string, options container.StopOptions) error
+	RemoveWorkload(ctx context.Context, workerID string, workloadID string, options container.RemoveOptions) error
+	CreateVolume(ctx context.Context, workerID string, options volume.CreateOptions) (volume.Volume, error)
+	ExecCreate(ctx context.Context, workerID string, workloadID string, options container.ExecOptions) (container.ExecCreateResponse, error)
+	ExecAttach(ctx context.Context, workerID string, execID string, options container.ExecAttachOptions) (dockertypes.HijackedResponse, error)
+	ExecResize(ctx context.Context, workerID string, execID string, options container.ResizeOptions) error
+	ExecStart(ctx context.Context, workerID string, execID string, options container.ExecStartOptions) error
+	ExecInspect(ctx context.Context, workerID string, execID string) (container.ExecInspect, error)
+	Logs(ctx context.Context, workerID string, workloadID string, options container.LogsOptions) (io.ReadCloser, error)
+	CopyFrom(ctx context.Context, workerID string, workloadID, srcPath string) (io.ReadCloser, container.PathStat, error)
+	CopyTo(ctx context.Context, workerID string, workloadID, dstPath string, content io.Reader, options container.CopyToContainerOptions) error
+	ProjectName(summary ContainerSummary) string
+	ServiceName(summary ContainerSummary) string
+	ResetWorkload(ctx context.Context, workerID string, target ContainerSummary) (workloadResetResult, bool, error)
+}
+
+type RuntimeWorkerStore interface {
+	GetRuntimeWorker(ctx context.Context, workerID string) (store.RuntimeWorker, error)
+}
+
+type workloadResetResult struct {
+	WorkloadID  string
+	ContainerID string
+	Stdout      string
+	Stderr      string
+}
+
+type dockerRuntime struct {
+	workerID        string
+	docker          DockerAPI
+	workspaceRootFn func() string
+}
+
+type runtimeWorkerBackend interface {
+	WorkerID() string
 	ListWorkloads(ctx context.Context) ([]ContainerSummary, error)
 	InspectWorkload(ctx context.Context, workloadID string) (container.InspectResponse, error)
 	CreateWorkload(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *ocispec.Platform, workloadName string) (container.CreateResponse, error)
@@ -39,20 +79,207 @@ type workloadRuntime interface {
 	ResetWorkload(ctx context.Context, target ContainerSummary) (workloadResetResult, bool, error)
 }
 
-type workloadResetResult struct {
-	WorkloadID  string
-	ContainerID string
-	Stdout      string
-	Stderr      string
+type delegatingRuntime struct {
+	workerStore   RuntimeWorkerStore
+	localWorkerID string
+	backends      map[string]runtimeWorkerBackend
 }
 
-type dockerRuntime struct {
-	docker          DockerAPI
-	workspaceRootFn func() string
+func newDelegatingRuntime(workerStore RuntimeWorkerStore, localWorkerID string, backends ...runtimeWorkerBackend) workloadRuntime {
+	backendMap := make(map[string]runtimeWorkerBackend, len(backends))
+	for _, backend := range backends {
+		if backend == nil {
+			continue
+		}
+		backendMap[backend.WorkerID()] = backend
+	}
+	return &delegatingRuntime{workerStore: workerStore, localWorkerID: strings.TrimSpace(localWorkerID), backends: backendMap}
 }
 
-func newDockerRuntime(dockerClient DockerAPI, workspaceRootFn func() string) workloadRuntime {
-	return &dockerRuntime{docker: dockerClient, workspaceRootFn: workspaceRootFn}
+func newDockerRuntime(workerID string, dockerClient DockerAPI, workspaceRootFn func() string) runtimeWorkerBackend {
+	return &dockerRuntime{workerID: normalizeRuntimeWorkerID(workerID), docker: dockerClient, workspaceRootFn: workspaceRootFn}
+}
+
+func normalizeRuntimeWorkerID(workerID string) string {
+	trimmed := strings.TrimSpace(workerID)
+	if trimmed == "" {
+		return localRuntimeWorkerID
+	}
+	return trimmed
+}
+
+func (r *delegatingRuntime) backendForWorker(ctx context.Context, workerID string) (runtimeWorkerBackend, error) {
+	resolved := normalizeRuntimeWorkerID(workerID)
+	if backend, ok := r.backends[resolved]; ok {
+		return backend, nil
+	}
+	if r.workerStore != nil {
+		if _, err := r.workerStore.GetRuntimeWorker(ctx, resolved); err != nil {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("worker %q is registered but no execution backend is configured", resolved)
+}
+
+func (r *delegatingRuntime) ListWorkloads(ctx context.Context) ([]ContainerSummary, error) {
+	all := make([]ContainerSummary, 0)
+	for _, backend := range r.backends {
+		items, err := backend.ListWorkloads(ctx)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, items...)
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].WorkerID != all[j].WorkerID {
+			return all[i].WorkerID < all[j].WorkerID
+		}
+		if len(all[i].Names) == 0 || len(all[j].Names) == 0 {
+			return all[i].ID < all[j].ID
+		}
+		return all[i].Names[0] < all[j].Names[0]
+	})
+	return all, nil
+}
+
+func (r *delegatingRuntime) InspectWorkload(ctx context.Context, workerID string, workloadID string) (container.InspectResponse, error) {
+	backend, err := r.backendForWorker(ctx, workerID)
+	if err != nil {
+		return container.InspectResponse{}, err
+	}
+	return backend.InspectWorkload(ctx, workloadID)
+}
+
+func (r *delegatingRuntime) CreateWorkload(ctx context.Context, workerID string, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *ocispec.Platform, workloadName string) (container.CreateResponse, error) {
+	backend, err := r.backendForWorker(ctx, workerID)
+	if err != nil {
+		return container.CreateResponse{}, err
+	}
+	return backend.CreateWorkload(ctx, config, hostConfig, networkingConfig, platform, workloadName)
+}
+
+func (r *delegatingRuntime) StartWorkload(ctx context.Context, workerID string, workloadID string, options container.StartOptions) error {
+	backend, err := r.backendForWorker(ctx, workerID)
+	if err != nil {
+		return err
+	}
+	return backend.StartWorkload(ctx, workloadID, options)
+}
+
+func (r *delegatingRuntime) StopWorkload(ctx context.Context, workerID string, workloadID string, options container.StopOptions) error {
+	backend, err := r.backendForWorker(ctx, workerID)
+	if err != nil {
+		return err
+	}
+	return backend.StopWorkload(ctx, workloadID, options)
+}
+
+func (r *delegatingRuntime) RemoveWorkload(ctx context.Context, workerID string, workloadID string, options container.RemoveOptions) error {
+	backend, err := r.backendForWorker(ctx, workerID)
+	if err != nil {
+		return err
+	}
+	return backend.RemoveWorkload(ctx, workloadID, options)
+}
+
+func (r *delegatingRuntime) CreateVolume(ctx context.Context, workerID string, options volume.CreateOptions) (volume.Volume, error) {
+	backend, err := r.backendForWorker(ctx, workerID)
+	if err != nil {
+		return volume.Volume{}, err
+	}
+	return backend.CreateVolume(ctx, options)
+}
+
+func (r *delegatingRuntime) ExecCreate(ctx context.Context, workerID string, workloadID string, options container.ExecOptions) (container.ExecCreateResponse, error) {
+	backend, err := r.backendForWorker(ctx, workerID)
+	if err != nil {
+		return container.ExecCreateResponse{}, err
+	}
+	return backend.ExecCreate(ctx, workloadID, options)
+}
+
+func (r *delegatingRuntime) ExecAttach(ctx context.Context, workerID string, execID string, options container.ExecAttachOptions) (dockertypes.HijackedResponse, error) {
+	backend, err := r.backendForWorker(ctx, workerID)
+	if err != nil {
+		return dockertypes.HijackedResponse{}, err
+	}
+	return backend.ExecAttach(ctx, execID, options)
+}
+
+func (r *delegatingRuntime) ExecResize(ctx context.Context, workerID string, execID string, options container.ResizeOptions) error {
+	backend, err := r.backendForWorker(ctx, workerID)
+	if err != nil {
+		return err
+	}
+	return backend.ExecResize(ctx, execID, options)
+}
+
+func (r *delegatingRuntime) ExecStart(ctx context.Context, workerID string, execID string, options container.ExecStartOptions) error {
+	backend, err := r.backendForWorker(ctx, workerID)
+	if err != nil {
+		return err
+	}
+	return backend.ExecStart(ctx, execID, options)
+}
+
+func (r *delegatingRuntime) ExecInspect(ctx context.Context, workerID string, execID string) (container.ExecInspect, error) {
+	backend, err := r.backendForWorker(ctx, workerID)
+	if err != nil {
+		return container.ExecInspect{}, err
+	}
+	return backend.ExecInspect(ctx, execID)
+}
+
+func (r *delegatingRuntime) Logs(ctx context.Context, workerID string, workloadID string, options container.LogsOptions) (io.ReadCloser, error) {
+	backend, err := r.backendForWorker(ctx, workerID)
+	if err != nil {
+		return nil, err
+	}
+	return backend.Logs(ctx, workloadID, options)
+}
+
+func (r *delegatingRuntime) CopyFrom(ctx context.Context, workerID string, workloadID, srcPath string) (io.ReadCloser, container.PathStat, error) {
+	backend, err := r.backendForWorker(ctx, workerID)
+	if err != nil {
+		return nil, container.PathStat{}, err
+	}
+	return backend.CopyFrom(ctx, workloadID, srcPath)
+}
+
+func (r *delegatingRuntime) CopyTo(ctx context.Context, workerID string, workloadID, dstPath string, content io.Reader, options container.CopyToContainerOptions) error {
+	backend, err := r.backendForWorker(ctx, workerID)
+	if err != nil {
+		return err
+	}
+	return backend.CopyTo(ctx, workloadID, dstPath, content, options)
+}
+
+func (r *delegatingRuntime) ProjectName(summary ContainerSummary) string {
+	workerID := normalizeRuntimeWorkerID(summary.WorkerID)
+	if backend, ok := r.backends[workerID]; ok {
+		return backend.ProjectName(summary)
+	}
+	return strings.TrimSpace(summary.Labels["com.docker.compose.project"])
+}
+
+func (r *delegatingRuntime) ServiceName(summary ContainerSummary) string {
+	workerID := normalizeRuntimeWorkerID(summary.WorkerID)
+	if backend, ok := r.backends[workerID]; ok {
+		return backend.ServiceName(summary)
+	}
+	return strings.TrimSpace(summary.Labels["com.docker.compose.service"])
+}
+
+func (r *delegatingRuntime) ResetWorkload(ctx context.Context, workerID string, target ContainerSummary) (workloadResetResult, bool, error) {
+	backend, err := r.backendForWorker(ctx, workerID)
+	if err != nil {
+		return workloadResetResult{}, false, err
+	}
+	return backend.ResetWorkload(ctx, target)
+}
+
+func (r *dockerRuntime) WorkerID() string {
+	return r.workerID
 }
 
 func (r *dockerRuntime) ListWorkloads(ctx context.Context) ([]ContainerSummary, error) {
@@ -88,6 +315,7 @@ func (r *dockerRuntime) ListWorkloads(ctx context.Context) ([]ContainerSummary, 
 		out = append(out, ContainerSummary{
 			ID:           containerWorkloadID(containerID, labels, names),
 			ContainerID:  containerID,
+			WorkerID:     r.workerID,
 			Names:        names,
 			Image:        strings.TrimSpace(record.Image),
 			State:        dockerCLIStatusState(record.Status),

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { untrack } from "svelte";
 	import CodeEditor from "./CodeEditor.svelte";
 	import {
 		composeDown,
@@ -29,6 +30,7 @@
 	let errorMessage = $state("");
 	let notice = $state("");
 	let statusServiceNames = $state<string[]>([]);
+	let logsViewport = $state<HTMLPreElement | null>(null);
 
 	const stripAnsi = (value: string): string => value.replace(/\x1b\[[0-9;]*[mGKHF]/g, "");
 
@@ -93,8 +95,26 @@
 	);
 
 	$effect(() => {
-		const available = new Set(availableServices);
-		selectedServices = selectedServices.filter((name) => available.has(name));
+		const availableSet = new Set(availableServices);
+		const currentSelected = untrack(() => selectedServices);
+		const nextSelected = currentSelected.filter((name) => availableSet.has(name));
+		if (
+			nextSelected.length === currentSelected.length &&
+			nextSelected.every((name, index) => name === currentSelected[index])
+		) {
+			return;
+		}
+		selectedServices = nextSelected;
+	});
+
+	$effect(() => {
+		logs;
+		if (!logsViewport) return;
+		queueMicrotask(() => {
+			if (logsViewport) {
+				logsViewport.scrollTop = logsViewport.scrollHeight;
+			}
+		});
 	});
 
 	function toggleService(service: string): void {
@@ -138,7 +158,7 @@
 			appendLog(`Starting docker compose up (project: ${request.project_name})...`);
 			let composeError = "";
 
-			await composeUpStream(config, request, (event) => {
+			const result = await composeUpStream(config, request, (event) => {
 				if ((event.event === "stdout" || event.event === "stderr") && event.data.length > 0) {
 					appendLog(event.data);
 				}
@@ -146,6 +166,13 @@
 					composeError = event.data.trim();
 				}
 			});
+
+			if (result.stdout.trim().length > 0) {
+				appendLog(result.stdout);
+			}
+			if (result.stderr.trim().length > 0) {
+				appendLog(result.stderr);
+			}
 
 			if (composeError.length > 0) {
 				throw new Error(composeError);
@@ -320,7 +347,7 @@
 					<span class="pipeline-title">Output</span>
 					<span class="pipeline-step">{loading ? `${step}...` : step}</span>
 				</div>
-				<pre class="pipeline-log">{stripAnsi(logs) || "Waiting for output..."}</pre>
+				<pre bind:this={logsViewport} class="pipeline-log">{stripAnsi(logs) || "Waiting for output..."}</pre>
 			</div>
 		</div>
 	</section>

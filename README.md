@@ -131,6 +131,8 @@ If you need a backup before upgrading, back up `${OPEN_SANDBOX_DATA_DIR}` and an
 
 Operational hardening guidance is in `docs/operations.md`.
 
+Phase 5 small-cluster control-plane and worker protocol notes are in `docs/small-cluster-protocol.md`.
+
 It includes:
 
 - reverse proxy examples for SSE and WebSockets

@@ -90,6 +90,13 @@ type UserStore interface {
 	RevokeRefreshTokenByHash(ctx context.Context, tokenHash string, revokedAt int64) error
 }
 
+type WorkerStore interface {
+	UpsertRuntimeWorker(ctx context.Context, worker store.RuntimeWorker) error
+	GetRuntimeWorker(ctx context.Context, workerID string) (store.RuntimeWorker, error)
+	ListRuntimeWorkers(ctx context.Context) ([]store.RuntimeWorker, error)
+	TouchRuntimeWorkerHeartbeat(ctx context.Context, workerID string, observedAt int64, status string, advertiseAddress string, version string, labels map[string]string) error
+}
+
 type Server struct {
 	docker          DockerAPI
 	runtime         workloadRuntime
@@ -97,6 +104,7 @@ type Server struct {
 	router          *gin.Engine
 	sandboxStore    SandboxStore
 	userStore       UserStore
+	workerStore     WorkerStore
 	logger          *slog.Logger
 	metrics         *operationalMetrics
 	runtimeLimits   runtimeLimits
@@ -114,12 +122,14 @@ type composeProjectContext struct {
 }
 
 const (
+	localRuntimeWorkerID          = "local"
 	labelOpenSandboxManaged       = "open-sandbox.managed"
 	labelOpenSandboxOwnerID       = "open-sandbox.owner_id"
 	labelOpenSandboxOwnerUsername = "open-sandbox.owner_username"
 	labelOpenSandboxKind          = "open-sandbox.kind"
 	labelOpenSandboxManagedID     = "open-sandbox.managed_id"
 	labelOpenSandboxSandboxID     = "open-sandbox.sandbox_id"
+	labelOpenSandboxWorkerID      = "open-sandbox.worker_id"
 	managedKindDirect             = "direct"
 	managedKindSandbox            = "sandbox"
 	composeOwnerMetadataFile      = ".owner.json"
@@ -269,9 +279,13 @@ func NewServerWithStore(dockerClient DockerAPI, authConfig AuthConfig, sandboxSt
 	}))
 
 	var userStore UserStore
+	var workerStore WorkerStore
 	if sandboxStore != nil {
 		if configuredUserStore, ok := sandboxStore.(UserStore); ok {
 			userStore = configuredUserStore
+		}
+		if configuredWorkerStore, ok := sandboxStore.(WorkerStore); ok {
+			workerStore = configuredWorkerStore
 		}
 	}
 
@@ -281,13 +295,15 @@ func NewServerWithStore(dockerClient DockerAPI, authConfig AuthConfig, sandboxSt
 		router:          r,
 		sandboxStore:    sandboxStore,
 		userStore:       userStore,
+		workerStore:     workerStore,
 		logger:          logger,
 		metrics:         newOperationalMetrics(),
 		runtimeLimits:   loadRuntimeLimitsFromEnv(),
 		workspaceRoot:   workspaceRoot,
 		execWaitTimeout: loadExecWaitTimeout(),
 	}
-	s.runtime = newDockerRuntime(dockerClient, func() string { return s.workspaceRoot })
+	s.runtime = newDelegatingRuntime(workerStore, localRuntimeWorkerID, newDockerRuntime(localRuntimeWorkerID, dockerClient, func() string { return s.workspaceRoot }))
+	s.ensureLocalWorkerRegistration(context.Background())
 	s.registerRoutes()
 	return s
 }
@@ -305,6 +321,12 @@ func (s *Server) registerRoutes() {
 	s.router.POST("/auth/refresh", s.refresh)
 	s.router.GET("/auth/session", s.session)
 	s.router.POST("/auth/logout", s.logout)
+	workerControl := s.router.Group("/control")
+	workerControl.Use(s.workerAuthMiddleware())
+	{
+		workerControl.POST("/workers/register", s.registerWorker)
+		workerControl.POST("/workers/:id/heartbeat", s.heartbeatWorker)
+	}
 	secured := s.router.Group("/")
 	secured.Use(s.auth.Middleware())
 
@@ -353,6 +375,7 @@ func (s *Server) registerRoutes() {
 		api.GET("/sandboxes/:id/files", s.readSandboxFile)
 		api.PUT("/sandboxes/:id/files", s.writeSandboxFile)
 
+		api.GET("/admin/workers", s.listWorkers)
 		api.POST("/admin/maintenance/cleanup", s.runMaintenanceCleanup)
 	}
 
@@ -814,7 +837,7 @@ func (s *Server) gitClone(c *gin.Context) {
 	}
 	cmd = append(cmd, req.RepoURL, req.TargetPath)
 
-	execResp, err := s.runContainerExec(c.Request.Context(), req.ContainerID, ExecRequest{Cmd: cmd})
+	execResp, err := s.runContainerExec(c.Request.Context(), localRuntimeWorkerID, req.ContainerID, ExecRequest{Cmd: cmd})
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
@@ -852,7 +875,7 @@ func (s *Server) createContainer(c *gin.Context) {
 		return
 	}
 
-	containerConfig, hostConfig, err := buildDirectContainerConfigs(req, identity.UserID, identity.Username, managedID)
+	containerConfig, hostConfig, err := buildDirectContainerConfigs(req, identity.UserID, identity.Username, managedID, localRuntimeWorkerID)
 	if err != nil {
 		_ = os.Remove(s.directContainerSpecPath(managedID))
 		writeError(c, http.StatusBadRequest, err)
@@ -860,7 +883,7 @@ func (s *Server) createContainer(c *gin.Context) {
 	}
 	s.runtimeLimits.apply(hostConfig)
 
-	created, err := s.createContainerWithAutoPull(c.Request.Context(), req.Image, containerConfig, hostConfig, req.Name)
+	created, err := s.createContainerWithAutoPull(c.Request.Context(), localRuntimeWorkerID, req.Image, containerConfig, hostConfig, req.Name)
 	if err != nil {
 		_ = os.Remove(s.directContainerSpecPath(managedID))
 		s.logLifecycleFailure("create_container", err, slog.String("managed_id", managedID), slog.String("image", req.Image))
@@ -870,7 +893,7 @@ func (s *Server) createContainer(c *gin.Context) {
 
 	started := false
 	if req.Start {
-		if err := s.runtime.StartWorkload(c.Request.Context(), created.ID, container.StartOptions{}); err != nil {
+		if err := s.runtime.StartWorkload(c.Request.Context(), localRuntimeWorkerID, created.ID, container.StartOptions{}); err != nil {
 			s.logLifecycleFailure("start_container", err, slog.String("container_id", created.ID), slog.String("managed_id", managedID))
 			writeError(c, http.StatusInternalServerError, fmt.Errorf("start container: %w", err))
 			return
@@ -915,7 +938,7 @@ func (s *Server) execInContainer(c *gin.Context) {
 		return
 	}
 
-	resp, err := s.runContainerExec(c.Request.Context(), target.ContainerID, req)
+	resp, err := s.runContainerExec(c.Request.Context(), s.workerIDForContainerSummary(target), target.ContainerID, req)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
@@ -943,7 +966,7 @@ func (s *Server) streamLogs(c *gin.Context) {
 
 	follow, _ := strconv.ParseBool(c.DefaultQuery("follow", "true"))
 	tail := c.DefaultQuery("tail", "100")
-	s.streamLogsForContainer(c, target.ContainerID, follow, tail)
+	s.streamLogsForContainer(c, s.workerIDForContainerSummary(target), target.ContainerID, follow, tail)
 }
 
 func (s *Server) streamContainerTerminal(c *gin.Context) {
@@ -953,10 +976,10 @@ func (s *Server) streamContainerTerminal(c *gin.Context) {
 	}
 
 	workdir := strings.TrimSpace(c.Query("workdir"))
-	s.streamTerminalForContainer(c, target.ContainerID, workdir)
+	s.streamTerminalForContainer(c, s.workerIDForContainerSummary(target), target.ContainerID, workdir)
 }
 
-func (s *Server) streamTerminalForContainer(c *gin.Context, containerID string, workdir string) {
+func (s *Server) streamTerminalForContainer(c *gin.Context, workerID string, containerID string, workdir string) {
 	cols := parseTerminalDimension(c.Query("cols"), 120)
 	rows := parseTerminalDimension(c.Query("rows"), 32)
 
@@ -978,7 +1001,7 @@ func (s *Server) streamTerminalForContainer(c *gin.Context, containerID string, 
 	}
 	conn.SetReadLimit(1 << 20)
 
-	execID, attached, err := s.startInteractiveExec(c.Request.Context(), containerID, workdir, cols, rows)
+	execID, attached, err := s.startInteractiveExec(c.Request.Context(), workerID, containerID, workdir, cols, rows)
 	if err != nil {
 		s.logStreamFailure("terminal_exec", err, slog.String("container_id", containerID))
 		_ = conn.WriteControl(
@@ -1044,7 +1067,7 @@ func (s *Server) streamTerminalForContainer(c *gin.Context, containerID string, 
 			if message.Cols == 0 || message.Rows == 0 {
 				continue
 			}
-			if err := s.runtime.ExecResize(c.Request.Context(), execID, container.ResizeOptions{Width: message.Cols, Height: message.Rows}); err != nil {
+			if err := s.runtime.ExecResize(c.Request.Context(), workerID, execID, container.ResizeOptions{Width: message.Cols, Height: message.Rows}); err != nil {
 				cleanup.Do(cleanupSession)
 				return
 			}
@@ -1054,6 +1077,7 @@ func (s *Server) streamTerminalForContainer(c *gin.Context, containerID string, 
 
 func (s *Server) startInteractiveExec(
 	ctx context.Context,
+	workerID string,
 	containerID string,
 	workdir string,
 	cols uint,
@@ -1071,12 +1095,12 @@ func (s *Server) startInteractiveExec(
 		AttachStderr: true,
 	}
 
-	created, err := s.runtime.ExecCreate(ctx, containerID, execConfig)
+	created, err := s.runtime.ExecCreate(ctx, workerID, containerID, execConfig)
 	if err != nil {
 		return "", dockertypes.HijackedResponse{}, fmt.Errorf("create interactive exec: %w", err)
 	}
 
-	attached, err := s.runtime.ExecAttach(ctx, created.ID, container.ExecAttachOptions{Tty: true, ConsoleSize: consoleSize})
+	attached, err := s.runtime.ExecAttach(ctx, workerID, created.ID, container.ExecAttachOptions{Tty: true, ConsoleSize: consoleSize})
 	if err != nil {
 		return "", dockertypes.HijackedResponse{}, fmt.Errorf("attach interactive exec: %w", err)
 	}
@@ -1101,7 +1125,7 @@ func parseTerminalDimension(raw string, fallback uint) uint {
 	return uint(value)
 }
 
-func (s *Server) runContainerExec(ctx context.Context, containerID string, req ExecRequest) (ExecResponse, error) {
+func (s *Server) runContainerExec(ctx context.Context, workerID string, containerID string, req ExecRequest) (ExecResponse, error) {
 	execConfig := container.ExecOptions{
 		Cmd:          req.Cmd,
 		User:         req.User,
@@ -1112,20 +1136,20 @@ func (s *Server) runContainerExec(ctx context.Context, containerID string, req E
 		AttachStderr: !req.Detach,
 	}
 
-	created, err := s.runtime.ExecCreate(ctx, containerID, execConfig)
+	created, err := s.runtime.ExecCreate(ctx, workerID, containerID, execConfig)
 	if err != nil {
 		return ExecResponse{}, fmt.Errorf("create exec: %w", err)
 	}
 
 	if req.Detach {
-		if err := s.runtime.ExecStart(ctx, created.ID, container.ExecStartOptions{Detach: true, Tty: req.TTY}); err != nil {
+		if err := s.runtime.ExecStart(ctx, workerID, created.ID, container.ExecStartOptions{Detach: true, Tty: req.TTY}); err != nil {
 			return ExecResponse{}, fmt.Errorf("start detached exec: %w", err)
 		}
 
 		return ExecResponse{ExecID: created.ID, Detached: true}, nil
 	}
 
-	attached, err := s.runtime.ExecAttach(ctx, created.ID, container.ExecAttachOptions{Tty: req.TTY})
+	attached, err := s.runtime.ExecAttach(ctx, workerID, created.ID, container.ExecAttachOptions{Tty: req.TTY})
 	if err != nil {
 		return ExecResponse{}, fmt.Errorf("attach exec: %w", err)
 	}
@@ -1146,7 +1170,7 @@ func (s *Server) runContainerExec(ctx context.Context, containerID string, req E
 	waitCtx, cancel := context.WithTimeout(ctx, s.execWaitTimeout)
 	defer cancel()
 
-	inspect, err := s.waitForExec(waitCtx, created.ID)
+	inspect, err := s.waitForExec(waitCtx, workerID, created.ID)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return ExecResponse{}, fmt.Errorf("exec did not finish within %s", s.execWaitTimeout)
@@ -1163,12 +1187,12 @@ func (s *Server) runContainerExec(ctx context.Context, containerID string, req E
 	}, nil
 }
 
-func (s *Server) waitForExec(ctx context.Context, execID string) (container.ExecInspect, error) {
+func (s *Server) waitForExec(ctx context.Context, workerID string, execID string) (container.ExecInspect, error) {
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
-		inspect, err := s.runtime.ExecInspect(ctx, execID)
+		inspect, err := s.runtime.ExecInspect(ctx, workerID, execID)
 		if err != nil {
 			return container.ExecInspect{}, fmt.Errorf("inspect exec: %w", err)
 		}
@@ -1267,7 +1291,7 @@ func buildComposeArgs(project composeProjectContext, req ComposeRequest, cmd str
 	return args
 }
 
-func buildDirectContainerConfigs(req CreateContainerRequest, ownerID string, ownerUsername string, managedID string) (*container.Config, *container.HostConfig, error) {
+func buildDirectContainerConfigs(req CreateContainerRequest, ownerID string, ownerUsername string, managedID string, workerID string) (*container.Config, *container.HostConfig, error) {
 	containerConfig := &container.Config{
 		Image:      req.Image,
 		Cmd:        req.Cmd,
@@ -1281,6 +1305,7 @@ func buildDirectContainerConfigs(req CreateContainerRequest, ownerID string, own
 			labelOpenSandboxOwnerUsername: ownerUsername,
 			labelOpenSandboxKind:          managedKindDirect,
 			labelOpenSandboxManagedID:     managedID,
+			labelOpenSandboxWorkerID:      normalizeManagedWorkerID(workerID),
 		},
 	}
 	hostConfig := &container.HostConfig{
