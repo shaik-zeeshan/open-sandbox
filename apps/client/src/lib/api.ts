@@ -152,13 +152,6 @@ export interface ContainerSummary {
 	service_name?: string;
 	resettable: boolean;
 	ports?: PortSummary[];
-	usage?: ResourceUsageSummary;
-}
-
-export interface ResourceUsageSummary {
-	cpu?: string;
-	memory?: string;
-	storage?: string;
 }
 
 export interface PortSummary {

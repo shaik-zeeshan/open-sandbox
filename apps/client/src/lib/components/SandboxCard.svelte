@@ -1,19 +1,12 @@
 <script lang="ts">
 	import type { PortSummary } from "$lib/api";
 
-	type ResourceUsageSummary = {
-		cpu?: string;
-		memory?: string;
-		storage?: string;
-	};
-
 	let {
 		name,
 		image,
 		status,
 		containerId,
 		ports = [],
-		usage,
 		createdAt = null,
 		metaLabel = "",
 		metaValue = "",
@@ -33,7 +26,6 @@
 		status: string;
 		containerId: string;
 		ports?: PortSummary[];
-		usage?: ResourceUsageSummary;
 		createdAt?: number | null;
 		metaLabel?: string;
 		metaValue?: string;
@@ -71,11 +63,6 @@
 	const isRunning = $derived(st.cls === "ok");
 
 	const previewPorts = $derived(previewLinks(ports));
-	const usageEntries = $derived([
-		{ label: "CPU", value: usage?.cpu?.trim() ?? "" },
-		{ label: "MEM", value: usage?.memory?.trim() ?? "" },
-		{ label: "STO", value: usage?.storage?.trim() ?? "" }
-	].filter((entry) => entry.value.length > 0));
 
 	// ── Dropdown menu state ────────────────────────────────────────────────────
 	let menuOpen = $state(false);
@@ -196,23 +183,6 @@
 				<span class="nil">—</span>
 			{/if}
 		</div>
-	</td>
-
-	<!-- Usage — clickable -->
-	<td class="cell cell-usage cell-open" role="button" tabindex="-1"
-		onclick={onOpen}>
-		{#if usageEntries.length > 0}
-			<div class="chips-row">
-				{#each usageEntries as entry (entry.label)}
-					<span class="usage-chip">
-						<span class="usage-key">{entry.label}</span>
-						<span class="usage-val">{entry.value}</span>
-					</span>
-				{/each}
-			</div>
-		{:else}
-			<span class="nil">—</span>
-		{/if}
 	</td>
 
 	<!-- Created — clickable -->
@@ -462,32 +432,6 @@
 		color: var(--text-primary);
 		border-color: var(--border-hi);
 		background: var(--accent-dim);
-	}
-
-	.usage-chip {
-		display: inline-flex;
-		align-items: baseline;
-		gap: 0.28rem;
-		padding: 0.12rem 0.4rem;
-		border-radius: var(--radius-sm);
-		border: 1px solid var(--border-mid);
-		background: var(--bg-overlay);
-		font-family: var(--font-mono);
-		white-space: nowrap;
-		line-height: 1.5;
-	}
-
-	.usage-key {
-		font-size: 0.5rem;
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-		color: var(--text-muted);
-	}
-
-	.usage-val {
-		font-size: 0.62rem;
-		color: var(--text-accent);
-		font-weight: 500;
 	}
 
 	/* ── Date / ID ────────────────────────────────────────────────────────────── */
