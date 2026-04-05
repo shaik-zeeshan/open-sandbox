@@ -4,6 +4,7 @@
 	import { FitAddon } from "@xterm/addon-fit";
 	import "@xterm/xterm/css/xterm.css";
 	import { resolveWebSocketUrl, type ApiConfig } from "$lib/api";
+	import { Context, Effect, Fiber, Layer, type Scope } from "effect";
 
 	type XtermTerminal = import("@xterm/xterm").Terminal;
 
@@ -20,6 +21,7 @@
 	}>();
 
 	type TerminalStatus = "connecting" | "connected" | "disconnected" | "error";
+	type XtermDisposable = { dispose: () => void };
 
 	let viewport = $state<HTMLDivElement | null>(null);
 	let status = $state<TerminalStatus>("connecting");
@@ -27,15 +29,100 @@
 	let terminalReady = $state(false);
 
 	let terminal: XtermTerminal | null = null;
-	let socket: WebSocket | null = null;
+	let terminalInputDisposable: XtermDisposable | null = null;
+	let terminalResizeDisposable: XtermDisposable | null = null;
+	let activeSession: TerminalSession | null = null;
+	let connectionFiber: Fiber.RuntimeFiber<void, unknown> | null = null;
 	let resizeObserver: ResizeObserver | null = null;
 
+	interface TerminalSession {
+		send: (payload: Record<string, unknown>) => Effect.Effect<void>;
+	}
+
+	interface TerminalTransportService {
+		connect: (request: {
+			url: string;
+			onOpen: () => void;
+			onMessage: (event: MessageEvent) => void;
+			onError: () => void;
+			onClose: (event: CloseEvent) => void;
+		}) => Effect.Effect<TerminalSession, Error, Scope.Scope>;
+	}
+
+	const TerminalTransportService = Context.GenericTag<TerminalTransportService>(
+		"sandbox-terminal/TerminalTransportService"
+	);
+
+	const terminalTransportService: TerminalTransportService = {
+		connect: (request) =>
+			Effect.acquireRelease(
+				Effect.async<WebSocket, Error>((resume) => {
+					const ws = new WebSocket(request.url);
+					ws.binaryType = "arraybuffer";
+
+					const handleOpen = () => {
+						cleanup();
+						request.onOpen();
+						resume(Effect.succeed(ws));
+					};
+
+					const handleError = () => {
+						cleanup();
+						request.onError();
+						resume(Effect.fail(new Error("Terminal connection failed.")));
+					};
+
+					const cleanup = (): void => {
+						ws.onopen = null;
+						ws.onerror = null;
+					};
+
+					ws.onopen = handleOpen;
+					ws.onerror = handleError;
+
+					return Effect.sync(() => {
+						cleanup();
+						ws.close();
+					});
+				}),
+				(ws) =>
+					Effect.sync(() => {
+						ws.onmessage = null;
+						ws.onclose = null;
+						ws.onerror = null;
+						if (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN) {
+							ws.close();
+						}
+					})
+			).pipe(
+				Effect.tap((ws) =>
+					Effect.sync(() => {
+						ws.onmessage = request.onMessage;
+						ws.onerror = request.onError;
+						ws.onclose = request.onClose;
+					})
+				),
+				Effect.map((ws) => ({
+					send: (payload) =>
+						Effect.sync(() => {
+							if (ws.readyState === WebSocket.OPEN) {
+								ws.send(JSON.stringify(payload));
+							}
+						})
+				}))
+			)
+	};
+
+	const terminalLayer = Layer.succeed(TerminalTransportService, terminalTransportService);
+
+	const runTerminalProgram = <A>(program: Effect.Effect<A, unknown>): Promise<A> => Effect.runPromise(program);
+
 	const sendMessage = (payload: Record<string, unknown>): void => {
-		if (socket?.readyState !== WebSocket.OPEN) {
+		if (!activeSession) {
 			return;
 		}
 
-		socket.send(JSON.stringify(payload));
+		Effect.runFork(activeSession.send(payload));
 	};
 
 	const sendResize = (): void => {
@@ -47,20 +134,21 @@
 	};
 
 	const disconnect = (): void => {
-		if (socket) {
-			socket.onopen = null;
-			socket.onmessage = null;
-			socket.onerror = null;
-			socket.onclose = null;
-			socket.close();
-			socket = null;
+		if (connectionFiber) {
+			Effect.runFork(Fiber.interruptFork(connectionFiber));
+			connectionFiber = null;
 		}
+		activeSession = null;
 	};
 
 	const teardown = (): void => {
 		disconnect();
 		resizeObserver?.disconnect();
 		resizeObserver = null;
+		terminalInputDisposable?.dispose();
+		terminalInputDisposable = null;
+		terminalResizeDisposable?.dispose();
+		terminalResizeDisposable = null;
 		terminal?.dispose();
 		terminal = null;
 		terminalReady = false;
@@ -120,8 +208,10 @@
 		nextTerminal.open(viewport);
 		nextFitAddon.fit();
 		nextTerminal.focus();
-		nextTerminal.onData((data) => sendMessage({ type: "input", data }));
-		nextTerminal.onResize(() => sendResize());
+		terminalInputDisposable?.dispose();
+		terminalResizeDisposable?.dispose();
+		terminalInputDisposable = nextTerminal.onData((data) => sendMessage({ type: "input", data }));
+		terminalResizeDisposable = nextTerminal.onResize(() => sendResize());
 
 		resizeObserver = new ResizeObserver(() => {
 			nextFitAddon.fit();
@@ -131,6 +221,67 @@
 		terminal = nextTerminal;
 		terminalReady = true;
 	};
+
+	const connectSessionProgram = (): Effect.Effect<void, unknown> =>
+		Effect.gen(function* () {
+			const transport = yield* TerminalTransportService;
+
+			if (!terminal) {
+				return;
+			}
+
+			const session = yield* transport.connect({
+				url: resolveWebSocketUrl(
+					config,
+					`/api/${targetType === "sandbox" ? "sandboxes" : "containers"}/${encodeURIComponent(targetId)}/terminal/ws`,
+					{ cols: terminal.cols, rows: terminal.rows }
+				),
+				onOpen: () => {
+					status = "connected";
+					statusText = workspaceDir.trim().length > 0
+						? `Live shell in ${workspaceDir}`
+						: "Live shell using the container default working directory";
+					terminal?.focus();
+					sendResize();
+				},
+				onMessage: (event) => {
+					if (!terminal) {
+						return;
+					}
+
+					if (event.data instanceof ArrayBuffer) {
+						terminal.write(new Uint8Array(event.data));
+						return;
+					}
+
+					if (event.data instanceof Blob) {
+						void event.data.arrayBuffer().then((buffer) => {
+							if (activeSession && terminal) {
+								terminal.write(new Uint8Array(buffer));
+							}
+						});
+						return;
+					}
+
+					terminal.write(String(event.data));
+				},
+				onError: () => {
+					status = "error";
+					statusText = "Terminal connection failed.";
+				},
+				onClose: (event) => {
+					status = event.wasClean ? "disconnected" : "error";
+					statusText = event.reason.trim() || "Terminal session ended.";
+					activeSession = null;
+				}
+			});
+
+			yield* Effect.sync(() => {
+				activeSession = session;
+			});
+
+			yield* Effect.never;
+		}).pipe(Effect.provide(terminalLayer), Effect.scoped);
 
 	const connect = async (): Promise<void> => {
 		if (!browser) {
@@ -146,67 +297,26 @@
 		status = "connecting";
 		statusText = "Connecting shell...";
 
-		const ws = new WebSocket(
-			resolveWebSocketUrl(config, `/api/${targetType === "sandbox" ? "sandboxes" : "containers"}/${encodeURIComponent(targetId)}/terminal/ws`, {
-				cols: terminal.cols,
-				rows: terminal.rows
-			})
-		);
-		ws.binaryType = "arraybuffer";
-		socket = ws;
-
-		ws.onopen = () => {
-			if (socket !== ws) {
-				return;
-			}
-
-			status = "connected";
-			statusText = workspaceDir.trim().length > 0
-				? `Live shell in ${workspaceDir}`
-				: "Live shell using the container default working directory";
-			terminal?.focus();
-			sendResize();
-		};
-
-		ws.onmessage = (event) => {
-			if (socket !== ws || !terminal) {
-				return;
-			}
-
-			if (event.data instanceof ArrayBuffer) {
-				terminal.write(new Uint8Array(event.data));
-				return;
-			}
-
-			if (event.data instanceof Blob) {
-				void event.data.arrayBuffer().then((buffer) => {
-					if (socket === ws && terminal) {
-						terminal.write(new Uint8Array(buffer));
+		let launchedFiber: Fiber.RuntimeFiber<void, unknown> | null = null;
+		const sessionProgram = connectSessionProgram().pipe(
+			Effect.catchAll((error) =>
+				Effect.sync(() => {
+					status = "error";
+					statusText = error instanceof Error ? error.message : "Terminal connection failed.";
+				})
+			),
+			Effect.ensuring(
+				Effect.sync(() => {
+					if (connectionFiber === launchedFiber) {
+						connectionFiber = null;
+						activeSession = null;
 					}
-				});
-				return;
-			}
+				})
+			)
+		);
 
-			terminal.write(String(event.data));
-		};
-
-		ws.onerror = () => {
-			if (socket !== ws) {
-				return;
-			}
-
-			status = "error";
-			statusText = "Terminal connection failed.";
-		};
-
-		ws.onclose = (event) => {
-			if (socket === ws) {
-				socket = null;
-			}
-
-			status = event.wasClean ? "disconnected" : "error";
-			statusText = event.reason.trim() || "Terminal session ended.";
-		};
+		launchedFiber = Effect.runFork(sessionProgram);
+		connectionFiber = launchedFiber;
 	};
 
 	onMount(() => {

@@ -44,7 +44,6 @@ type ContainerSummary struct {
 	ServiceName  string            `json:"service_name,omitempty"`
 	Resettable   bool              `json:"resettable"`
 	Ports        []PortSummary     `json:"ports,omitempty"`
-	Usage        ResourceUsage     `json:"usage,omitempty"`
 }
 
 type PortSummary struct {
@@ -52,12 +51,6 @@ type PortSummary struct {
 	Public  int    `json:"public,omitempty"`
 	Type    string `json:"type"`
 	IP      string `json:"ip,omitempty"`
-}
-
-type ResourceUsage struct {
-	CPU     string `json:"cpu,omitempty"`
-	Memory  string `json:"memory,omitempty"`
-	Storage string `json:"storage,omitempty"`
 }
 
 type SandboxResponse struct {

@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { page } from "$app/stores";
+	import { writeStorageItem } from "$lib/client/browser";
 
 	type HealthState = "unknown" | "checking" | "ok" | "error";
 
@@ -36,7 +37,7 @@
 
 	function toggleCollapsed() {
 		collapsed = !collapsed;
-		try { localStorage.setItem("sidebar-collapsed", String(collapsed)); } catch {}
+		writeStorageItem("sidebar-collapsed", String(collapsed));
 	}
 
 	const navItems = $derived([

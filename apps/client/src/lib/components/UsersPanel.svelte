@@ -1,16 +1,17 @@
 <script lang="ts">
-	import { onMount } from "svelte";
+	import { getCachedUsers, invalidateUsersCache, refreshCachedUsers } from "$lib/api-cache";
+	import { clearScheduledTimeout, scheduleTimeout, type TimeoutHandle } from "$lib/client/browser";
 	import { toast } from "$lib/toast.svelte";
 	import {
-		createUser,
-		deleteUser,
+		createUser as apiCreateUser,
+		deleteUser as apiDeleteUser,
 		formatApiFailure,
-		listUsers,
 		runApiEffect,
 		type ApiConfig,
 		type UserSummary,
-		updateUserPassword
+		updateUserPassword as apiUpdateUserPassword
 	} from "$lib/api";
+	import { Context, Effect, Layer } from "effect";
 
 	let {
 		config,
@@ -39,81 +40,213 @@
 
 	// Delete confirm
 	let deleteConfirmId = $state<string | null>(null);
-	let deleteTimer: ReturnType<typeof setTimeout> | null = null;
 
-	async function refreshUsers(): Promise<void> {
-		loading = true;
-		try {
-			users = await runApiEffect(listUsers(config));
-		} catch (error) {
+	interface UsersApiService {
+		list: (options?: { force?: boolean }) => Effect.Effect<UserSummary[], unknown>;
+		create: (input: { username: string; password: string; role: string }) => Effect.Effect<void, unknown>;
+		resetPassword: (userId: string, password: string) => Effect.Effect<void, unknown>;
+		remove: (userId: string) => Effect.Effect<void, unknown>;
+	}
+
+	interface UsersFeedbackService {
+		error: (error: unknown) => Effect.Effect<void>;
+		ok: (message: string) => Effect.Effect<void>;
+	}
+
+	interface DeleteConfirmationService {
+		request: (userId: string) => Effect.Effect<boolean>;
+		clear: Effect.Effect<void>;
+	}
+
+	const UsersApiService = Context.GenericTag<UsersApiService>("users-panel/UsersApiService");
+	const UsersFeedbackService = Context.GenericTag<UsersFeedbackService>("users-panel/UsersFeedbackService");
+	const DeleteConfirmationService = Context.GenericTag<DeleteConfirmationService>("users-panel/DeleteConfirmationService");
+
+	const usersApiService: UsersApiService = {
+		list: (options) => (options?.force ? refreshCachedUsers(config) : getCachedUsers(config)),
+		create: (input) =>
+			Effect.promise(() => runApiEffect(apiCreateUser(config, input))).pipe(Effect.asVoid),
+		resetPassword: (userId, password) =>
+			Effect.promise(() => runApiEffect(apiUpdateUserPassword(config, userId, password))).pipe(Effect.asVoid),
+		remove: (userId) =>
+			Effect.promise(() => runApiEffect(apiDeleteUser(config, userId))).pipe(Effect.asVoid)
+	};
+
+	const usersFeedbackService: UsersFeedbackService = {
+		error: (error) => Effect.sync(() => {
 			toast.error(formatApiFailure(error));
-		} finally {
-			loading = false;
-		}
-	}
+		}),
+		ok: (message) => Effect.sync(() => {
+			toast.ok(message);
+		})
+	};
 
-	async function submitCreate(): Promise<void> {
-		createLoading = true;
-		try {
-			await runApiEffect(createUser(config, {
-				username: createUsername,
-				password: createPassword,
-				role: createRole
-			}));
-			createUsername = "";
-			createPassword = "";
-			createRole = "member";
-			toast.ok("User created.");
-			showCreateForm = false;
-			await refreshUsers();
-		} catch (error) {
-			toast.error(formatApiFailure(error));
-		} finally {
-			createLoading = false;
-		}
-	}
+	const deleteConfirmationService: DeleteConfirmationService = (() => {
+		let pendingUserId: string | null = null;
+		let timerHandle: TimeoutHandle | null = null;
 
-	async function submitPasswordReset(userId: string): Promise<void> {
-		resetLoadingUserId = userId;
-		try {
-			await runApiEffect(updateUserPassword(config, userId, resetPasswords[userId] ?? ""));
-			resetPasswords = { ...resetPasswords, [userId]: "" };
-			showResetFor = null;
-			toast.ok("Password updated.");
-		} catch (error) {
-			toast.error(formatApiFailure(error));
-		} finally {
-			resetLoadingUserId = "";
-		}
-	}
-
-	function requestDelete(userId: string): void {
-		if (deleteConfirmId === userId) {
-			// Second click — execute
-			if (deleteTimer) { clearTimeout(deleteTimer); deleteTimer = null; }
-			void removeUser(userId);
-		} else {
-			deleteConfirmId = userId;
-			if (deleteTimer) clearTimeout(deleteTimer);
-			deleteTimer = setTimeout(() => { deleteConfirmId = null; deleteTimer = null; }, 3000);
-		}
-	}
-
-	async function removeUser(userId: string): Promise<void> {
-		try {
-			await runApiEffect(deleteUser(config, userId));
-			toast.ok("User deleted.");
+		const clearPending = (): void => {
+			clearScheduledTimeout(timerHandle);
+			timerHandle = null;
+			pendingUserId = null;
 			deleteConfirmId = null;
-			await refreshUsers();
-		} catch (error) {
-			toast.error(formatApiFailure(error));
-		}
-	}
+		};
+
+		return {
+			request: (userId) =>
+				Effect.sync(() => {
+					if (pendingUserId === userId) {
+						clearPending();
+						return true;
+					}
+
+					clearScheduledTimeout(timerHandle);
+					pendingUserId = userId;
+					deleteConfirmId = userId;
+					timerHandle = scheduleTimeout(() => {
+						pendingUserId = null;
+						deleteConfirmId = null;
+						timerHandle = null;
+					}, 3000);
+					return false;
+				}),
+			clear: Effect.sync(() => {
+				clearPending();
+			})
+		};
+	})();
+
+	const usersPanelLayer = Layer.mergeAll(
+		Layer.succeed(UsersApiService, usersApiService),
+		Layer.succeed(UsersFeedbackService, usersFeedbackService),
+		Layer.succeed(DeleteConfirmationService, deleteConfirmationService)
+	);
+
+	const runUsersProgram = <A>(program: Effect.Effect<A, unknown>): Promise<A> => Effect.runPromise(program);
+
+	const refreshUsersProgram = (options?: { force?: boolean }): Effect.Effect<void, unknown> =>
+		Effect.gen(function* () {
+			const api = yield* UsersApiService;
+			const feedback = yield* UsersFeedbackService;
+
+			yield* Effect.sync(() => {
+				loading = true;
+			});
+
+			try {
+				const listedUsers = yield* api.list(options);
+				yield* Effect.sync(() => {
+					users = listedUsers;
+				});
+			} catch (error) {
+				yield* feedback.error(error);
+			} finally {
+				yield* Effect.sync(() => {
+					loading = false;
+				});
+			}
+		}).pipe(Effect.provide(usersPanelLayer));
+
+	const createUserProgram = (input: { username: string; password: string; role: string }): Effect.Effect<void, unknown> =>
+		Effect.gen(function* () {
+			const api = yield* UsersApiService;
+			const feedback = yield* UsersFeedbackService;
+
+			yield* Effect.sync(() => {
+				createLoading = true;
+			});
+
+			try {
+				yield* api.create(input);
+				yield* invalidateUsersCache(config);
+				yield* Effect.sync(() => {
+					createUsername = "";
+					createPassword = "";
+					createRole = "member";
+					showCreateForm = false;
+				});
+				yield* feedback.ok("User created.");
+				yield* refreshUsersProgram();
+			} catch (error) {
+				yield* feedback.error(error);
+			} finally {
+				yield* Effect.sync(() => {
+					createLoading = false;
+				});
+			}
+		}).pipe(Effect.provide(usersPanelLayer));
+
+	const resetPasswordProgram = (userId: string, password: string): Effect.Effect<void, unknown> =>
+		Effect.gen(function* () {
+			const api = yield* UsersApiService;
+			const feedback = yield* UsersFeedbackService;
+
+			yield* Effect.sync(() => {
+				resetLoadingUserId = userId;
+			});
+
+			try {
+				yield* api.resetPassword(userId, password);
+				yield* Effect.sync(() => {
+					resetPasswords = { ...resetPasswords, [userId]: "" };
+					showResetFor = null;
+				});
+				yield* feedback.ok("Password updated.");
+			} catch (error) {
+				yield* feedback.error(error);
+			} finally {
+				yield* Effect.sync(() => {
+					resetLoadingUserId = "";
+				});
+			}
+		}).pipe(Effect.provide(usersPanelLayer));
+
+	const removeUserProgram = (userId: string): Effect.Effect<void, unknown> =>
+		Effect.gen(function* () {
+			const api = yield* UsersApiService;
+			const feedback = yield* UsersFeedbackService;
+			const deleteConfirmation = yield* DeleteConfirmationService;
+
+			try {
+				yield* api.remove(userId);
+				yield* invalidateUsersCache(config);
+				yield* deleteConfirmation.clear;
+				yield* feedback.ok("User deleted.");
+				yield* refreshUsersProgram();
+			} catch (error) {
+				yield* feedback.error(error);
+			}
+		}).pipe(Effect.provide(usersPanelLayer));
+
+	const requestDeleteProgram = (userId: string): Effect.Effect<void, unknown> =>
+		Effect.gen(function* () {
+			const deleteConfirmation = yield* DeleteConfirmationService;
+			const confirmed = yield* deleteConfirmation.request(userId);
+			if (confirmed) {
+				yield* removeUserProgram(userId);
+			}
+		}).pipe(Effect.provide(usersPanelLayer));
+
+	const refreshUsers = (options?: { force?: boolean }): Promise<void> => runUsersProgram(refreshUsersProgram(options));
+
+	const submitCreate = (): Promise<void> =>
+		runUsersProgram(createUserProgram({
+			username: createUsername,
+			password: createPassword,
+			role: createRole
+		}));
+
+	const submitPasswordReset = (userId: string): Promise<void> =>
+		runUsersProgram(resetPasswordProgram(userId, resetPasswords[userId] ?? ""));
+
+	const requestDelete = (userId: string): Promise<void> => runUsersProgram(requestDeleteProgram(userId));
 
 	const getInitial = (name: string): string => name ? name[0].toUpperCase() : "?";
 
-	onMount(() => {
-		void refreshUsers();
+	$effect(() => {
+		return () => {
+			void runUsersProgram(deleteConfirmationService.clear);
+		};
 	});
 
 	$effect(() => {
@@ -130,7 +263,7 @@
 			<h2 class="users-title">User Accounts</h2>
 		</div>
 		<div class="users-header-actions">
-			<button class="btn-ghost btn-sm" type="button" onclick={() => void refreshUsers()} disabled={loading}>
+			<button class="btn-ghost btn-sm" type="button" onclick={() => void refreshUsers({ force: true })} disabled={loading}>
 				{#if loading}
 					<svg class="spin" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.22-8.56"/></svg>
 				{/if}

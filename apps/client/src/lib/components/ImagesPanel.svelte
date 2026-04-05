@@ -1,20 +1,22 @@
 <script lang="ts">
-	import { onMount } from "svelte";
+	import { getCachedImages, invalidateImagesCache, refreshCachedImages } from "$lib/api-cache";
+	import { clearScheduledTimeout, scheduleTimeout, type TimeoutHandle } from "$lib/client/browser";
 	import { toast } from "$lib/toast.svelte";
 	import Combobox from "./Combobox.svelte";
 	import CodeEditor from "./CodeEditor.svelte";
 	import {
 		buildImageStream,
 		formatApiFailure,
-		listImages,
 		pullImage,
 		removeImage,
 		runApiEffect,
 		searchImages,
 		type ApiConfig,
 		type ImageSearchResult,
-		type ImageSummary
+		type ImageSummary,
+		type StreamEvent
 	} from "$lib/api";
+	import { Context, Effect, Layer } from "effect";
 
 	type ImageCreateMethod = "pull" | "build-context" | "build-inline";
 
@@ -99,47 +101,382 @@
 		return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 	};
 
-	async function refreshImages(): Promise<void> {
-		loading = true;
-		try {
-			images = await runApiEffect(listImages(config));
-		} catch (error) {
+	interface ImagesApiService {
+		list: (options?: { force?: boolean }) => Effect.Effect<ImageSummary[], unknown>;
+		search: (query: string, limit: number) => Effect.Effect<ImageSearchResult[], unknown>;
+		pull: (request: { image: string; tag?: string }) => Effect.Effect<{ output: string; image: string }, unknown>;
+		buildFromContext: (
+			request: { contextPath: string; tag: string },
+			onEvent: (event: StreamEvent) => void
+		) => Effect.Effect<void, unknown>;
+		buildInline: (
+			request: { dockerfileContent: string; tag: string },
+			onEvent: (event: StreamEvent) => void
+		) => Effect.Effect<void, unknown>;
+		remove: (imageId: string) => Effect.Effect<void, unknown>;
+	}
+
+	interface ImagesFeedbackService {
+		error: (error: unknown) => Effect.Effect<void>;
+		ok: (message: string) => Effect.Effect<void>;
+	}
+
+	interface DeleteConfirmationService {
+		request: (imageId: string) => Effect.Effect<boolean>;
+		clear: Effect.Effect<void>;
+	}
+
+	const ImagesApiService = Context.GenericTag<ImagesApiService>("images-panel/ImagesApiService");
+	const ImagesFeedbackService = Context.GenericTag<ImagesFeedbackService>("images-panel/ImagesFeedbackService");
+	const DeleteConfirmationService = Context.GenericTag<DeleteConfirmationService>("images-panel/DeleteConfirmationService");
+
+	const imagesApiService: ImagesApiService = {
+		list: (options) => (options?.force ? refreshCachedImages(config) : getCachedImages(config)),
+		search: (query, limit) => Effect.promise(() => runApiEffect(searchImages(config, query, limit))),
+		pull: (request) => Effect.promise(() => runApiEffect(pullImage(config, request))),
+		buildFromContext: (request, onEvent) =>
+			Effect.promise(() => runApiEffect(buildImageStream(
+				config,
+				{
+					context_path: request.contextPath,
+					dockerfile: "Dockerfile",
+					tag: request.tag
+				},
+				onEvent
+			))).pipe(Effect.asVoid),
+		buildInline: (request, onEvent) =>
+			Effect.promise(() => runApiEffect(buildImageStream(
+				config,
+				{
+					dockerfile: "Dockerfile",
+					dockerfile_content: request.dockerfileContent,
+					tag: request.tag
+				},
+				onEvent
+			))).pipe(Effect.asVoid),
+		remove: (imageId) =>
+			Effect.promise(() => runApiEffect(removeImage(config, imageId, false))).pipe(Effect.asVoid)
+	};
+
+	const imagesFeedbackService: ImagesFeedbackService = {
+		error: (error) => Effect.sync(() => {
 			toast.error(formatApiFailure(error));
-		} finally {
-			loading = false;
-		}
-	}
+		}),
+		ok: (message) => Effect.sync(() => {
+			toast.ok(message);
+		})
+	};
 
-	async function runImageSearch(queryOverride?: string): Promise<void> {
-		const query = (queryOverride ?? createPullSearchQuery).trim();
-		createPullSearchError = "";
-		if (query.length === 0) {
-			createPullSearchResults = [];
-			createPullSelectedImage = "";
-			createPullSearchError = "Search query is required.";
-			return;
-		}
+	const deleteConfirmationService: DeleteConfirmationService = (() => {
+		let pendingImageId: string | null = null;
+		let timerHandle: TimeoutHandle | null = null;
 
-		createPullSearchLoading = true;
-		try {
-			const results = await runApiEffect(searchImages(config, query, 25));
-			createPullSearchResults = results;
-			const exactMatch = results.find((result) => result.name === createPullImage.trim()) ?? results[0] ?? null;
-			createPullSelectedImage = exactMatch?.name ?? "";
-			if (exactMatch !== null) {
-				createPullImage = exactMatch.name;
+		const clearPending = (): void => {
+			clearScheduledTimeout(timerHandle);
+			timerHandle = null;
+			pendingImageId = null;
+			deleteConfirmId = null;
+		};
+
+		return {
+			request: (imageId) =>
+				Effect.sync(() => {
+					if (pendingImageId === imageId) {
+						clearPending();
+						return true;
+					}
+
+					clearScheduledTimeout(timerHandle);
+					pendingImageId = imageId;
+					deleteConfirmId = imageId;
+					timerHandle = scheduleTimeout(() => {
+						pendingImageId = null;
+						deleteConfirmId = null;
+						timerHandle = null;
+					}, 3000);
+					return false;
+				}),
+			clear: Effect.sync(() => {
+				clearPending();
+			})
+		};
+	})();
+
+	const imagesPanelLayer = Layer.mergeAll(
+		Layer.succeed(ImagesApiService, imagesApiService),
+		Layer.succeed(ImagesFeedbackService, imagesFeedbackService),
+		Layer.succeed(DeleteConfirmationService, deleteConfirmationService)
+	);
+
+	const runImagesProgram = <A>(program: Effect.Effect<A, unknown>): Promise<A> => Effect.runPromise(program);
+
+	const refreshImagesProgram = (options?: { force?: boolean }): Effect.Effect<void, unknown> =>
+		Effect.gen(function* () {
+			const api = yield* ImagesApiService;
+			const feedback = yield* ImagesFeedbackService;
+
+			yield* Effect.sync(() => {
+				loading = true;
+			});
+
+			try {
+				const listedImages = yield* api.list(options);
+				yield* Effect.sync(() => {
+					images = listedImages;
+				});
+			} catch (error) {
+				yield* feedback.error(error);
+			} finally {
+				yield* Effect.sync(() => {
+					loading = false;
+				});
 			}
-			if (results.length === 0) {
-				createPullSearchError = `No Docker Hub results for ${query}.`;
+		}).pipe(Effect.provide(imagesPanelLayer));
+
+	const runImageSearchProgram = (queryOverride?: string): Effect.Effect<void, unknown> =>
+		Effect.gen(function* () {
+			const api = yield* ImagesApiService;
+			const query = (queryOverride ?? createPullSearchQuery).trim();
+
+			yield* Effect.sync(() => {
+				createPullSearchError = "";
+			});
+
+			if (query.length === 0) {
+				yield* Effect.sync(() => {
+					createPullSearchResults = [];
+					createPullSelectedImage = "";
+					createPullSearchError = "Search query is required.";
+				});
+				return;
 			}
-		} catch (error) {
-			createPullSearchResults = [];
-			createPullSelectedImage = "";
-			createPullSearchError = formatApiFailure(error);
-		} finally {
-			createPullSearchLoading = false;
-		}
-	}
+
+			yield* Effect.sync(() => {
+				createPullSearchLoading = true;
+			});
+
+			try {
+				const results = yield* api.search(query, 25);
+				yield* Effect.sync(() => {
+					createPullSearchResults = results;
+					const exactMatch = results.find((result) => result.name === createPullImage.trim()) ?? results[0] ?? null;
+					createPullSelectedImage = exactMatch?.name ?? "";
+					if (exactMatch !== null) {
+						createPullImage = exactMatch.name;
+					}
+					if (results.length === 0) {
+						createPullSearchError = `No Docker Hub results for ${query}.`;
+					}
+				});
+			} catch (error) {
+				yield* Effect.sync(() => {
+					createPullSearchResults = [];
+					createPullSelectedImage = "";
+					createPullSearchError = formatApiFailure(error);
+				});
+			} finally {
+				yield* Effect.sync(() => {
+					createPullSearchLoading = false;
+				});
+			}
+		}).pipe(Effect.provide(imagesPanelLayer));
+
+	const handleBuildStreamEvent = (
+		event: StreamEvent,
+		onError: (errorMessage: string) => void
+	): Effect.Effect<void> =>
+		Effect.sync(() => {
+			if ((event.event === "stdout" || event.event === "stderr") && event.data.length > 0) {
+				appendCreateLog(event.data);
+			}
+			if (event.event === "error") {
+				onError(event.data.trim());
+			}
+			if (event.event === "done" && event.data.trim().length > 0) {
+				appendCreateLog(`Image ready: ${event.data.trim()}`);
+			}
+		});
+
+	const pullImageProgram = (): Effect.Effect<void, unknown> =>
+		Effect.gen(function* () {
+			const api = yield* ImagesApiService;
+			const feedback = yield* ImagesFeedbackService;
+
+			const imageName = createPullImage.trim();
+			const imageTag = createPullTag.trim();
+			if (imageName.length === 0) {
+				throw new Error("Image name is required for pull.");
+			}
+
+			const resolvedImage = imageTag.length > 0 ? `${imageName}:${imageTag}` : imageName;
+			yield* Effect.sync(() => {
+				createResolvedImage = resolvedImage;
+				createStep = "Pulling image";
+				appendCreateLog(`Pulling ${resolvedImage}`);
+			});
+
+			const pulled = yield* api.pull({
+				image: imageName,
+				tag: imageTag || undefined
+			});
+
+			yield* Effect.sync(() => {
+				appendCreateLog(pulled.output);
+				appendCreateLog(`Image ready: ${pulled.image}`);
+			});
+			yield* feedback.ok(`Image ready: ${pulled.image}`);
+		}).pipe(Effect.provide(imagesPanelLayer));
+
+	const buildImageFromContextProgram = (): Effect.Effect<void, unknown> =>
+		Effect.gen(function* () {
+			const api = yield* ImagesApiService;
+			const feedback = yield* ImagesFeedbackService;
+
+			const contextPath = createBuildContextPath.trim();
+			const tag = createBuildTag.trim();
+			if (contextPath.length === 0) {
+				throw new Error("Context path is required for image build.");
+			}
+			if (tag.length === 0) {
+				throw new Error("Image tag is required for image build.");
+			}
+
+			yield* Effect.sync(() => {
+				createResolvedImage = tag;
+				createStep = "Building image";
+				appendCreateLog(`Building ${tag} from ${contextPath}`);
+			});
+
+			let buildError = "";
+			yield* api.buildFromContext(
+				{ contextPath, tag },
+				(event) => {
+					Effect.runSync(handleBuildStreamEvent(event, (errorMessage) => {
+						buildError = errorMessage;
+					}));
+				}
+			);
+
+			if (buildError.length > 0) {
+				throw new Error(buildError);
+			}
+
+			yield* feedback.ok(`Image ready: ${tag}`);
+		}).pipe(Effect.provide(imagesPanelLayer));
+
+	const buildImageInlineProgram = (): Effect.Effect<void, unknown> =>
+		Effect.gen(function* () {
+			const api = yield* ImagesApiService;
+			const feedback = yield* ImagesFeedbackService;
+
+			const dockerfileContent = createInlineContent.trim();
+			const tag = createInlineTag.trim();
+			if (dockerfileContent.length === 0) {
+				throw new Error("Dockerfile content is required.");
+			}
+			if (tag.length === 0) {
+				throw new Error("Image tag is required for inline build.");
+			}
+
+			yield* Effect.sync(() => {
+				createResolvedImage = tag;
+				createStep = "Building image";
+				appendCreateLog(`Building ${tag} from inline Dockerfile`);
+			});
+
+			let buildError = "";
+			yield* api.buildInline(
+				{ dockerfileContent, tag },
+				(event) => {
+					Effect.runSync(handleBuildStreamEvent(event, (errorMessage) => {
+						buildError = errorMessage;
+					}));
+				}
+			);
+
+			if (buildError.length > 0) {
+				throw new Error(buildError);
+			}
+
+			yield* feedback.ok(`Image ready: ${tag}`);
+		}).pipe(Effect.provide(imagesPanelLayer));
+
+	const submitCreateProgram = (): Effect.Effect<void, unknown> =>
+		Effect.gen(function* () {
+			const feedback = yield* ImagesFeedbackService;
+
+			yield* Effect.sync(() => {
+				createLoading = true;
+				resetPipelineState();
+				createStep = "Preparing";
+			});
+
+			try {
+				if (createMethod === "pull") {
+					yield* pullImageProgram();
+				}
+				if (createMethod === "build-context") {
+					yield* buildImageFromContextProgram();
+				}
+				if (createMethod === "build-inline") {
+					yield* buildImageInlineProgram();
+				}
+
+				yield* Effect.sync(() => {
+					createStep = "Done";
+				});
+				yield* invalidateImagesCache(config);
+				yield* refreshImagesProgram();
+			} catch (error) {
+				yield* feedback.error(error);
+			} finally {
+				yield* Effect.sync(() => {
+					createLoading = false;
+				});
+			}
+		}).pipe(Effect.provide(imagesPanelLayer));
+
+	const removeImageProgram = (image: ImageSummary): Effect.Effect<void, unknown> =>
+		Effect.gen(function* () {
+			const api = yield* ImagesApiService;
+			const feedback = yield* ImagesFeedbackService;
+			const deleteConfirmation = yield* DeleteConfirmationService;
+
+			yield* Effect.sync(() => {
+				loading = true;
+			});
+
+			try {
+				yield* deleteConfirmation.clear;
+				yield* api.remove(image.id);
+				yield* invalidateImagesCache(config);
+				yield* feedback.ok("Image removed.");
+				yield* refreshImagesProgram();
+			} catch (error) {
+				yield* feedback.error(error);
+			} finally {
+				yield* Effect.sync(() => {
+					loading = false;
+				});
+			}
+		}).pipe(Effect.provide(imagesPanelLayer));
+
+	const submitDeleteProgram = (image: ImageSummary): Effect.Effect<void, unknown> =>
+		Effect.gen(function* () {
+			const deleteConfirmation = yield* DeleteConfirmationService;
+
+			const confirmed = yield* deleteConfirmation.request(image.id);
+			if (!confirmed) {
+				return;
+			}
+
+			yield* removeImageProgram(image);
+		}).pipe(Effect.provide(imagesPanelLayer));
+
+	const refreshImages = (options?: { force?: boolean }): Promise<void> => runImagesProgram(refreshImagesProgram(options));
+
+	const runImageSearch = (queryOverride?: string): Promise<void> =>
+		runImagesProgram(runImageSearchProgram(queryOverride));
 
 	function selectPullSearchImage(imageName: string): void {
 		createPullSelectedImage = imageName;
@@ -148,147 +485,14 @@
 		}
 	}
 
-	async function submitCreate(): Promise<void> {
-		createLoading = true;
-		resetPipelineState();
-		createStep = "Preparing";
+	const submitCreate = (): Promise<void> => runImagesProgram(submitCreateProgram());
 
-		try {
-			if (createMethod === "pull") {
-				const imageName = createPullImage.trim();
-				const imageTag = createPullTag.trim();
-				if (imageName.length === 0) {
-					throw new Error("Image name is required for pull.");
-				}
+	const submitDelete = (image: ImageSummary): Promise<void> => runImagesProgram(submitDeleteProgram(image));
 
-				const resolvedImage = imageTag.length > 0 ? `${imageName}:${imageTag}` : imageName;
-				createResolvedImage = resolvedImage;
-				createStep = "Pulling image";
-				appendCreateLog(`Pulling ${resolvedImage}`);
-				const pulled = await runApiEffect(
-					pullImage(config, {
-						image: imageName,
-						tag: imageTag || undefined
-					})
-				);
-				appendCreateLog(pulled.output);
-				appendCreateLog(`Image ready: ${pulled.image}`);
-				toast.ok(`Image ready: ${pulled.image}`);
-			}
-
-			if (createMethod === "build-context") {
-				const contextPath = createBuildContextPath.trim();
-				const tag = createBuildTag.trim();
-				if (contextPath.length === 0) {
-					throw new Error("Context path is required for image build.");
-				}
-				if (tag.length === 0) {
-					throw new Error("Image tag is required for image build.");
-				}
-
-				createResolvedImage = tag;
-				createStep = "Building image";
-				appendCreateLog(`Building ${tag} from ${contextPath}`);
-				let buildError = "";
-				await buildImageStream(
-					config,
-					{
-						context_path: contextPath,
-						dockerfile: "Dockerfile",
-						tag
-					},
-					(event) => {
-						if ((event.event === "stdout" || event.event === "stderr") && event.data.length > 0) {
-							appendCreateLog(event.data);
-						}
-						if (event.event === "error") {
-							buildError = event.data.trim();
-						}
-						if (event.event === "done" && event.data.trim().length > 0) {
-							appendCreateLog(`Image ready: ${event.data.trim()}`);
-						}
-					}
-				);
-				if (buildError.length > 0) {
-					throw new Error(buildError);
-				}
-				toast.ok(`Image ready: ${tag}`);
-			}
-
-			if (createMethod === "build-inline") {
-				const dockerfileContent = createInlineContent.trim();
-				const tag = createInlineTag.trim();
-				if (dockerfileContent.length === 0) {
-					throw new Error("Dockerfile content is required.");
-				}
-				if (tag.length === 0) {
-					throw new Error("Image tag is required for inline build.");
-				}
-
-				createResolvedImage = tag;
-				createStep = "Building image";
-				appendCreateLog(`Building ${tag} from inline Dockerfile`);
-				let buildError = "";
-				await buildImageStream(
-					config,
-					{
-						dockerfile: "Dockerfile",
-						dockerfile_content: dockerfileContent,
-						tag
-					},
-					(event) => {
-						if ((event.event === "stdout" || event.event === "stderr") && event.data.length > 0) {
-							appendCreateLog(event.data);
-						}
-						if (event.event === "error") {
-							buildError = event.data.trim();
-						}
-						if (event.event === "done" && event.data.trim().length > 0) {
-							appendCreateLog(`Image ready: ${event.data.trim()}`);
-						}
-					}
-				);
-				if (buildError.length > 0) {
-					throw new Error(buildError);
-				}
-				toast.ok(`Image ready: ${tag}`);
-			}
-
-			createStep = "Done";
-			await refreshImages();
-		} catch (error) {
-			toast.error(formatApiFailure(error));
-		} finally {
-			createLoading = false;
-		}
-	}
-
-	async function submitDelete(image: ImageSummary): Promise<void> {
-		if (deleteConfirmId !== image.id) {
-			deleteConfirmId = image.id;
-			setTimeout(() => {
-				if (deleteConfirmId === image.id) {
-					deleteConfirmId = null;
-				}
-			}, 3000);
-			return;
-		}
-
-		loading = true;
-		deleteConfirmId = null;
-		try {
-			await runApiEffect(removeImage(config, image.id, false));
-			toast.ok("Image removed.");
-			await refreshImages();
-		} catch (error) {
-			toast.error(formatApiFailure(error));
-		} finally {
-			loading = false;
-		}
-	}
-
-	onMount(() => {
-		void refreshImages();
+	$effect(() => {
+		return () => {
+			void runImagesProgram(deleteConfirmationService.clear);
+		};
 	});
 
 	$effect(() => {
@@ -309,7 +513,7 @@
 			<p class="section-label">Build</p>
 			<h1 class="images-title">Images</h1>
 		</div>
-		<button class="btn-ghost btn-sm" type="button" onclick={() => void refreshImages()} disabled={loading}>
+		<button class="btn-ghost btn-sm" type="button" onclick={() => void refreshImages({ force: true })} disabled={loading}>
 			{loading ? "Refreshing..." : "Refresh"}
 		</button>
 	</div>

@@ -1,5 +1,12 @@
 <script lang="ts">
+	import { invalidateWorkloadCaches } from "$lib/api-cache";
 	import { onDestroy, onMount, tick } from "svelte";
+	import {
+		clearScheduledTimeout,
+		dispatchAuthErrorEvent,
+		scheduleTimeout,
+		type TimeoutHandle
+	} from "$lib/client/browser";
 	import { toast } from "$lib/toast.svelte";
 	import SandboxTerminal from "$lib/components/SandboxTerminal.svelte";
 	import AnsiToHtml from "ansi-to-html";
@@ -27,6 +34,7 @@
 		type PortSummary,
 		type Sandbox
 	} from "$lib/api";
+	import { Context, Effect, Fiber, Layer, type Scope } from "effect";
 
 	type WorkspaceTab = "overview" | "terminal" | "files" | "logs";
 
@@ -85,24 +93,203 @@
 	let logFollow = $state(true);
 	let logEntries = $state<Array<{ stream: string; line: string; html: string }>>([]);
 	let logsViewport = $state<HTMLDivElement | null>(null);
-	let logsAbortController: AbortController | null = null;
+	let logsFiber: Fiber.RuntimeFiber<void, unknown> | null = null;
 	let streaming = $state(false);
 
 	// Actions
 	let actionLoading = $state<string | null>(null);
 	let deleteConfirm = $state(false);
-	let deleteConfirmTimer: ReturnType<typeof setTimeout> | null = null;
+	let deleteConfirmTimer: TimeoutHandle | null = null;
 
 	function requestDelete(): void {
 		if (deleteConfirm) {
-			if (deleteConfirmTimer) { clearTimeout(deleteConfirmTimer); deleteConfirmTimer = null; }
+			if (deleteConfirmTimer) {
+				clearScheduledTimeout(deleteConfirmTimer);
+				deleteConfirmTimer = null;
+			}
 			void handleAction("delete");
 		} else {
 			deleteConfirm = true;
-			if (deleteConfirmTimer) clearTimeout(deleteConfirmTimer);
-			deleteConfirmTimer = setTimeout(() => { deleteConfirm = false; deleteConfirmTimer = null; }, 3000);
+			clearScheduledTimeout(deleteConfirmTimer);
+			deleteConfirmTimer = scheduleTimeout(() => {
+				deleteConfirm = false;
+				deleteConfirmTimer = null;
+			}, 3000);
 		}
 	}
+
+	type LogEntry = { stream: string; line: string };
+
+	interface WorkspaceFileIoService {
+		read: (path: string) => Effect.Effect<FileReadResponse, unknown>;
+		save: (path: string, content: string) => Effect.Effect<void, unknown>;
+		upload: (path: string, file: File) => Effect.Effect<void, unknown>;
+	}
+
+	interface WorkspaceLogStreamService {
+		stream: (request: {
+			follow: boolean;
+			tail: string;
+			onEntry: (entry: LogEntry) => void;
+		}) => Effect.Effect<void, unknown, Scope.Scope>;
+	}
+
+	interface WorkspaceFeedbackService {
+		error: (error: unknown) => Effect.Effect<void>;
+		ok: (message: string) => Effect.Effect<void>;
+	}
+
+	const WorkspaceFileIoService = Context.GenericTag<WorkspaceFileIoService>(
+		"sandbox-workspace/WorkspaceFileIoService"
+	);
+	const WorkspaceLogStreamService = Context.GenericTag<WorkspaceLogStreamService>(
+		"sandbox-workspace/WorkspaceLogStreamService"
+	);
+	const WorkspaceFeedbackService = Context.GenericTag<WorkspaceFeedbackService>(
+		"sandbox-workspace/WorkspaceFeedbackService"
+	);
+
+	const workspaceFileIoService: WorkspaceFileIoService = {
+		read: (path) =>
+			Effect.promise(() =>
+				workloadKind === "sandbox"
+					? runApiEffect(readSandboxFile(config, targetId, path))
+					: runApiEffect(readContainerFile(config, backingContainerId, path))
+			),
+		save: (path, content) =>
+			Effect.promise(() =>
+				workloadKind === "sandbox"
+					? runApiEffect(saveSandboxFile(config, targetId, path, content))
+					: runApiEffect(saveContainerFile(config, backingContainerId, path, content))
+			).pipe(Effect.asVoid),
+		upload: (path, file) =>
+			Effect.promise(() =>
+				workloadKind === "sandbox"
+					? runApiEffect(uploadSandboxFile(config, targetId, path, file))
+					: runApiEffect(uploadContainerFile(config, backingContainerId, path, file))
+			).pipe(Effect.asVoid)
+	};
+
+	const workspaceLogStreamService: WorkspaceLogStreamService = {
+		stream: ({ follow, tail, onEntry }) =>
+			Effect.gen(function* () {
+				const controller = yield* Effect.acquireRelease(
+					Effect.sync(() => new AbortController()),
+					(value) => Effect.sync(() => value.abort())
+				);
+
+				const headers = new Headers();
+				const token = config.token?.trim() ?? "";
+				if (token.length > 0) {
+					headers.set("Authorization", `Bearer ${token}`);
+				}
+
+				const response = yield* Effect.tryPromise({
+					try: () =>
+						fetch(
+							resolveApiUrl(
+								config,
+								`/api/${workloadKind === "sandbox" ? "sandboxes" : "containers"}/${encodeURIComponent(targetId)}/logs`,
+								{ follow, tail: tail.trim() || "100" }
+							),
+							{ credentials: "include", headers, signal: controller.signal }
+						),
+					catch: (error) => (error instanceof Error ? error : new Error("Failed to stream logs."))
+				});
+
+				if (response.status === 401) {
+					yield* Effect.sync(() => {
+						dispatchAuthErrorEvent();
+					});
+				}
+
+				if (!response.ok || response.body === null) {
+					return yield* Effect.fail(new Error(`Unable to stream logs: HTTP ${response.status}`));
+				}
+
+				const reader = response.body.getReader();
+				const decoder = new TextDecoder();
+				let buffer = "";
+
+				const parseSseBlock = (block: string): LogEntry | null => {
+					const lines = block
+						.split("\n")
+						.map((line) => line.trimEnd())
+						.filter((line) => line.length > 0);
+					if (lines.length === 0) {
+						return null;
+					}
+
+					let eventName = "info";
+					const data: string[] = [];
+					for (const line of lines) {
+						if (line.startsWith("event:")) {
+							eventName = line.slice(6).trim() || "info";
+							continue;
+						}
+						if (line.startsWith("data:")) {
+							data.push(line.slice(5).trimStart());
+						}
+					}
+
+					const message = data.join("\n");
+					return message.length > 0 ? { stream: eventName, line: message } : null;
+				};
+
+				const consumeSseBuffer = (pending: string): string => {
+					const normalized = pending.replace(/\r\n/g, "\n");
+					const chunks = normalized.split("\n\n");
+					const remainder = chunks.pop() ?? "";
+					for (const chunk of chunks) {
+						const parsed = parseSseBlock(chunk);
+						if (parsed !== null) {
+							onEntry(parsed);
+						}
+					}
+					return remainder;
+				};
+
+				while (true) {
+					const chunk = yield* Effect.tryPromise({
+						try: () => reader.read(),
+						catch: (error) => (error instanceof Error ? error : new Error("Failed to read logs stream."))
+					});
+
+					if (chunk.done) {
+						break;
+					}
+
+					buffer += decoder.decode(chunk.value, { stream: true });
+					buffer = consumeSseBuffer(buffer);
+				}
+
+				if (buffer.trim().length > 0) {
+					const parsed = parseSseBlock(buffer);
+					if (parsed !== null) {
+						onEntry(parsed);
+					}
+				}
+			})
+	};
+
+	const workspaceFeedbackService: WorkspaceFeedbackService = {
+		error: (error) =>
+			Effect.sync(() => {
+				toast.error(formatApiFailure(error));
+			}),
+		ok: (message) =>
+			Effect.sync(() => {
+				toast.ok(message);
+			})
+	};
+
+	const workspaceLayer = Layer.mergeAll(
+		Layer.succeed(WorkspaceFileIoService, workspaceFileIoService),
+		Layer.succeed(WorkspaceLogStreamService, workspaceLogStreamService),
+		Layer.succeed(WorkspaceFeedbackService, workspaceFeedbackService)
+	);
+
+	const runWorkspaceProgram = <A>(program: Effect.Effect<A, unknown>): Promise<A> => Effect.runPromise(program);
 
 	const directoryEntries = $derived(filePayload?.kind === "directory" ? filePayload.entries ?? [] : []);
 
@@ -171,123 +358,165 @@
 		});
 	});
 
+	const loadPathProgram = (pathToLoad: string): Effect.Effect<void, unknown> =>
+		Effect.gen(function* () {
+			const fileIo = yield* WorkspaceFileIoService;
+			const feedback = yield* WorkspaceFeedbackService;
+
+			yield* Effect.sync(() => {
+				readLoading = true;
+			});
+
+			const normalizedPath = pathToLoad.trim();
+			try {
+				const payload = yield* fileIo.read(normalizedPath);
+				yield* Effect.sync(() => {
+					filePayload = payload;
+					browsePath = normalizedPath;
+					editorContent = payload.kind === "file" ? payload.content ?? "" : "";
+				});
+			} catch (error) {
+				yield* feedback.error(error);
+			} finally {
+				yield* Effect.sync(() => {
+					readLoading = false;
+				});
+			}
+		}).pipe(Effect.provide(workspaceLayer));
+
+	const saveFileProgram = (): Effect.Effect<void, unknown> =>
+		Effect.gen(function* () {
+			const fileIo = yield* WorkspaceFileIoService;
+			const feedback = yield* WorkspaceFeedbackService;
+
+			if (filePayload?.kind !== "file") {
+				return;
+			}
+
+			yield* Effect.sync(() => {
+				saveLoading = true;
+			});
+
+			try {
+				yield* fileIo.save(browsePath, editorContent);
+				yield* feedback.ok("File saved.");
+				yield* Effect.sync(() => {
+					if (filePayload?.kind === "file") {
+						filePayload = { ...filePayload, content: editorContent };
+					}
+				});
+			} catch (error) {
+				yield* feedback.error(error);
+			} finally {
+				yield* Effect.sync(() => {
+					saveLoading = false;
+				});
+			}
+		}).pipe(Effect.provide(workspaceLayer));
+
+	const uploadFileProgram = (): Effect.Effect<void, unknown> =>
+		Effect.gen(function* () {
+			const fileIo = yield* WorkspaceFileIoService;
+			const feedback = yield* WorkspaceFeedbackService;
+
+			if (uploadFile === null) {
+				return;
+			}
+
+			yield* Effect.sync(() => {
+				uploadLoading = true;
+			});
+
+			try {
+				yield* fileIo.upload(uploadPath.trim(), uploadFile);
+				yield* feedback.ok("File uploaded.");
+				yield* loadPathProgram(filePayload?.kind === "directory" ? browsePath : parentPath(uploadPath));
+			} catch (error) {
+				yield* feedback.error(error);
+			} finally {
+				yield* Effect.sync(() => {
+					uploadLoading = false;
+				});
+			}
+		}).pipe(Effect.provide(workspaceLayer));
+
+	const startLogsProgram = (): Effect.Effect<void, unknown> =>
+		Effect.gen(function* () {
+			const logs = yield* WorkspaceLogStreamService;
+			const feedback = yield* WorkspaceFeedbackService;
+
+			yield* Effect.scoped(
+				logs.stream({
+					follow: logFollow,
+					tail: logTail,
+					onEntry: (entry) => {
+						const html = ansiToHtml(entry.line);
+						logEntries = [...logEntries.slice(-399), { stream: entry.stream, line: entry.line, html }];
+					}
+				})
+			).pipe(
+				Effect.catchAll((error) => {
+					if (error instanceof DOMException && error.name === "AbortError") {
+						return Effect.void;
+					}
+					return feedback.error(error);
+				})
+			);
+		}).pipe(Effect.provide(workspaceLayer));
+
 	// Load the workspace dir on mount
 	onMount(() => {
 		const initialWorkspaceDir = workspaceDirValue;
 		browsePath = initialWorkspaceDir;
 		uploadPath = defaultUploadPath(initialWorkspaceDir);
-		void loadPath(initialWorkspaceDir);
+		void runWorkspaceProgram(loadPathProgram(initialWorkspaceDir));
 	});
 
-	onDestroy(() => { stopLogs(); });
+	onDestroy(() => {
+		stopLogs();
+		clearScheduledTimeout(deleteConfirmTimer);
+		deleteConfirmTimer = null;
+	});
 
 	async function loadPath(pathToLoad: string): Promise<void> {
-		readLoading = true;
-		try {
-			filePayload = workloadKind === "sandbox"
-				? await readSandboxFile(config, targetId, pathToLoad.trim())
-				: await readContainerFile(config, backingContainerId, pathToLoad.trim());
-			browsePath = pathToLoad.trim();
-			editorContent = filePayload.kind === "file" ? filePayload.content ?? "" : "";
-		} catch (error) {
-			toast.error(formatApiFailure(error));
-		} finally {
-			readLoading = false;
-		}
+		await runWorkspaceProgram(loadPathProgram(pathToLoad));
 	}
 
 	async function submitSaveFile(): Promise<void> {
-		if (filePayload?.kind !== "file") return;
-		saveLoading = true;
-		try {
-			if (workloadKind === "sandbox") {
-				await saveSandboxFile(config, targetId, browsePath, editorContent);
-			} else {
-				await saveContainerFile(config, backingContainerId, browsePath, editorContent);
-			}
-			toast.ok("File saved.");
-			filePayload = { ...filePayload, content: editorContent };
-		} catch (error) {
-			toast.error(formatApiFailure(error));
-		} finally {
-			saveLoading = false;
-		}
+		await runWorkspaceProgram(saveFileProgram());
 	}
 
 	async function submitUploadFile(): Promise<void> {
-		if (uploadFile === null) return;
-		uploadLoading = true;
-		try {
-			if (workloadKind === "sandbox") {
-				await uploadSandboxFile(config, targetId, uploadPath.trim(), uploadFile);
-			} else {
-				await uploadContainerFile(config, backingContainerId, uploadPath.trim(), uploadFile);
-			}
-			toast.ok("File uploaded.");
-			await loadPath(filePayload?.kind === "directory" ? browsePath : parentPath(uploadPath));
-		} catch (error) {
-			toast.error(formatApiFailure(error));
-		} finally {
-			uploadLoading = false;
-		}
+		await runWorkspaceProgram(uploadFileProgram());
 	}
 
 	function stopLogs(): void {
-		if (logsAbortController) { logsAbortController.abort(); logsAbortController = null; }
+		if (logsFiber) {
+			Effect.runFork(Fiber.interruptFork(logsFiber));
+			logsFiber = null;
+		}
 		streaming = false;
 	}
 
 	async function startLogs(): Promise<void> {
 		stopLogs();
 		logEntries = [];
-		const controller = new AbortController();
-		logsAbortController = controller;
 		streaming = true;
-		try {
-			const url = resolveApiUrl(config, `/api/${workloadKind === "sandbox" ? "sandboxes" : "containers"}/${encodeURIComponent(targetId)}/logs`, {
-				follow: logFollow,
-				tail: logTail.trim() || "100"
-			});
-			const headers = new Headers();
-			const token = config.token?.trim() ?? "";
-			if (token.length) headers.set("Authorization", `Bearer ${token}`);
-			const response = await fetch(url, { credentials: "include", headers, signal: controller.signal });
-			if (response.status === 401) window.dispatchEvent(new CustomEvent("open-sandbox:auth-error"));
-			if (!response.ok || !response.body) throw new Error(`Unable to stream logs: HTTP ${response.status}`);
-			const reader = response.body.getReader();
-			const decoder = new TextDecoder();
-			let buffer = "";
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-				buffer += decoder.decode(value, { stream: true });
-				const normalized = buffer.replace(/\r\n/g, "\n");
-				const chunks = normalized.split("\n\n");
-				buffer = chunks.pop() ?? "";
-				for (const chunk of chunks) parseSseBlock(chunk);
-			}
-			if (buffer.trim()) parseSseBlock(buffer);
-		} catch (error) {
-			if (!(error instanceof DOMException && error.name === "AbortError")) {
-				toast.error(error instanceof Error ? error.message : "Failed to stream logs.");
-			}
-		} finally {
-			if (logsAbortController === controller) logsAbortController = null;
-			streaming = false;
-		}
-	}
 
-	function parseSseBlock(block: string): void {
-		const lines = block.split("\n").map((l) => l.trimEnd()).filter(Boolean);
-		if (!lines.length) return;
-		let eventName = "info";
-		const data: string[] = [];
-		for (const line of lines) {
-			if (line.startsWith("event:")) { eventName = line.slice(6).trim() || "info"; continue; }
-			if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
-		}
-		const message = data.join("\n");
-		if (message.length) logEntries = [...logEntries.slice(-399), { stream: eventName, line: message, html: ansiToHtml(message) }];
+		let launchedFiber: Fiber.RuntimeFiber<void, unknown> | null = null;
+		const program = startLogsProgram().pipe(
+			Effect.ensuring(
+				Effect.sync(() => {
+					if (logsFiber === launchedFiber) {
+						logsFiber = null;
+					}
+					streaming = false;
+				})
+			)
+		);
+
+		launchedFiber = Effect.runFork(program);
+		logsFiber = launchedFiber;
 	}
 
 	async function handleAction(action: "restart" | "reset" | "stop" | "delete"): Promise<void> {
@@ -299,11 +528,13 @@
 				} else {
 					await runApiEffect(restartContainer(config, targetId));
 				}
+				Effect.runSync(invalidateWorkloadCaches(config));
 				toast.ok("Restarted.");
 				await Promise.resolve(onRefresh());
 			} else if (action === "reset") {
 				if (workloadKind === "sandbox") {
 					await runApiEffect(resetSandbox(config, targetId));
+					Effect.runSync(invalidateWorkloadCaches(config));
 					toast.ok("Reset to clean workspace.");
 					await Promise.resolve(onRefresh());
 					await loadPath(workspaceDirValue);
@@ -312,6 +543,7 @@
 						throw new Error("Reset is only available for managed direct containers and compose workloads.");
 					}
 					const result = await runApiEffect(resetContainer(config, targetId));
+					Effect.runSync(invalidateWorkloadCaches(config));
 					onContainerReplaced(result.id);
 					toast.ok("Container reset.");
 					await Promise.resolve(onRefresh());
@@ -324,6 +556,7 @@
 				} else {
 					await runApiEffect(stopContainer(config, targetId));
 				}
+				Effect.runSync(invalidateWorkloadCaches(config));
 				toast.ok("Stopped.");
 				await Promise.resolve(onRefresh());
 			} else if (action === "delete") {
@@ -332,6 +565,7 @@
 				} else {
 					await runApiEffect(removeContainer(config, targetId));
 				}
+				Effect.runSync(invalidateWorkloadCaches(config));
 				onDeleted();
 			}
 		} catch (error) {

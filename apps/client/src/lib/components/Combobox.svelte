@@ -1,5 +1,7 @@
+
 <script lang="ts">
-	import { tick } from "svelte";
+	import { onDestroy, tick } from "svelte";
+	import { createDebouncer, scheduleTimeout } from "$lib/client/browser";
 
 	type Option = {
 		value: string;
@@ -50,7 +52,11 @@
 			)
 	);
 
-	let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+	const searchDebouncer = createDebouncer(300);
+
+	onDestroy(() => {
+		searchDebouncer.cancel();
+	});
 
 	function handleInput(e: Event): void {
 		const q = (e.currentTarget as HTMLInputElement).value;
@@ -59,10 +65,9 @@
 		open = true;
 
 		if (onSearch) {
-			if (debounceTimer) clearTimeout(debounceTimer);
-			debounceTimer = setTimeout(() => {
+			searchDebouncer.trigger(() => {
 				if (query.trim()) onSearch(query);
-			}, 300);
+			});
 		}
 	}
 
@@ -73,7 +78,7 @@
 
 	function handleBlur(e: FocusEvent): void {
 		// Delay to allow click on options to register
-		setTimeout(() => {
+		scheduleTimeout(() => {
 			if (!containerEl?.contains(document.activeElement)) {
 				open = false;
 				query = "";

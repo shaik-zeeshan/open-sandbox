@@ -4,16 +4,6 @@
 	import PortsEditor from "./PortsEditor.svelte";
 	import type { ContainerSummary, ImageSummary, PortSummary, Sandbox } from "$lib/api";
 
-	type ResourceUsageSummary = {
-		cpu?: string;
-		memory?: string;
-		storage?: string;
-	};
-
-	type WorkloadContainerSummary = ContainerSummary & {
-		usage?: ResourceUsageSummary;
-	};
-
 	let {
 		sandboxes,
 		containers,
@@ -91,7 +81,7 @@
 	let workloadKindFilter = $state<"all" | "sandbox" | "container">("all");
 	let workloadStatusFilter = $state("all");
 	const sandboxContainerIDs = $derived(new Set(sandboxes.map((sandbox: Sandbox) => sandbox.id)));
-	const runtimeContainers = $derived(containers.filter((container: ContainerSummary) => !sandboxContainerIDs.has(container.id)) as WorkloadContainerSummary[]);
+	const runtimeContainers = $derived(containers.filter((container: ContainerSummary) => !sandboxContainerIDs.has(container.id)));
 
 	const toTitleCase = (value: string): string =>
 		value
@@ -130,7 +120,6 @@
 		status: string;
 		containerId: string;
 		ports: PortSummary[];
-		usage?: ResourceUsageSummary;
 			createdAt: number | null;
 			metaLabel: string;
 			metaValue: string;
@@ -142,7 +131,7 @@
 
 	const workloads = $derived.by<WorkloadCardItem[]>(() => {
 		const sandboxItems = sandboxes.map((sandbox: Sandbox) => {
-			const backingContainer = containers.find((c: ContainerSummary) => c.id === sandbox.id) as WorkloadContainerSummary | undefined;
+			const backingContainer = containers.find((c: ContainerSummary) => c.id === sandbox.id);
 			const statusFilter = normalizedStatus(sandbox.status);
 			return {
 			key: `sandbox:${sandbox.id}`,
@@ -153,7 +142,6 @@
 			status: sandbox.status,
 			containerId: sandbox.container_id,
 			ports: backingContainer?.ports ?? sandbox.ports ?? [],
-			usage: backingContainer?.usage,
 			createdAt: sandbox.created_at,
 			metaLabel: sandbox.owner_username ? "Owner" : "",
 			metaValue: sandbox.owner_username ?? "",
@@ -164,7 +152,7 @@
 			};
 		});
 
-		const containerItems = runtimeContainers.map((container: WorkloadContainerSummary) => {
+		const containerItems = runtimeContainers.map((container: ContainerSummary) => {
 			const composeProject = container.project_name ?? "";
 			const composeService = container.service_name ?? "";
 			const primaryName = container.names[0] ?? container.id.slice(0, 12);
@@ -179,7 +167,6 @@
 				status: container.status,
 				containerId: container.container_id,
 				ports: container.ports ?? [],
-				usage: container.usage,
 				createdAt: container.created ?? null,
 				metaLabel: composeProject ? "Compose" : "Type",
 				metaValue,
@@ -337,7 +324,6 @@
 						<th class="th">Image</th>
 						<th class="th">Status</th>
 						<th class="th">Ports</th>
-						<th class="th">Usage</th>
 						<th class="th">Created</th>
 						<th class="th">Container ID</th>
 						<th class="th th-actions"></th>
@@ -351,7 +337,6 @@
 							status={workload.status}
 							containerId={workload.containerId}
 							ports={workload.ports}
-							usage={workload.usage}
 							createdAt={workload.createdAt}
 							metaLabel={workload.metaLabel}
 							metaValue={workload.metaValue}
@@ -768,10 +753,9 @@
 	.th:nth-child(2) { min-width: 10rem; } /* Image */
 	.th:nth-child(3) { min-width: 5.5rem; } /* Status */
 	.th:nth-child(4) { min-width: 5rem;  } /* Ports */
-	.th:nth-child(5) { min-width: 9rem;  } /* Usage */
-	.th:nth-child(6) { min-width: 8rem;  } /* Created */
-	.th:nth-child(7) { min-width: 6.5rem;} /* Container ID */
-	.th:nth-child(8) { min-width: 9rem; } /* Actions — Open + Stop/Start + ⋯ */
+	.th:nth-child(5) { min-width: 8rem;  } /* Created */
+	.th:nth-child(6) { min-width: 6.5rem;} /* Container ID */
+	.th:nth-child(7) { min-width: 9rem; } /* Actions — Open + Stop/Start + ⋯ */
 
 	.th-actions {
 		text-align: right;

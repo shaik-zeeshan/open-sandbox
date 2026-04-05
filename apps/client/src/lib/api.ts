@@ -1,6 +1,9 @@
 import { browser } from "$app/environment";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "@effect/platform";
-import { Data, Effect, ManagedRuntime, pipe } from "effect";
+import type { HttpClientResponse } from "@effect/platform";
+import { dispatchAuthErrorEvent } from "$lib/client/browser";
+import { clientRuntime } from "$lib/client/runtime";
+import { Data, Effect, pipe, Schema } from "effect";
 
 export interface ApiConfig {
 	baseUrl: string;
@@ -149,13 +152,6 @@ export interface ContainerSummary {
 	service_name?: string;
 	resettable: boolean;
 	ports?: PortSummary[];
-	usage?: ResourceUsageSummary;
-}
-
-export interface ResourceUsageSummary {
-	cpu?: string;
-	memory?: string;
-	storage?: string;
 }
 
 export interface PortSummary {
@@ -209,6 +205,157 @@ export interface FileReadResponse {
 	entries?: FileEntry[];
 }
 
+const LoginResponseSchema = Schema.Struct({
+	token: Schema.String,
+	token_type: Schema.String,
+	user_id: Schema.String,
+	username: Schema.String,
+	role: Schema.String,
+	expires_at: Schema.Number
+});
+
+const SessionResponseSchema = Schema.Struct({
+	authenticated: Schema.Boolean,
+	user_id: Schema.String,
+	username: Schema.String,
+	role: Schema.String,
+	expires_at: Schema.Number
+});
+
+const SetupStatusResponseSchema = Schema.Struct({
+	bootstrap_required: Schema.Boolean
+});
+
+const UserSummarySchema: Schema.Schema<UserSummary> = Schema.Struct({
+	id: Schema.String,
+	username: Schema.String,
+	role: Schema.String,
+	created_at: Schema.Number,
+	updated_at: Schema.Number
+}) as Schema.Schema<UserSummary>;
+
+const HealthStatusResponseSchema = Schema.Struct({ status: Schema.String });
+
+const ImageSummarySchema: Schema.Schema<ImageSummary> = Schema.Struct({
+	id: Schema.String,
+	repo_tags: Schema.Array(Schema.String),
+	created: Schema.Number,
+	size: Schema.Number
+}) as unknown as Schema.Schema<ImageSummary>;
+
+const ImageSearchResultSchema: Schema.Schema<ImageSearchResult> = Schema.Struct({
+	name: Schema.String,
+	description: Schema.String,
+	stars: Schema.Number,
+	official: Schema.Boolean,
+	automated: Schema.Boolean
+}) as Schema.Schema<ImageSearchResult>;
+
+const RemoveImageResponseSchema: Schema.Schema<RemoveImageResponse> = Schema.Struct({
+	deleted: Schema.Array(
+		Schema.Struct({
+			Deleted: Schema.optional(Schema.String),
+			Untagged: Schema.optional(Schema.String)
+		})
+	)
+}) as unknown as Schema.Schema<RemoveImageResponse>;
+
+const ComposeResponseSchema = Schema.Struct({
+	stdout: Schema.String,
+	stderr: Schema.String
+});
+
+const ComposeStatusResponseSchema = Schema.Struct({
+	services: Schema.Unknown,
+	raw: Schema.String
+});
+
+const CreateContainerResponseSchema: Schema.Schema<CreateContainerResponse> = Schema.Struct({
+	id: Schema.String,
+	container_id: Schema.String,
+	warnings: Schema.Array(Schema.String),
+	started: Schema.Boolean
+}) as unknown as Schema.Schema<CreateContainerResponse>;
+
+const PortSummarySchema: Schema.Schema<PortSummary> = Schema.Struct({
+	private: Schema.Number,
+	public: Schema.optional(Schema.Number),
+	type: Schema.String,
+	ip: Schema.optional(Schema.String)
+}) as Schema.Schema<PortSummary>;
+
+const ExecResponseSchema = Schema.Struct({
+	exec_id: Schema.String,
+	exit_code: Schema.optional(Schema.Number),
+	stdout: Schema.optional(Schema.String),
+	stderr: Schema.optional(Schema.String),
+	detached: Schema.Boolean
+});
+
+const SandboxSchema: Schema.Schema<Sandbox> = Schema.Struct({
+	id: Schema.String,
+	name: Schema.String,
+	image: Schema.String,
+	container_id: Schema.String,
+	workspace_dir: Schema.String,
+	repo_url: Schema.optional(Schema.String),
+	status: Schema.String,
+	owner_username: Schema.optional(Schema.String),
+	ports: Schema.optional(Schema.Array(PortSummarySchema)),
+	created_at: Schema.Number,
+	updated_at: Schema.Number
+}) as Schema.Schema<Sandbox>;
+
+const FileEntrySchema: Schema.Schema<FileEntry> = Schema.Struct({
+	name: Schema.String,
+	path: Schema.String,
+	kind: Schema.Literal("file", "directory"),
+	size: Schema.optional(Schema.Number)
+}) as Schema.Schema<FileEntry>;
+
+const FileReadResponseSchema: Schema.Schema<FileReadResponse> = Schema.Struct({
+	path: Schema.String,
+	name: Schema.String,
+	kind: Schema.Literal("file", "directory"),
+	content: Schema.optional(Schema.String),
+	entries: Schema.optional(Schema.Array(FileEntrySchema))
+}) as Schema.Schema<FileReadResponse>;
+
+const SignedOutResponseSchema = Schema.Struct({ signed_out: Schema.Boolean });
+const ItemDeletedResponseSchema = Schema.Struct({ id: Schema.String, deleted: Schema.Boolean });
+const ItemRestartedResponseSchema = Schema.Struct({ id: Schema.String, restarted: Schema.Boolean });
+const ItemResetResponseSchema = Schema.Struct({ id: Schema.String, reset: Schema.Boolean });
+const ItemSavedResponseSchema = Schema.Struct({ id: Schema.String, path: Schema.String, saved: Schema.Boolean });
+const ItemUploadedResponseSchema = Schema.Struct({ id: Schema.String, path: Schema.String, uploaded: Schema.Boolean });
+const ContainerUploadedResponseSchema = Schema.Struct({
+	id: Schema.String,
+	container_id: Schema.String,
+	path: Schema.String,
+	uploaded: Schema.Boolean
+});
+const ContainerStoppedResponseSchema = Schema.Struct({
+	id: Schema.String,
+	container_id: Schema.String,
+	stopped: Schema.Boolean
+});
+const ContainerRestartedResponseSchema = Schema.Struct({
+	id: Schema.String,
+	container_id: Schema.String,
+	restarted: Schema.Boolean
+});
+const ContainerResetResponseSchema = Schema.Struct({
+	id: Schema.String,
+	container_id: Schema.String,
+	reset: Schema.Boolean
+});
+const ContainerRemovedResponseSchema = Schema.Struct({
+	id: Schema.String,
+	container_id: Schema.String,
+	removed: Schema.Boolean
+});
+const UserPasswordUpdateResponseSchema = Schema.Struct({ id: Schema.String, updated: Schema.Boolean });
+const OutputImageResponseSchema = Schema.Struct({ output: Schema.String, image: Schema.String });
+
 const DEFAULT_BASE_URL = "http://localhost:8080";
 
 export class ApiError extends Data.TaggedError("ApiError")<{
@@ -228,8 +375,6 @@ export class AuthError extends Data.TaggedError("AuthError")<{
 }> {}
 
 export type ApiFailure = ApiError | NetworkError | AuthError;
-
-const runtime = ManagedRuntime.make(FetchHttpClient.layer);
 
 const normalizeBaseUrl = (baseUrl: string): string => {
 	const trimmed = baseUrl.trim();
@@ -299,69 +444,97 @@ const extractAuthReason = (payload: unknown): string | undefined => {
 	return undefined;
 };
 
-const readResponsePayload = async (response: Response): Promise<unknown> => {
-	try {
-		const text = await response.text();
-		if (text.trim().length === 0) {
-			return "";
-		}
-		try {
-			return JSON.parse(text) as unknown;
-		} catch {
-			return text;
-		}
-	} catch {
-		return "";
+const decodeResponsePayload = <A, I = A>(
+	status: number,
+	payload: unknown,
+	schema?: Schema.Schema<A, I>
+): Effect.Effect<A, ApiFailure> => {
+	if (schema === undefined) {
+		return Effect.succeed(payload as A);
 	}
+
+	return pipe(
+		Schema.decodeUnknown(schema)(payload),
+		Effect.mapError(
+			(error) =>
+				new ApiError({
+					status,
+					message: "Response payload did not match expected shape.",
+					body: error
+				})
+		)
+	);
 };
 
-const fetchJson = async <T>(
+const readResponsePayload = (response: Response): Effect.Effect<unknown, never> =>
+	Effect.promise(async () => {
+		try {
+			const text = await response.text();
+			if (text.trim().length === 0) {
+				return "";
+			}
+			try {
+				return JSON.parse(text) as unknown;
+			} catch {
+				return text;
+			}
+		} catch {
+			return "";
+		}
+	});
+
+const readClientPayload = (response: HttpClientResponse.HttpClientResponse): Effect.Effect<unknown, never> =>
+	pipe(response.json, Effect.orElse(() => response.text), Effect.orElseSucceed(() => ""));
+
+const fetchJson = <A, I = A>(
 	config: ApiConfig,
 	path: string,
 	init?: RequestInit,
-	options?: { notifyAuthError?: boolean }
-): Promise<T> => {
-	const headers = new Headers(init?.headers);
-	const token = config.token?.trim() ?? "";
-	if (token.length > 0) {
-		headers.set("Authorization", `Bearer ${token}`);
-	}
-
-	let response: Response;
-	try {
-		response = await fetch(resolveApiUrl(config, path), {
-			...init,
-			credentials: "include",
-			headers
-		});
-	} catch (error) {
-		throw new NetworkError({
-			message: error instanceof Error ? error.message : "Network request failed.",
-			cause: error
-		});
-	}
-
-	if (response.status === 401) {
-		const payload = await readResponsePayload(response);
-		const reason = extractAuthReason(payload);
-		if ((options?.notifyAuthError ?? true) && browser) {
-			window.dispatchEvent(new CustomEvent("open-sandbox:auth-error"));
+	schema?: Schema.Schema<A, I>
+): Effect.Effect<A, ApiFailure> =>
+	Effect.gen(function* () {
+		const headers = new Headers(init?.headers);
+		const token = config.token?.trim() ?? "";
+		if (token.length > 0) {
+			headers.set("Authorization", `Bearer ${token}`);
 		}
-		throw new AuthError({ message: mapAuthReasonToMessage(reason), reason });
-	}
 
-	if (!response.ok) {
-		const payload = await readResponsePayload(response);
-		throw new ApiError({
-			status: response.status,
-			message: extractMessage(payload, `Request failed with status ${response.status}`),
-			body: payload
-		});
-	}
+		const response = yield* pipe(
+			Effect.tryPromise({
+				try: () =>
+					fetch(resolveApiUrl(config, path), {
+						...init,
+						credentials: "include",
+						headers
+					}),
+				catch: (error) =>
+					new NetworkError({
+						message: error instanceof Error ? error.message : "Network request failed.",
+						cause: error
+					})
+			}),
+			Effect.mapError((error) => error as ApiFailure)
+		);
 
-	const payload = await readResponsePayload(response);
-	return payload as T;
-};
+		const payload = yield* readResponsePayload(response);
+
+		if (response.status === 401) {
+			const reason = extractAuthReason(payload);
+			return yield* Effect.fail(new AuthError({ message: mapAuthReasonToMessage(reason), reason }));
+		}
+
+		if (!response.ok) {
+			return yield* Effect.fail(
+				new ApiError({
+					status: response.status,
+					message: extractMessage(payload, `Request failed with status ${response.status}`),
+					body: payload
+				})
+			);
+		}
+
+		return yield* decodeResponsePayload(response.status, payload, schema);
+	});
 
 const configureRequest = (
 	config: ApiConfig,
@@ -378,10 +551,11 @@ const configureRequest = (
 	return configured;
 };
 
-const requestJson = <T>(
+const requestJson = <A, I = A>(
 	config: ApiConfig,
-	request: HttpClientRequest.HttpClientRequest
-): Effect.Effect<T, ApiFailure, HttpClient.HttpClient> =>
+	request: HttpClientRequest.HttpClientRequest,
+	schema?: Schema.Schema<A, I>
+): Effect.Effect<A, ApiFailure, HttpClient.HttpClient> =>
 	Effect.gen(function* () {
 		const client = yield* HttpClient.HttpClient;
 		const response = yield* pipe(
@@ -393,23 +567,14 @@ const requestJson = <T>(
 			Effect.mapError((error) => new NetworkError({ message: error.message, cause: error }))
 		);
 
+		const payload = yield* readClientPayload(response);
+
 		if (response.status === 401) {
-			const payload = yield* pipe(
-				response.json,
-				Effect.orElse(() => response.text),
-				Effect.orElseSucceed(() => "")
-			);
 			const reason = extractAuthReason(payload);
 			return yield* Effect.fail(new AuthError({ message: mapAuthReasonToMessage(reason), reason }));
 		}
 
 		if (response.status < 200 || response.status >= 300) {
-			const payload = yield* pipe(
-				response.json,
-				Effect.orElse(() => response.text),
-				Effect.orElseSucceed(() => "")
-			);
-
 			return yield* Effect.fail(
 				new ApiError({
 					status: response.status,
@@ -419,28 +584,17 @@ const requestJson = <T>(
 			);
 		}
 
-		const payload = yield* pipe(
-			response.json,
-			Effect.mapError(
-				(error) =>
-					new ApiError({
-						status: response.status,
-						message: "Unable to decode JSON response.",
-						body: error
-					})
-			)
-		);
-
-		return payload as T;
+		return yield* decodeResponsePayload(response.status, payload, schema);
 	});
 
-const postJson = <TPayload, TResponse>(
+const postJson = <TPayload, A, I = A>(
 	config: ApiConfig,
 	path: string,
-	payload: TPayload
-): Effect.Effect<TResponse, ApiFailure, HttpClient.HttpClient> => {
+	payload: TPayload,
+	schema?: Schema.Schema<A, I>
+): Effect.Effect<A, ApiFailure, HttpClient.HttpClient> => {
 	const request = pipe(HttpClientRequest.post(path), HttpClientRequest.bodyUnsafeJson(payload));
-	return requestJson<TResponse>(config, request);
+	return requestJson(config, request, schema);
 };
 
 export const runApiEffect = async <A>(
@@ -448,7 +602,7 @@ export const runApiEffect = async <A>(
 	options?: { notifyAuthError?: boolean }
 ): Promise<A> => {
 	try {
-		return await runtime.runPromise(effect);
+		return await clientRuntime.runPromise(effect);
 	} catch (error) {
 		const notifyAuthError = options?.notifyAuthError ?? true;
 		const taggedError = typeof error === "object" && error !== null ? (error as { _tag?: string }) : null;
@@ -458,7 +612,7 @@ export const runApiEffect = async <A>(
 			taggedError !== null &&
 			taggedError._tag === "AuthError"
 		) {
-			window.dispatchEvent(new CustomEvent("open-sandbox:auth-error"));
+			dispatchAuthErrorEvent();
 		}
 
 		throw error;
@@ -470,58 +624,62 @@ export const login = (
 	username: string,
 	password: string
 ): Effect.Effect<LoginResponse, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, "/auth/login", { username, password });
+	postJson(config, "/auth/login", { username, password }, LoginResponseSchema);
 
 export const getSetupStatus = (
 	config: ApiConfig
 ): Effect.Effect<SetupStatusResponse, ApiFailure, HttpClient.HttpClient> =>
-	requestJson(config, HttpClientRequest.get("/auth/setup"));
+	requestJson(config, HttpClientRequest.get("/auth/setup"), SetupStatusResponseSchema);
 
 export const bootstrap = (
 	config: ApiConfig,
 	username: string,
 	password: string
 ): Effect.Effect<LoginResponse, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, "/auth/bootstrap", { username, password });
+	postJson(config, "/auth/bootstrap", { username, password }, LoginResponseSchema);
 
 export const getSession = (
 	config: ApiConfig
 ): Effect.Effect<SessionResponse, ApiFailure, HttpClient.HttpClient> =>
-	requestJson(config, HttpClientRequest.get("/auth/session"));
+	requestJson(config, HttpClientRequest.get("/auth/session"), SessionResponseSchema);
 
 export const logout = (
 	config: ApiConfig
 ): Effect.Effect<{ signed_out: boolean }, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, "/auth/logout", {});
+	postJson(config, "/auth/logout", {}, SignedOutResponseSchema);
 
 export const refreshSession = (
 	config: ApiConfig
 ): Effect.Effect<LoginResponse, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, "/auth/refresh", {});
+	postJson(config, "/auth/refresh", {}, LoginResponseSchema);
 
 export const listUsers = (
 	config: ApiConfig
 ): Effect.Effect<UserSummary[], ApiFailure, HttpClient.HttpClient> =>
-	requestJson(config, HttpClientRequest.get("/api/users"));
+	requestJson(
+		config,
+		HttpClientRequest.get("/api/users"),
+		Schema.Array(UserSummarySchema) as unknown as Schema.Schema<UserSummary[]>
+	);
 
 export const createUser = (
 	config: ApiConfig,
 	request: { username: string; password: string; role?: string }
 ): Effect.Effect<UserSummary, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, "/api/users", request);
+	postJson(config, "/api/users", request, UserSummarySchema);
 
 export const updateUserPassword = (
 	config: ApiConfig,
 	userId: string,
 	password: string
 ): Effect.Effect<{ id: string; updated: boolean }, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, `/api/users/${encodeURIComponent(userId)}/password`, { password });
+	postJson(config, `/api/users/${encodeURIComponent(userId)}/password`, { password }, UserPasswordUpdateResponseSchema);
 
 export const deleteUser = (
 	config: ApiConfig,
 	userId: string
 ): Effect.Effect<{ id: string; deleted: boolean }, ApiFailure, HttpClient.HttpClient> =>
-	requestJson(config, HttpClientRequest.del(`/api/users/${encodeURIComponent(userId)}`));
+	requestJson(config, HttpClientRequest.del(`/api/users/${encodeURIComponent(userId)}`), ItemDeletedResponseSchema);
 
 export const resolveApiUrl = (
 	config: ApiConfig,
@@ -592,12 +750,16 @@ export const formatApiFailure = (error: unknown): string => {
 };
 
 export const healthCheck = (config: ApiConfig): Effect.Effect<{ status: string }, ApiFailure, HttpClient.HttpClient> =>
-	requestJson(config, HttpClientRequest.get("/health"));
+	requestJson(config, HttpClientRequest.get("/health"), HealthStatusResponseSchema);
 
 export const listImages = (
 	config: ApiConfig
 ): Effect.Effect<ImageSummary[], ApiFailure, HttpClient.HttpClient> =>
-	requestJson(config, HttpClientRequest.get("/api/images"));
+	requestJson(
+		config,
+		HttpClientRequest.get("/api/images"),
+		Schema.Array(ImageSummarySchema) as unknown as Schema.Schema<ImageSummary[]>
+	);
 
 export const searchImages = (
 	config: ApiConfig,
@@ -609,19 +771,19 @@ export const searchImages = (
 			q: query,
 			limit: String(limit)
 		}
-	}));
+	}), Schema.Array(ImageSearchResultSchema) as unknown as Schema.Schema<ImageSearchResult[]>);
 
 export const pullImage = (
 	config: ApiConfig,
 	request: PullImageRequest
 ): Effect.Effect<{ output: string; image: string }, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, "/api/images/pull", request);
+	postJson(config, "/api/images/pull", request, OutputImageResponseSchema);
 
 export const buildImage = (
 	config: ApiConfig,
 	request: BuildImageRequest
 ): Effect.Effect<{ output: string; image: string }, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, "/api/images/build", request);
+	postJson(config, "/api/images/build", request, OutputImageResponseSchema);
 
 export const removeImage = (
 	config: ApiConfig,
@@ -632,20 +794,21 @@ export const removeImage = (
 		config,
 		HttpClientRequest.del(`/api/images/${encodeURIComponent(id)}`, {
 			urlParams: force ? { force: "true" } : undefined
-		})
+		}),
+		RemoveImageResponseSchema
 	);
 
 export const composeDown = (
 	config: ApiConfig,
 	request: ComposeRequest
 ): Effect.Effect<ComposeResponse, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, "/api/compose/down", request);
+	postJson(config, "/api/compose/down", request, ComposeResponseSchema);
 
 export const composeStatus = (
 	config: ApiConfig,
 	request: ComposeRequest
 ): Effect.Effect<ComposeStatusResponse, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, "/api/compose/status", request);
+	postJson(config, "/api/compose/status", request, ComposeStatusResponseSchema);
 
 export type StreamEvent = {
 	event: string;
@@ -673,128 +836,153 @@ const parseSseEvent = (block: string): StreamEvent | null => {
 	return { event, data: data.join("\n") };
 };
 
-const streamJsonPost = async (
+const streamJsonPost = (
 	config: ApiConfig,
 	path: string,
 	payload: unknown,
 	onEvent?: (event: StreamEvent) => void
-): Promise<ComposeResponse> => {
-	const headers = new Headers({ "Content-Type": "application/json", Accept: "text/event-stream" });
-	const token = config.token?.trim() ?? "";
-	if (token.length > 0) {
-		headers.set("Authorization", `Bearer ${token}`);
-	}
-
-	let response: Response;
-	try {
-		response = await fetch(resolveApiUrl(config, path), {
-			method: "POST",
-			credentials: "include",
-			headers,
-			body: JSON.stringify(payload)
-		});
-	} catch (error) {
-		throw new NetworkError({ message: error instanceof Error ? error.message : "Network request failed.", cause: error });
-	}
-
-	if (response.status === 401) {
-		if (browser) {
-			window.dispatchEvent(new CustomEvent("open-sandbox:auth-error"));
+): Effect.Effect<ComposeResponse, ApiFailure> =>
+	Effect.gen(function* () {
+		const headers = new Headers({ "Content-Type": "application/json", Accept: "text/event-stream" });
+		const token = config.token?.trim() ?? "";
+		if (token.length > 0) {
+			headers.set("Authorization", `Bearer ${token}`);
 		}
-		const payload = await readResponsePayload(response);
-		const reason = extractAuthReason(payload);
-		throw new AuthError({ message: mapAuthReasonToMessage(reason), reason });
-	}
 
-	if (!response.ok || response.body === null) {
-		const errorPayload = await readResponsePayload(response);
-		throw new ApiError({
-			status: response.status,
-			message: extractMessage(errorPayload, `Request failed with status ${response.status}`),
-			body: errorPayload
-		});
-	}
+		const response = yield* pipe(
+			Effect.tryPromise({
+				try: () =>
+					fetch(resolveApiUrl(config, path), {
+						method: "POST",
+						credentials: "include",
+						headers,
+						body: JSON.stringify(payload)
+					}),
+				catch: (error) =>
+					new NetworkError({
+						message: error instanceof Error ? error.message : "Network request failed.",
+						cause: error
+					})
+			}),
+			Effect.mapError((error) => error as ApiFailure)
+		);
 
-	const reader = response.body.getReader();
-	const decoder = new TextDecoder();
-	let buffer = "";
-	const stdout: string[] = [];
-	const stderr: string[] = [];
-
-	const consumeSseBuffer = (pending: string): string => {
-		const normalized = pending.replace(/\r\n/g, "\n");
-		const chunks = normalized.split("\n\n");
-		const remainder = chunks.pop() ?? "";
-		for (const chunk of chunks) {
-			const parsed = parseSseEvent(chunk);
-			if (parsed === null) {
-				continue;
-			}
-			onEvent?.(parsed);
-			if (parsed.event === "stdout" && parsed.data.length > 0) {
-				stdout.push(parsed.data);
-			}
-			if (parsed.event === "stderr" && parsed.data.length > 0) {
-				stderr.push(parsed.data);
-			}
+		if (response.status === 401) {
+			const errorPayload = yield* readResponsePayload(response);
+			const reason = extractAuthReason(errorPayload);
+			return yield* Effect.fail(new AuthError({ message: mapAuthReasonToMessage(reason), reason }));
 		}
-		return remainder;
-	};
 
-	while (true) {
-		const { done, value } = await reader.read();
-		if (done) {
-			break;
+		if (!response.ok || response.body === null) {
+			const errorPayload = yield* readResponsePayload(response);
+			return yield* Effect.fail(
+				new ApiError({
+					status: response.status,
+					message: extractMessage(errorPayload, `Request failed with status ${response.status}`),
+					body: errorPayload
+				})
+			);
 		}
-		buffer += decoder.decode(value, { stream: true });
-		buffer = consumeSseBuffer(buffer);
-	}
 
-	if (buffer.trim().length > 0) {
-		const parsed = parseSseEvent(buffer);
-		if (parsed !== null) {
-			onEvent?.(parsed);
-			if (parsed.event === "stdout" && parsed.data.length > 0) {
-				stdout.push(parsed.data);
-			}
-			if (parsed.event === "stderr" && parsed.data.length > 0) {
-				stderr.push(parsed.data);
-			}
-		}
-	}
+		const streamResult = yield* pipe(
+			Effect.tryPromise({
+				try: async () => {
+					const reader = response.body?.getReader();
+					if (!reader) {
+						throw new Error("Response body is not readable.");
+					}
 
-	return { stdout: stdout.join("\n"), stderr: stderr.join("\n") };
-};
+					const decoder = new TextDecoder();
+					let buffer = "";
+					const stdout: string[] = [];
+					const stderr: string[] = [];
 
-export const composeUpStream = async (
+					const consumeSseBuffer = (pending: string): string => {
+						const normalized = pending.replace(/\r\n/g, "\n");
+						const chunks = normalized.split("\n\n");
+						const remainder = chunks.pop() ?? "";
+						for (const chunk of chunks) {
+							const parsed = parseSseEvent(chunk);
+							if (parsed === null) {
+								continue;
+							}
+							onEvent?.(parsed);
+							if (parsed.event === "stdout" && parsed.data.length > 0) {
+								stdout.push(parsed.data);
+							}
+							if (parsed.event === "stderr" && parsed.data.length > 0) {
+								stderr.push(parsed.data);
+							}
+						}
+						return remainder;
+					};
+
+					while (true) {
+						const { done, value } = await reader.read();
+						if (done) {
+							break;
+						}
+						buffer += decoder.decode(value, { stream: true });
+						buffer = consumeSseBuffer(buffer);
+					}
+
+					if (buffer.trim().length > 0) {
+						const parsed = parseSseEvent(buffer);
+						if (parsed !== null) {
+							onEvent?.(parsed);
+							if (parsed.event === "stdout" && parsed.data.length > 0) {
+								stdout.push(parsed.data);
+							}
+							if (parsed.event === "stderr" && parsed.data.length > 0) {
+								stderr.push(parsed.data);
+							}
+						}
+					}
+
+					return { stdout: stdout.join("\n"), stderr: stderr.join("\n") };
+				},
+				catch: (error) =>
+					new NetworkError({
+						message: error instanceof Error ? error.message : "Unable to read stream response.",
+						cause: error
+					})
+			}),
+			Effect.mapError((error) => error as ApiFailure)
+		);
+
+		return yield* decodeResponsePayload(response.status, streamResult, ComposeResponseSchema);
+	});
+
+export const composeUpStream = (
 	config: ApiConfig,
 	request: ComposeRequest,
 	onEvent?: (event: StreamEvent) => void
-): Promise<ComposeResponse> => streamJsonPost(config, "/api/compose/up", request, onEvent);
+): Effect.Effect<ComposeResponse, ApiFailure> => streamJsonPost(config, "/api/compose/up", request, onEvent);
 
-export const buildImageStream = async (
+export const buildImageStream = (
 	config: ApiConfig,
 	request: BuildImageRequest,
 	onEvent?: (event: StreamEvent) => void
-): Promise<ComposeResponse> => streamJsonPost(config, "/api/images/build/stream", request, onEvent);
+): Effect.Effect<ComposeResponse, ApiFailure> => streamJsonPost(config, "/api/images/build/stream", request, onEvent);
 
 export const gitClone = (
 	config: ApiConfig,
 	request: GitCloneRequest
-): Effect.Effect<ExecResponse, ApiFailure, HttpClient.HttpClient> => postJson(config, "/api/git/clone", request);
+): Effect.Effect<ExecResponse, ApiFailure, HttpClient.HttpClient> =>
+	postJson(config, "/api/git/clone", request, ExecResponseSchema);
 
 export const createContainer = (
 	config: ApiConfig,
 	request: CreateContainerRequest
 ): Effect.Effect<CreateContainerResponse, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, "/api/containers/create", request);
+	postJson(config, "/api/containers/create", request, CreateContainerResponseSchema);
 
 export const execInContainer = (
 	config: ApiConfig,
 	containerId: string,
 	request: ExecRequest
 ): Effect.Effect<ExecResponse, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, `/api/containers/${encodeURIComponent(containerId)}/exec`, request);
+	postJson(config, `/api/containers/${encodeURIComponent(containerId)}/exec`, request, ExecResponseSchema);
 
 export const listContainers = (
 	config: ApiConfig
@@ -805,19 +993,19 @@ export const stopContainer = (
 	config: ApiConfig,
 	workloadId: string
 ): Effect.Effect<{ id: string; container_id: string; stopped: boolean }, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, `/api/containers/${encodeURIComponent(workloadId)}/stop`, {});
+	postJson(config, `/api/containers/${encodeURIComponent(workloadId)}/stop`, {}, ContainerStoppedResponseSchema);
 
 export const restartContainer = (
 	config: ApiConfig,
 	workloadId: string
 ): Effect.Effect<{ id: string; container_id: string; restarted: boolean }, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, `/api/containers/${encodeURIComponent(workloadId)}/restart`, {});
+	postJson(config, `/api/containers/${encodeURIComponent(workloadId)}/restart`, {}, ContainerRestartedResponseSchema);
 
 export const resetContainer = (
 	config: ApiConfig,
 	workloadId: string
 ): Effect.Effect<{ id: string; container_id: string; reset: boolean }, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, `/api/containers/${encodeURIComponent(workloadId)}/reset`, {});
+	postJson(config, `/api/containers/${encodeURIComponent(workloadId)}/reset`, {}, ContainerResetResponseSchema);
 
 export const removeContainer = (
 	config: ApiConfig,
@@ -828,138 +1016,161 @@ export const removeContainer = (
 		config,
 		HttpClientRequest.del(`/api/containers/${encodeURIComponent(workloadId)}`, {
 			urlParams: force ? { force: "true" } : undefined
-		})
+		}),
+		ContainerRemovedResponseSchema
 	);
 
 export const createSandbox = (
 	config: ApiConfig,
 	request: CreateSandboxRequest
-): Effect.Effect<Sandbox, ApiFailure, HttpClient.HttpClient> => postJson(config, "/api/sandboxes", request);
+): Effect.Effect<Sandbox, ApiFailure, HttpClient.HttpClient> =>
+	postJson(config, "/api/sandboxes", request, SandboxSchema);
 
 export const listSandboxes = (
 	config: ApiConfig
 ): Effect.Effect<Sandbox[], ApiFailure, HttpClient.HttpClient> =>
-	requestJson(config, HttpClientRequest.get("/api/sandboxes"));
+	requestJson(
+		config,
+		HttpClientRequest.get("/api/sandboxes"),
+		Schema.Array(SandboxSchema) as unknown as Schema.Schema<Sandbox[]>
+	);
 
 export const getSandbox = (
 	config: ApiConfig,
 	sandboxId: string
 ): Effect.Effect<Sandbox, ApiFailure, HttpClient.HttpClient> =>
-	requestJson(config, HttpClientRequest.get(`/api/sandboxes/${encodeURIComponent(sandboxId)}`));
+	requestJson(config, HttpClientRequest.get(`/api/sandboxes/${encodeURIComponent(sandboxId)}`), SandboxSchema);
 
 export const restartSandbox = (
 	config: ApiConfig,
 	sandboxId: string
 ): Effect.Effect<{ id: string; restarted: boolean }, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, `/api/sandboxes/${encodeURIComponent(sandboxId)}/restart`, {});
+	postJson(config, `/api/sandboxes/${encodeURIComponent(sandboxId)}/restart`, {}, ItemRestartedResponseSchema);
 
 export const resetSandbox = (
 	config: ApiConfig,
 	sandboxId: string
 ): Effect.Effect<{ id: string; reset: boolean }, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, `/api/sandboxes/${encodeURIComponent(sandboxId)}/reset`, {});
+	postJson(config, `/api/sandboxes/${encodeURIComponent(sandboxId)}/reset`, {}, ItemResetResponseSchema);
 
 export const stopSandbox = (
 	config: ApiConfig,
 	sandboxId: string
 ): Effect.Effect<Sandbox, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, `/api/sandboxes/${encodeURIComponent(sandboxId)}/stop`, {});
+	postJson(config, `/api/sandboxes/${encodeURIComponent(sandboxId)}/stop`, {}, SandboxSchema);
 
 export const deleteSandbox = (
 	config: ApiConfig,
 	sandboxId: string
 ): Effect.Effect<{ id: string; deleted: boolean }, ApiFailure, HttpClient.HttpClient> =>
-	requestJson(config, HttpClientRequest.del(`/api/sandboxes/${encodeURIComponent(sandboxId)}`));
+	requestJson(config, HttpClientRequest.del(`/api/sandboxes/${encodeURIComponent(sandboxId)}`), ItemDeletedResponseSchema);
 
 export const execInSandbox = (
 	config: ApiConfig,
 	sandboxId: string,
 	request: ExecRequest
 ): Effect.Effect<ExecResponse, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, `/api/sandboxes/${encodeURIComponent(sandboxId)}/exec`, request);
+	postJson(config, `/api/sandboxes/${encodeURIComponent(sandboxId)}/exec`, request, ExecResponseSchema);
 
-export const readSandboxFile = async (
+export const readSandboxFile = (
 	config: ApiConfig,
 	sandboxId: string,
 	filePath: string
-): Promise<FileReadResponse> =>
-	fetchJson<FileReadResponse>(config, `/api/sandboxes/${encodeURIComponent(sandboxId)}/files?path=${encodeURIComponent(filePath)}`);
+): Effect.Effect<FileReadResponse, ApiFailure, HttpClient.HttpClient> =>
+	requestJson(
+		config,
+		HttpClientRequest.get(`/api/sandboxes/${encodeURIComponent(sandboxId)}/files`, {
+			urlParams: { path: filePath }
+		}),
+		FileReadResponseSchema
+	);
 
-export const uploadSandboxFile = async (
+export const uploadSandboxFile = (
 	config: ApiConfig,
 	sandboxId: string,
 	targetPath: string,
 	file: File
-): Promise<{ id: string; path: string; uploaded: boolean }> => {
+): Effect.Effect<{ id: string; path: string; uploaded: boolean }, ApiFailure> => {
 	const formData = new FormData();
 	formData.set("target_path", targetPath);
 	formData.set("file", file, file.name);
 
-	return fetchJson<{ id: string; path: string; uploaded: boolean }>(
+	return fetchJson(
 		config,
 		`/api/sandboxes/${encodeURIComponent(sandboxId)}/files`,
 		{
 			method: "PUT",
 			body: formData
-		}
+		},
+		ItemUploadedResponseSchema
 	);
 };
 
-export const saveSandboxFile = async (
+export const saveSandboxFile = (
 	config: ApiConfig,
 	sandboxId: string,
 	targetPath: string,
 	content: string
-): Promise<{ id: string; path: string; saved: boolean }> =>
-	fetchJson<{ id: string; path: string; saved: boolean }>(
+): Effect.Effect<{ id: string; path: string; saved: boolean }, ApiFailure, HttpClient.HttpClient> =>
+	requestJson(
 		config,
-		`/api/sandboxes/${encodeURIComponent(sandboxId)}/files`,
-		{
-			method: "PUT",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ target_path: targetPath, content })
-		}
+		pipe(
+			HttpClientRequest.put(`/api/sandboxes/${encodeURIComponent(sandboxId)}/files`),
+			HttpClientRequest.bodyUnsafeJson({ target_path: targetPath, content })
+		),
+		ItemSavedResponseSchema
 	);
 
-export const readContainerFile = async (
+export const readContainerFile = (
 	config: ApiConfig,
 	containerId: string,
 	filePath: string
-): Promise<FileReadResponse> =>
-	fetchJson<FileReadResponse>(config, `/api/containers/${encodeURIComponent(containerId)}/files?path=${encodeURIComponent(filePath)}`);
+): Effect.Effect<FileReadResponse, ApiFailure, HttpClient.HttpClient> =>
+	requestJson(
+		config,
+		HttpClientRequest.get(`/api/containers/${encodeURIComponent(containerId)}/files`, {
+			urlParams: { path: filePath }
+		}),
+		FileReadResponseSchema
+	);
 
-export const uploadContainerFile = async (
+export const uploadContainerFile = (
 	config: ApiConfig,
 	containerId: string,
 	targetPath: string,
 	file: File
-): Promise<{ id: string; container_id: string; path: string; uploaded: boolean }> => {
+): Effect.Effect<{ id: string; container_id: string; path: string; uploaded: boolean }, ApiFailure> => {
 	const formData = new FormData();
 	formData.set("target_path", targetPath);
 	formData.set("file", file, file.name);
 
-	return fetchJson<{ id: string; container_id: string; path: string; uploaded: boolean }>(
+	return fetchJson(
 		config,
 		`/api/containers/${encodeURIComponent(containerId)}/files`,
 		{
 			method: "PUT",
 			body: formData
-		}
+		},
+		ContainerUploadedResponseSchema
 	);
 };
 
-export const saveContainerFile = async (
+export const saveContainerFile = (
 	config: ApiConfig,
 	containerId: string,
 	targetPath: string,
 	content: string
-): Promise<{ id: string; container_id: string; path: string; saved: boolean }> =>
-	fetchJson<{ id: string; container_id: string; path: string; saved: boolean }>(
+): Effect.Effect<{ id: string; container_id: string; path: string; saved: boolean }, ApiFailure, HttpClient.HttpClient> =>
+	requestJson(
 		config,
-		`/api/containers/${encodeURIComponent(containerId)}/files`,
-		{
-			method: "PUT",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ target_path: targetPath, content })
-		}
+		pipe(
+			HttpClientRequest.put(`/api/containers/${encodeURIComponent(containerId)}/files`),
+			HttpClientRequest.bodyUnsafeJson({ target_path: targetPath, content })
+		),
+		Schema.Struct({
+			id: Schema.String,
+			container_id: Schema.String,
+			path: Schema.String,
+			saved: Schema.Boolean
+		})
 	);

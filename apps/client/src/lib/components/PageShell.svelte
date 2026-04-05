@@ -1,6 +1,6 @@
 <script lang="ts">
 	import Sidebar from "$lib/components/Sidebar.svelte";
-	import { browser } from "$app/environment";
+	import { readStorageItem } from "$lib/client/browser";
 
 	type HealthState = "unknown" | "checking" | "ok" | "error";
 
@@ -23,7 +23,7 @@
 	}>();
 
 	let collapsed = $state(
-		browser ? localStorage.getItem("sidebar-collapsed") === "true" : false
+		readStorageItem("sidebar-collapsed") === "true"
 	);
 </script>
 

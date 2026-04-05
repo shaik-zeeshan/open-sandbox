@@ -1,132 +1,8 @@
 <script lang="ts">
-	import { goto } from "$app/navigation";
-	import { onMount } from "svelte";
+	import { authController, checkHealth, signOut } from "$lib/auth-controller.svelte";
 	import PageShell from "$lib/components/PageShell.svelte";
 	import ImagesPanel from "$lib/components/ImagesPanel.svelte";
-	import {
-		formatApiFailure,
-		getSession,
-		healthCheck,
-		logout,
-		refreshSession,
-		runApiEffect
-	} from "$lib/api";
-	import { beginAuthCheck, clearAuth, clientState, setAuthSession } from "$lib/stores.svelte";
-	import { toast } from "$lib/toast.svelte";
-
-	type HealthState = "unknown" | "checking" | "ok" | "error";
-
-	let health = $state<HealthState>("unknown");
-	let healthMessage = $state("Waiting...");
-	let healthTimer: ReturnType<typeof setTimeout> | null = null;
-
-	async function checkHealth(): Promise<void> {
-		health = "checking";
-		healthMessage = "Checking...";
-		try {
-			const result = await runApiEffect(healthCheck(clientState.config));
-			health = result.status === "ok" ? "ok" : "error";
-			healthMessage = result.status === "ok" ? "Reachable" : `Status: ${result.status}`;
-		} catch (error) {
-			health = "error";
-			healthMessage = formatApiFailure(error);
-		}
-	}
-
-	async function restoreSession(): Promise<void> {
-		beginAuthCheck();
-		try {
-			const session = await runApiEffect(getSession({ baseUrl: clientState.baseUrl }), { notifyAuthError: false });
-			setAuthSession({
-				userId: session.user_id,
-				username: session.username,
-				role: session.role,
-				expiresAt: session.expires_at
-			});
-		} catch (error) {
-			if (await refreshAuthSession()) {
-				return;
-			}
-
-			const message = formatApiFailure(error);
-			clearAuth();
-			if (!message.startsWith("Unauthorized:")) {
-				toast.error(message);
-			}
-		}
-	}
-
-	async function refreshAuthSession(): Promise<boolean> {
-		try {
-			const refreshed = await runApiEffect(refreshSession({ baseUrl: clientState.baseUrl }), { notifyAuthError: false });
-			setAuthSession({
-				userId: refreshed.user_id,
-				username: refreshed.username,
-				role: refreshed.role,
-				expiresAt: refreshed.expires_at
-			});
-			return true;
-		} catch {
-			return false;
-		}
-	}
-
-	async function signOut(revoke = true): Promise<void> {
-		if (revoke) {
-			try {
-				await runApiEffect(logout({ baseUrl: clientState.baseUrl }), { notifyAuthError: false });
-			} catch {}
-		}
-		clearAuth();
-		await goto("/");
-	}
-
-	$effect(() => {
-		clientState.baseUrl;
-		if (healthTimer) clearTimeout(healthTimer);
-		healthTimer = setTimeout(() => void checkHealth(), 400);
-		return () => {
-			if (healthTimer) {
-				clearTimeout(healthTimer);
-				healthTimer = null;
-			}
-		};
-	});
-
-	$effect(() => {
-		if (!clientState.isAuthenticated || clientState.tokenExpiresAt === null) return;
-		const delay = clientState.tokenExpiresAt * 1000 - Date.now() - 60_000;
-		if (delay <= 0) {
-			void (async () => {
-				if (!(await refreshAuthSession())) {
-					await signOut(false);
-				}
-			})();
-			return;
-		}
-		const timer = setTimeout(() => {
-			void (async () => {
-				if (!(await refreshAuthSession())) {
-					await signOut(false);
-				}
-			})();
-		}, delay);
-		return () => clearTimeout(timer);
-	});
-
-	$effect(() => {
-		if (clientState.authResolved && !clientState.isAuthenticated) void goto("/");
-	});
-
-	onMount(() => {
-		void restoreSession();
-		const onAuthError = () => {
-			clearAuth();
-			void goto("/");
-		};
-		window.addEventListener("open-sandbox:auth-error", onAuthError);
-		return () => window.removeEventListener("open-sandbox:auth-error", onAuthError);
-	});
+	import { clientState } from "$lib/stores.svelte";
 </script>
 
 {#if !clientState.authResolved}
@@ -138,8 +14,8 @@
 	</div>
 {:else if clientState.isAuthenticated}
 	<PageShell
-		{health}
-		{healthMessage}
+		health={authController.health}
+		healthMessage={authController.healthMessage}
 		onPing={() => void checkHealth()}
 		onSignOut={() => void signOut()}
 		currentUsername={clientState.username}
@@ -179,7 +55,4 @@
 		color: var(--text-muted);
 	}
 
-	.images-page {
-		padding: 1.5rem;
-	}
 </style>

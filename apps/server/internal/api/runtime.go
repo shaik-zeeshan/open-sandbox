@@ -57,14 +57,6 @@ type dockerRuntime struct {
 	workspaceRootFn func() string
 }
 
-type dockerStatsCLIRecord struct {
-	ID       string `json:"ID"`
-	Name     string `json:"Name"`
-	CPU      string `json:"CPUPerc"`
-	Memory   string `json:"MemUsage"`
-	MemoryPC string `json:"MemPerc"`
-}
-
 type runtimeWorkerBackend interface {
 	WorkerID() string
 	ListWorkloads(ctx context.Context) ([]ContainerSummary, error)
@@ -291,7 +283,6 @@ func (r *dockerRuntime) WorkerID() string {
 }
 
 func (r *dockerRuntime) ListWorkloads(ctx context.Context) ([]ContainerSummary, error) {
-	statsUsage := r.containerUsageStats(ctx)
 	stdout, stderr, err := commandRunner(ctx, "docker", "ps", "-a", "--size", "--no-trunc", "--format", "{{json .}}")
 	if err != nil {
 		return nil, fmt.Errorf("docker ps failed: %w: %s", err, strings.TrimSpace(stderr))
@@ -336,11 +327,6 @@ func (r *dockerRuntime) ListWorkloads(ctx context.Context) ([]ContainerSummary, 
 			ServiceName:  strings.TrimSpace(labels["com.docker.compose.service"]),
 			Resettable:   containerResettable(labels),
 			Ports:        parseDockerCLIPorts(record.Ports),
-			Usage: ResourceUsage{
-				CPU:     statsUsage[containerID].CPU,
-				Memory:  statsUsage[containerID].Memory,
-				Storage: dockerCLIStorageUsage(record.Size),
-			},
 		})
 	}
 
@@ -354,62 +340,6 @@ func (r *dockerRuntime) ListWorkloads(ctx context.Context) ([]ContainerSummary, 
 	})
 
 	return out, nil
-}
-
-func (r *dockerRuntime) containerUsageStats(ctx context.Context) map[string]ResourceUsage {
-	stdout, _, err := commandRunner(ctx, "docker", "stats", "--no-stream", "--no-trunc", "--format", "{{json .}}")
-	if err != nil {
-		return map[string]ResourceUsage{}
-	}
-
-	usageByID := map[string]ResourceUsage{}
-	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		var record dockerStatsCLIRecord
-		if err := json.Unmarshal([]byte(line), &record); err != nil {
-			continue
-		}
-
-		containerID := strings.TrimSpace(record.ID)
-		if containerID == "" {
-			continue
-		}
-
-		usageByID[containerID] = ResourceUsage{
-			CPU:    strings.TrimSpace(record.CPU),
-			Memory: dockerCLIMemoryUsage(record.Memory),
-		}
-	}
-
-	return usageByID
-}
-
-func dockerCLIMemoryUsage(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return ""
-	}
-	current, _, found := strings.Cut(trimmed, "/")
-	if found {
-		return strings.TrimSpace(current)
-	}
-	return trimmed
-}
-
-func dockerCLIStorageUsage(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return ""
-	}
-	writable, _, found := strings.Cut(trimmed, "(")
-	if found {
-		return strings.TrimSpace(writable)
-	}
-	return trimmed
 }
 
 func (r *dockerRuntime) InspectWorkload(ctx context.Context, workloadID string) (container.InspectResponse, error) {

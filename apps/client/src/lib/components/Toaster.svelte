@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { scheduleTimeout } from "$lib/client/browser";
 	import { toast } from "$lib/toast.svelte";
 
 	// Track which toasts are animating out
@@ -7,7 +8,7 @@
 	function dismiss(id: string) {
 		dismissing = new Set([...dismissing, id]);
 		// Wait for the exit animation before removing from store
-		setTimeout(() => {
+		scheduleTimeout(() => {
 			toast.remove(id);
 			dismissing = new Set([...dismissing].filter((x) => x !== id));
 		}, 280);
