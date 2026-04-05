@@ -1083,11 +1083,12 @@ export const readSandboxFile = (
 	config: ApiConfig,
 	sandboxId: string,
 	filePath: string
-): Effect.Effect<FileReadResponse, ApiFailure> =>
-	fetchJson(
+): Effect.Effect<FileReadResponse, ApiFailure, HttpClient.HttpClient> =>
+	requestJson(
 		config,
-		`/api/sandboxes/${encodeURIComponent(sandboxId)}/files?path=${encodeURIComponent(filePath)}`,
-		undefined,
+		HttpClientRequest.get(`/api/sandboxes/${encodeURIComponent(sandboxId)}/files`, {
+			urlParams: { path: filePath }
+		}),
 		FileReadResponseSchema
 	);
 
@@ -1117,15 +1118,13 @@ export const saveSandboxFile = (
 	sandboxId: string,
 	targetPath: string,
 	content: string
-): Effect.Effect<{ id: string; path: string; saved: boolean }, ApiFailure> =>
-	fetchJson(
+): Effect.Effect<{ id: string; path: string; saved: boolean }, ApiFailure, HttpClient.HttpClient> =>
+	requestJson(
 		config,
-		`/api/sandboxes/${encodeURIComponent(sandboxId)}/files`,
-		{
-			method: "PUT",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ target_path: targetPath, content })
-		},
+		pipe(
+			HttpClientRequest.put(`/api/sandboxes/${encodeURIComponent(sandboxId)}/files`),
+			HttpClientRequest.bodyUnsafeJson({ target_path: targetPath, content })
+		),
 		ItemSavedResponseSchema
 	);
 
@@ -1133,11 +1132,12 @@ export const readContainerFile = (
 	config: ApiConfig,
 	containerId: string,
 	filePath: string
-): Effect.Effect<FileReadResponse, ApiFailure> =>
-	fetchJson(
+): Effect.Effect<FileReadResponse, ApiFailure, HttpClient.HttpClient> =>
+	requestJson(
 		config,
-		`/api/containers/${encodeURIComponent(containerId)}/files?path=${encodeURIComponent(filePath)}`,
-		undefined,
+		HttpClientRequest.get(`/api/containers/${encodeURIComponent(containerId)}/files`, {
+			urlParams: { path: filePath }
+		}),
 		FileReadResponseSchema
 	);
 
@@ -1167,15 +1167,13 @@ export const saveContainerFile = (
 	containerId: string,
 	targetPath: string,
 	content: string
-): Effect.Effect<{ id: string; container_id: string; path: string; saved: boolean }, ApiFailure> =>
-	fetchJson(
+): Effect.Effect<{ id: string; container_id: string; path: string; saved: boolean }, ApiFailure, HttpClient.HttpClient> =>
+	requestJson(
 		config,
-		`/api/containers/${encodeURIComponent(containerId)}/files`,
-		{
-			method: "PUT",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ target_path: targetPath, content })
-		},
+		pipe(
+			HttpClientRequest.put(`/api/containers/${encodeURIComponent(containerId)}/files`),
+			HttpClientRequest.bodyUnsafeJson({ target_path: targetPath, content })
+		),
 		Schema.Struct({
 			id: Schema.String,
 			container_id: Schema.String,

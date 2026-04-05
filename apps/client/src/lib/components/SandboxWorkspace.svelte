@@ -1,6 +1,11 @@
 <script lang="ts">
 	import { onDestroy, onMount, tick } from "svelte";
-	import { dispatchAuthErrorEvent } from "$lib/client/browser";
+	import {
+		clearScheduledTimeout,
+		dispatchAuthErrorEvent,
+		scheduleTimeout,
+		type TimeoutHandle
+	} from "$lib/client/browser";
 	import { toast } from "$lib/toast.svelte";
 	import SandboxTerminal from "$lib/components/SandboxTerminal.svelte";
 	import AnsiToHtml from "ansi-to-html";
@@ -93,16 +98,22 @@
 	// Actions
 	let actionLoading = $state<string | null>(null);
 	let deleteConfirm = $state(false);
-	let deleteConfirmTimer: ReturnType<typeof setTimeout> | null = null;
+	let deleteConfirmTimer: TimeoutHandle | null = null;
 
 	function requestDelete(): void {
 		if (deleteConfirm) {
-			if (deleteConfirmTimer) { clearTimeout(deleteConfirmTimer); deleteConfirmTimer = null; }
+			if (deleteConfirmTimer) {
+				clearScheduledTimeout(deleteConfirmTimer);
+				deleteConfirmTimer = null;
+			}
 			void handleAction("delete");
 		} else {
 			deleteConfirm = true;
-			if (deleteConfirmTimer) clearTimeout(deleteConfirmTimer);
-			deleteConfirmTimer = setTimeout(() => { deleteConfirm = false; deleteConfirmTimer = null; }, 3000);
+			clearScheduledTimeout(deleteConfirmTimer);
+			deleteConfirmTimer = scheduleTimeout(() => {
+				deleteConfirm = false;
+				deleteConfirmTimer = null;
+			}, 3000);
 		}
 	}
 
@@ -460,7 +471,11 @@
 		void runWorkspaceProgram(loadPathProgram(initialWorkspaceDir));
 	});
 
-	onDestroy(() => { stopLogs(); });
+	onDestroy(() => {
+		stopLogs();
+		clearScheduledTimeout(deleteConfirmTimer);
+		deleteConfirmTimer = null;
+	});
 
 	async function loadPath(pathToLoad: string): Promise<void> {
 		await runWorkspaceProgram(loadPathProgram(pathToLoad));

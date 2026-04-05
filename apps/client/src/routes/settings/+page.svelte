@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { authController, checkHealth, signOut } from "$lib/auth-controller.svelte";
+	import { clearScheduledTimeout, scheduleTimeout, type TimeoutHandle } from "$lib/client/browser";
 	import PageShell from "$lib/components/PageShell.svelte";
 	import {
 		formatApiFailure,
@@ -13,6 +14,7 @@
 	let endpointValue = $state(clientState.baseUrl);
 	let endpointDirty = $derived(endpointValue !== clientState.baseUrl);
 	let endpointSaved = $state(false);
+	let endpointSavedTimer: TimeoutHandle | null = null;
 
 	// Password change
 	let currentPassword = $state("");
@@ -31,7 +33,11 @@
 		if (!endpointValid) return;
 		setBaseUrl(endpointValue.replace(/\/$/, ""));
 		endpointSaved = true;
-		setTimeout(() => { endpointSaved = false; }, 2000);
+		clearScheduledTimeout(endpointSavedTimer);
+		endpointSavedTimer = scheduleTimeout(() => {
+			endpointSaved = false;
+			endpointSavedTimer = null;
+		}, 2000);
 	}
 
 	async function changePassword(): Promise<void> {
