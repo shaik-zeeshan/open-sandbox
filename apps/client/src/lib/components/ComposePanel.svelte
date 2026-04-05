@@ -1,18 +1,8 @@
 <script lang="ts">
 	import { untrack } from "svelte";
-	import { toast } from "$lib/toast.svelte";
 	import CodeEditor from "./CodeEditor.svelte";
-	import {
-		composeDown,
-		composeStatus,
-		composeUpStream,
-		formatApiFailure,
-		runApiEffect,
-		type ApiConfig,
-		type ComposeRequest
-	} from "$lib/api";
-
-	type ComposeAction = "up" | "status" | "down";
+	import { type ApiConfig, type ComposeRequest } from "$lib/api";
+	import { runComposeAction, type ComposeAction } from "$lib/compose-panel-runtime";
 
 	let {
 		config
@@ -68,26 +58,6 @@
 		return Array.from(new Set(names));
 	}
 
-	function extractServiceNamesFromStatus(value: unknown): string[] {
-		if (!Array.isArray(value)) {
-			return [];
-		}
-
-		const names: string[] = [];
-		for (const item of value) {
-			if (typeof item !== "object" || item === null) {
-				continue;
-			}
-			const record = item as Record<string, unknown>;
-			const candidate = record["Service"] ?? record["service"] ?? record["Name"] ?? record["name"];
-			if (typeof candidate === "string" && candidate.trim().length > 0) {
-				names.push(candidate.trim());
-			}
-		}
-
-		return Array.from(new Set(names));
-	}
-
 	const inferredServices = $derived(parseServiceNamesFromCompose(composeContent));
 	const availableServices = $derived.by(() =>
 		Array.from(new Set([...inferredServices, ...statusServiceNames]))
@@ -137,124 +107,29 @@
 		return request;
 	}
 
-	async function runComposeUp(): Promise<void> {
-		loading = true;
-		logs = "";
-		step = "Preparing";
-
-		try {
-			const request = buildComposeRequest();
-			if (!request.content) {
-				throw new Error("docker-compose.yml content is required.");
-			}
-			if (!request.project_name) {
-				throw new Error("Compose project name is required.");
-			}
-
-			step = "Running compose up";
-			appendLog(`Starting docker compose up (project: ${request.project_name})...`);
-			let composeError = "";
-
-			const result = await runApiEffect(composeUpStream(config, request, (event) => {
-				if ((event.event === "stdout" || event.event === "stderr") && event.data.length > 0) {
-					appendLog(event.data);
-				}
-				if (event.event === "error") {
-					composeError = event.data.trim();
-				}
-			}));
-
-			if (result.stdout.trim().length > 0) {
-				appendLog(result.stdout);
-			}
-			if (result.stderr.trim().length > 0) {
-				appendLog(result.stderr);
-			}
-
-			if (composeError.length > 0) {
-				throw new Error(composeError);
-			}
-
-			step = "Done";
-			toast.ok("Compose project started.");
-			appendLog("Compose up complete.");
-		} catch (error) {
-			toast.error(formatApiFailure(error));
-			step = "Failed";
-		} finally {
-			loading = false;
-		}
-	}
-
-	async function runComposeStatus(): Promise<void> {
-		loading = true;
-		step = "Fetching status";
-
-		try {
-			const request = buildComposeRequest();
-			if (!request.content) {
-				throw new Error("docker-compose.yml content is required.");
-			}
-			if (!request.project_name) {
-				throw new Error("Compose project name is required.");
-			}
-
-			const result = await runApiEffect(composeStatus(config, request));
-			statusServiceNames = extractServiceNamesFromStatus(result.services);
-			appendLog(result.raw || JSON.stringify(result.services, null, 2));
-			toast.ok("Compose status loaded.");
-			step = "Done";
-		} catch (error) {
-			toast.error(formatApiFailure(error));
-			step = "Failed";
-		} finally {
-			loading = false;
-		}
-	}
-
-	async function runComposeDown(): Promise<void> {
-		loading = true;
-		step = "Running compose down";
-
-		try {
-			const request = buildComposeRequest();
-			if (!request.content) {
-				throw new Error("docker-compose.yml content is required.");
-			}
-			if (!request.project_name) {
-				throw new Error("Compose project name is required.");
-			}
-
-			request.volumes = removeVolumes;
-			request.remove_orphans = removeOrphans;
-
-			const result = await runApiEffect(composeDown(config, request));
-			if (result.stdout.trim().length > 0) {
-				appendLog(result.stdout);
-			}
-			if (result.stderr.trim().length > 0) {
-				appendLog(result.stderr);
-			}
-			toast.ok("Compose project stopped.");
-			step = "Done";
-		} catch (error) {
-			toast.error(formatApiFailure(error));
-			step = "Failed";
-		} finally {
-			loading = false;
-		}
-	}
-
 	async function runAction(action: ComposeAction): Promise<void> {
-		if (action === "up") {
-			await runComposeUp();
-			return;
-		}
-		if (action === "status") {
-			await runComposeStatus();
-			return;
-		}
-		await runComposeDown();
+		await runComposeAction({
+			action,
+			config,
+			request: buildComposeRequest(),
+			removeVolumes,
+			removeOrphans,
+			runtime: {
+				setLoading: (value) => {
+					loading = value;
+				},
+				setStep: (value) => {
+					step = value;
+				},
+				setLogs: (value) => {
+					logs = value;
+				},
+				appendLog,
+				setStatusServiceNames: (value) => {
+					statusServiceNames = value;
+				}
+			}
+		});
 	}
 </script>
 
