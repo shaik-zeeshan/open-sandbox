@@ -1127,6 +1127,48 @@ func TestListContainersIncludesOwnedComposeProjects(t *testing.T) {
 	}
 }
 
+func TestListContainersAdminFiltersToManagedWorkloads(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return strings.Join([]string{
+			`{"ID":"sandbox-managed","Image":"ubuntu:24.04","Names":"sandbox-one","Status":"Up 1 minute","Labels":"open-sandbox.sandbox_id=sandbox-1,open-sandbox.owner_id=admin-user"}`,
+			`{"ID":"direct-managed","Image":"alpine:3.20","Names":"direct-one","Status":"Up 1 minute","Labels":"open-sandbox.kind=direct,open-sandbox.managed_id=ctr-123,open-sandbox.owner_id=admin-user"}`,
+			`{"ID":"compose-managed","Image":"redis:7","Names":"demo-cache-1","Status":"Up 1 minute","Labels":"com.docker.compose.project=demo,com.docker.compose.service=cache"}`,
+			`{"ID":"compose-infra-client","Image":"open-sandbox-client","Names":"open-sandbox-client-1","Status":"Up 1 minute","Labels":"com.docker.compose.project=open-sandboxmigrate-k8s,com.docker.compose.service=client,com.docker.compose.project.config_files=/Users/shaikzeeshan/Code/open-sandbox.migrate-k8s/compose.yaml,com.docker.compose.project.working_dir=/Users/shaikzeeshan/Code/open-sandbox.migrate-k8s"}`,
+			`{"ID":"compose-infra-server","Image":"open-sandbox-server","Names":"open-sandbox-server-1","Status":"Up 1 minute","Labels":"com.docker.compose.project=open-sandboxmigrate-k8s,com.docker.compose.service=server,com.docker.compose.project.config_files=/Users/shaikzeeshan/Code/open-sandbox.migrate-k8s/compose.yaml,com.docker.compose.project.working_dir=/Users/shaikzeeshan/Code/open-sandbox.migrate-k8s"}`,
+			`{"ID":"compose-external","Image":"postgres:16","Names":"shared-db-1","Status":"Up 1 minute","Labels":"com.docker.compose.project=shared,com.docker.compose.service=db"}`,
+			`{"ID":"runtime-external","Image":"busybox:1.36","Names":"scratch-box","Status":"Up 1 minute","Labels":""}`,
+		}, "\n"), "", nil
+	}
+
+	s := newTestServer(&mockDocker{})
+	s.workspaceRoot = t.TempDir()
+	projectDir := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", "demo")
+	if err := ensurePrivateDir(projectDir); err != nil {
+		t.Fatalf("expected compose project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "docker-compose.yml"), []byte("services:\n  cache:\n    image: redis:7\n"), 0o600); err != nil {
+		t.Fatalf("expected compose file: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/containers", nil)
+	setAuthHeader(t, req)
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"sandbox-managed"`)) || !bytes.Contains(w.Body.Bytes(), []byte(`"direct-managed"`)) || !bytes.Contains(w.Body.Bytes(), []byte(`"compose-managed"`)) {
+		t.Fatalf("expected managed workloads in response: %s", w.Body.String())
+	}
+	if bytes.Contains(w.Body.Bytes(), []byte(`"compose-external"`)) || bytes.Contains(w.Body.Bytes(), []byte(`"runtime-external"`)) || bytes.Contains(w.Body.Bytes(), []byte(`"compose-infra-client"`)) || bytes.Contains(w.Body.Bytes(), []byte(`"compose-infra-server"`)) {
+		t.Fatalf("expected unmanaged workloads to be filtered out: %s", w.Body.String())
+	}
+}
+
 func TestResetDirectContainerEndpoint(t *testing.T) {
 	original := commandRunner
 	defer func() { commandRunner = original }()
@@ -1510,6 +1552,102 @@ func TestCreateSandboxEndpointAutoPullsImageBeforeResolvingWorkdir(t *testing.T)
 	}
 	if inspectCalls != 2 {
 		t.Fatalf("expected image inspect to be retried after pull, got %d calls", inspectCalls)
+	}
+}
+
+func TestCreateSandboxEndpointNormalizesRequestedRootWorkdir(t *testing.T) {
+	createdSandbox := store.Sandbox{}
+	m := &mockDocker{
+		imageInspectFn: func(context.Context, string) (image.InspectResponse, error) {
+			t.Fatal("expected explicit workdir to skip image inspection")
+			return image.InspectResponse{}, nil
+		},
+		volumeCreateFn: func(_ context.Context, options volume.CreateOptions) (volume.Volume, error) {
+			return volume.Volume{Name: options.Name}, nil
+		},
+		containerCreateFn: func(_ context.Context, config *container.Config, hostConfig *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, _ string) (container.CreateResponse, error) {
+			if config.WorkingDir != "/workspace" {
+				t.Fatalf("expected normalized workdir /workspace, got %q", config.WorkingDir)
+			}
+			if len(hostConfig.Binds) != 1 || !strings.Contains(hostConfig.Binds[0], ":/workspace") {
+				t.Fatalf("expected workspace bind mount, got %v", hostConfig.Binds)
+			}
+			return container.CreateResponse{ID: "sandbox-container-id"}, nil
+		},
+		containerStartFn: func(_ context.Context, _ string, _ container.StartOptions) error {
+			return nil
+		},
+	}
+
+	sandboxStore := &mockSandboxStore{
+		createSandboxFn: func(_ context.Context, sandbox store.Sandbox) error {
+			createdSandbox = sandbox
+			return nil
+		},
+	}
+
+	s := newTestServerWithStore(m, sandboxStore)
+	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes", bytes.NewBufferString(`{"name":"workspace","image":"ubuntu:24.04","workdir":"/"}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if createdSandbox.WorkspaceDir != "/workspace" {
+		t.Fatalf("expected persisted workspace dir /workspace, got %q", createdSandbox.WorkspaceDir)
+	}
+}
+
+func TestCreateSandboxEndpointNormalizesImageRootWorkdir(t *testing.T) {
+	createdSandbox := store.Sandbox{}
+	m := &mockDocker{
+		imageInspectFn: func(_ context.Context, imageID string) (image.InspectResponse, error) {
+			if imageID != "ubuntu:24.04" {
+				t.Fatalf("expected image inspect for ubuntu:24.04, got %q", imageID)
+			}
+			return image.InspectResponse{Config: &dockerspec.DockerOCIImageConfig{ImageConfig: ocispec.ImageConfig{WorkingDir: "/"}}}, nil
+		},
+		volumeCreateFn: func(_ context.Context, options volume.CreateOptions) (volume.Volume, error) {
+			return volume.Volume{Name: options.Name}, nil
+		},
+		containerCreateFn: func(_ context.Context, config *container.Config, hostConfig *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, _ string) (container.CreateResponse, error) {
+			if config.WorkingDir != "/workspace" {
+				t.Fatalf("expected normalized workdir /workspace, got %q", config.WorkingDir)
+			}
+			if len(hostConfig.Binds) != 1 || !strings.Contains(hostConfig.Binds[0], ":/workspace") {
+				t.Fatalf("expected workspace bind mount, got %v", hostConfig.Binds)
+			}
+			return container.CreateResponse{ID: "sandbox-container-id"}, nil
+		},
+		containerStartFn: func(_ context.Context, _ string, _ container.StartOptions) error {
+			return nil
+		},
+	}
+
+	sandboxStore := &mockSandboxStore{
+		createSandboxFn: func(_ context.Context, sandbox store.Sandbox) error {
+			createdSandbox = sandbox
+			return nil
+		},
+	}
+
+	s := newTestServerWithStore(m, sandboxStore)
+	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes", bytes.NewBufferString(`{"name":"workspace","image":"ubuntu:24.04"}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if createdSandbox.WorkspaceDir != "/workspace" {
+		t.Fatalf("expected persisted workspace dir /workspace, got %q", createdSandbox.WorkspaceDir)
 	}
 }
 

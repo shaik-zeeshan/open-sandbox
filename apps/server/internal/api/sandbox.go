@@ -112,6 +112,8 @@ type dockerContainerCLIRecord struct {
 	Labels string `json:"Labels"`
 }
 
+const defaultSandboxWorkspaceDir = "/workspace"
+
 func (s *Server) listContainers(c *gin.Context) {
 	identity, ok := authIdentityFromContext(c)
 	if !ok {
@@ -124,6 +126,12 @@ func (s *Server) listContainers(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
+	managedComposeProjects, err := s.managedComposeProjects()
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+	containers = s.filterManagedRuntimeContainers(containers, managedComposeProjects)
 	if identity.IsAdmin() {
 		c.JSON(http.StatusOK, containers)
 		return
@@ -943,6 +951,15 @@ func (s *Server) loadAuthorizedContainer(c *gin.Context) (ContainerSummary, bool
 		writeError(c, http.StatusNotFound, errors.New("container not found"))
 		return ContainerSummary{}, false
 	}
+	managedComposeProjects, err := s.managedComposeProjects()
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return ContainerSummary{}, false
+	}
+	if !s.runtimeContainerManagedByApp(target, managedComposeProjects) {
+		writeError(c, http.StatusNotFound, errors.New("container not found"))
+		return ContainerSummary{}, false
+	}
 
 	if identity.IsAdmin() {
 		return target, true
@@ -1012,6 +1029,86 @@ func (s *Server) ownedComposeProjects(userID string) (map[string]struct{}, error
 		}
 	}
 	return owned, nil
+}
+
+func (s *Server) managedComposeProjects() (map[string]struct{}, error) {
+	managed := map[string]struct{}{}
+	composeRoot := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose")
+	entries, err := os.ReadDir(composeRoot)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return managed, nil
+		}
+		return nil, err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		composeFile := filepath.Join(composeRoot, entry.Name(), "docker-compose.yml")
+		if _, err := os.Stat(composeFile); err == nil {
+			managed[entry.Name()] = struct{}{}
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		ownerFile := filepath.Join(composeRoot, entry.Name(), composeOwnerMetadataFile)
+		if _, err := os.Stat(ownerFile); err == nil {
+			managed[entry.Name()] = struct{}{}
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+	}
+	return managed, nil
+}
+
+func (s *Server) filterManagedRuntimeContainers(containers []ContainerSummary, managedComposeProjects map[string]struct{}) []ContainerSummary {
+	filtered := make([]ContainerSummary, 0, len(containers))
+	for _, item := range containers {
+		if s.runtimeContainerManagedByApp(item, managedComposeProjects) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+func (s *Server) runtimeContainerManagedByApp(item ContainerSummary, managedComposeProjects map[string]struct{}) bool {
+	if strings.EqualFold(strings.TrimSpace(item.Labels[labelOpenSandboxManaged]), "true") {
+		return true
+	}
+	if strings.TrimSpace(item.Labels[labelOpenSandboxSandboxID]) != "" {
+		return true
+	}
+	if strings.TrimSpace(item.Labels[labelOpenSandboxManagedID]) != "" {
+		return true
+	}
+	projectName := strings.TrimSpace(item.ProjectName)
+	if projectName == "" {
+		projectName = strings.TrimSpace(item.Labels["com.docker.compose.project"])
+	}
+	if projectName == "" {
+		return false
+	}
+	composeRoot := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose")
+	if workingDir := strings.TrimSpace(item.Labels["com.docker.compose.project.working_dir"]); workingDir != "" {
+		if rel, err := filepath.Rel(composeRoot, workingDir); err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	if configFiles := strings.TrimSpace(item.Labels["com.docker.compose.project.config_files"]); configFiles != "" {
+		for _, configFile := range strings.Split(configFiles, ",") {
+			configFile = strings.TrimSpace(configFile)
+			if configFile == "" {
+				continue
+			}
+			if rel, err := filepath.Rel(composeRoot, configFile); err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+				return true
+			}
+		}
+	}
+	_, ok := managedComposeProjects[projectName]
+	return ok
 }
 
 func (s *Server) runtimeContainerVisibleToIdentity(item ContainerSummary, identity AuthIdentity, ownedContainerIDs map[string]struct{}, ownedComposeProjects map[string]struct{}) bool {
@@ -1124,6 +1221,9 @@ func (s *Server) runtimeContainersByID(ctx context.Context) (map[string]Containe
 
 func (s *Server) resolveSandboxWorkdir(ctx context.Context, imageRef string, requestedWorkdir string) (string, error) {
 	if workdir := strings.TrimSpace(requestedWorkdir); workdir != "" {
+		if workdir == "/" {
+			return defaultSandboxWorkspaceDir, nil
+		}
 		return workdir, nil
 	}
 
@@ -1133,6 +1233,9 @@ func (s *Server) resolveSandboxWorkdir(ctx context.Context, imageRef string, req
 	}
 	if inspected.Config != nil {
 		if workdir := strings.TrimSpace(inspected.Config.WorkingDir); workdir != "" {
+			if workdir == "/" {
+				return defaultSandboxWorkspaceDir, nil
+			}
 			return workdir, nil
 		}
 	}
