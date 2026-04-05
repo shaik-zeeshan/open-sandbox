@@ -1,22 +1,19 @@
 <script lang="ts">
-	import { onMount } from "svelte";
+	import { authController, checkHealth, clearAuthNotice, signOut as signOutSession } from "$lib/auth-controller.svelte";
 	import PageShell from "$lib/components/PageShell.svelte";
 	import SandboxesPanel from "$lib/components/SandboxesPanel.svelte";
 	import SandboxWorkspace from "$lib/components/SandboxWorkspace.svelte";
+	import type { HttpClient } from "@effect/platform";
 	import {
 		bootstrap,
 		createSandbox,
 		deleteSandbox,
 		formatApiFailure,
 		getSetupStatus,
-		getSession,
-		healthCheck,
 		listContainers,
 		listImages,
 		listSandboxes,
 		login,
-		logout,
-		refreshSession,
 		removeContainer,
 		resetContainer,
 		resetSandbox,
@@ -25,27 +22,26 @@
 		runApiEffect,
 		stopContainer,
 		stopSandbox,
+		type ApiFailure,
 		type ContainerSummary,
 		type ImageSummary,
 		type Sandbox
 	} from "$lib/api";
-	import { beginAuthCheck, clearAuth, clientState, setAuthSession, setBaseUrl } from "$lib/stores.svelte";
+	import { Effect } from "effect";
+	import { clientState, setAuthSession, setBaseUrl } from "$lib/stores.svelte";
 	import { toast } from "$lib/toast.svelte";
-
-	type HealthState = "unknown" | "checking" | "ok" | "error";
+	import { clearScheduledInterval, scheduleInterval, scheduleTimeout } from "$lib/client/browser";
 
 	// ── Sidebar collapse ───────────────────────────────────────────────────────
 	// (managed in PageShell, but we need nothing here for +page.svelte)
 
 	// ── Auth ───────────────────────────────────────────────────────────────────
-	let health = $state<HealthState>("unknown");
-	let healthMessage = $state("Waiting...");
-	let healthTimer: ReturnType<typeof setTimeout> | null = null;
 	let loginUsername = $state("");
 	let loginPassword = $state("");
 	let loginLoading = $state(false);
 	let loginError = $state("");
 	let bootstrapRequired = $state(false);
+	let setupStatusCheckedBaseUrl = $state<string | null>(null);
 	let endpointValue = $state(clientState.baseUrl);
 	let endpointSaved = $state(false);
 
@@ -54,10 +50,50 @@
 	let containers = $state<ContainerSummary[]>([]);
 	let images = $state<ImageSummary[]>([]);
 	let dataLoading = $state(false);
+	type RefreshOptions = {
+		includeImages?: boolean;
+		showLoading?: boolean;
+		notifyOnError?: boolean;
+		pollingSafeRetry?: boolean;
+	};
+	type ResolvedRefreshOptions = {
+		includeImages: boolean;
+		showLoading: boolean;
+		notifyOnError: boolean;
+		pollingSafeRetry: boolean;
+	};
+	const POLLING_REFRESH_RETRIES = 2;
+	const POLLING_RETRY_DELAY_MS = 350;
+	const resolveRefreshOptions = (options?: RefreshOptions): ResolvedRefreshOptions => ({
+		includeImages: options?.includeImages ?? true,
+		showLoading: options?.showLoading ?? true,
+		notifyOnError: options?.notifyOnError ?? true,
+		pollingSafeRetry: options?.pollingSafeRetry ?? false
+	});
+	const runApiProgram = <A>(
+		effect: Effect.Effect<A, ApiFailure, HttpClient.HttpClient>,
+		options?: { notifyAuthError?: boolean }
+	): Effect.Effect<A, unknown> =>
+		Effect.promise(() => runApiEffect(effect, options));
+	const withPollingRetry = <A>(
+		program: Effect.Effect<A, unknown>,
+		attemptsLeft = POLLING_REFRESH_RETRIES
+	): Effect.Effect<A, unknown> =>
+		program.pipe(
+			Effect.catchAll((error) =>
+				attemptsLeft <= 0
+					? Effect.fail(error)
+					: Effect.sleep(POLLING_RETRY_DELAY_MS).pipe(
+							Effect.andThen(withPollingRetry(program, attemptsLeft - 1))
+						)
+			)
+		);
+	const runProgram = <A>(program: Effect.Effect<A, unknown>): Promise<A> => Effect.runPromise(program);
 	let refreshPromise: Promise<void> | null = null;
 	let queuedRefreshIncludeImages = false;
 	let queuedRefreshShowLoading = false;
 	let queuedRefreshNotifyOnError = false;
+	let queuedRefreshPollingSafeRetry = false;
 
 	// ── View routing ───────────────────────────────────────────────────────────
 	type ActiveWorkload = { kind: "sandbox" | "container"; id: string } | null;
@@ -127,32 +163,13 @@
 	let createPorts = $state("");
 	let createLoading = $state(false);
 
-	// ── Health ─────────────────────────────────────────────────────────────────
-	async function checkHealth(): Promise<void> {
-		health = "checking";
-		healthMessage = "Checking...";
+	async function resolveSetupStatus(): Promise<void> {
 		try {
-			const r = await runApiEffect(healthCheck(clientState.config));
-			health = r.status === "ok" ? "ok" : "error";
-			healthMessage = r.status === "ok" ? "Reachable" : `Status: ${r.status}`;
-		} catch (err) {
-			health = "error";
-			healthMessage = formatApiFailure(err);
-		}
-	}
-
-	async function refreshAuthSession(): Promise<boolean> {
-		try {
-			const refreshed = await runApiEffect(refreshSession({ baseUrl: clientState.baseUrl }), { notifyAuthError: false });
-			setAuthSession({
-				userId: refreshed.user_id,
-				username: refreshed.username,
-				role: refreshed.role,
-				expiresAt: refreshed.expires_at
-			});
-			return true;
-		} catch {
-			return false;
+			const setup = await runApiEffect(getSetupStatus({ baseUrl: clientState.baseUrl }), { notifyAuthError: false });
+			bootstrapRequired = setup.bootstrap_required;
+		} catch (error) {
+			bootstrapRequired = false;
+			loginError = formatApiFailure(error);
 		}
 	}
 
@@ -161,88 +178,44 @@
 		endpointValue = clientState.baseUrl;
 	});
 
-	$effect(() => {
-		clientState.baseUrl;
-		if (healthTimer) clearTimeout(healthTimer);
-		healthTimer = setTimeout(() => void checkHealth(), 400);
-		return () => { if (healthTimer) { clearTimeout(healthTimer); healthTimer = null; } };
-	});
-
 	function applyEndpoint(): void {
 		if (!endpointValid) return;
 		setBaseUrl(endpointValue.replace(/\/$/, ""));
 		endpointSaved = true;
-		setTimeout(() => {
+		scheduleTimeout(() => {
 			endpointSaved = false;
 		}, 2000);
 	}
 
 	$effect(() => {
-		if (!clientState.isAuthenticated || clientState.tokenExpiresAt === null) return;
-		const delay = clientState.tokenExpiresAt * 1000 - Date.now() - 60_000;
-		if (delay <= 0) {
-			void (async () => {
-				if (!(await refreshAuthSession())) {
-					await signOut(false);
-					loginError = "Session expired. Sign in again.";
-				}
-			})();
+		if (clientState.isAuthenticated) {
+			setupStatusCheckedBaseUrl = null;
 			return;
 		}
-		const timer = setTimeout(() => {
-			void (async () => {
-				if (!(await refreshAuthSession())) {
-					await signOut(false);
-					loginError = "Session expired. Sign in again.";
-				}
-			})();
-		}, delay);
-		return () => clearTimeout(timer);
+
+		const notice = authController.authNotice;
+		if (notice.length > 0) {
+			loginError = notice;
+		}
 	});
 
-	async function restoreSession(): Promise<void> {
-		beginAuthCheck();
-		loginError = "";
-		try {
-			const session = await runApiEffect(getSession({ baseUrl: clientState.baseUrl }), { notifyAuthError: false });
-			setAuthSession({
-				userId: session.user_id,
-				username: session.username,
-				role: session.role,
-				expiresAt: session.expires_at
-			});
-		} catch (err) {
-			if (await refreshAuthSession()) {
-				return;
-			}
-
-			const message = formatApiFailure(err);
-			clearAuth();
-			try {
-				const setup = await runApiEffect(getSetupStatus({ baseUrl: clientState.baseUrl }), { notifyAuthError: false });
-				bootstrapRequired = setup.bootstrap_required;
-			} catch (setupErr) {
-				bootstrapRequired = false;
-				loginError = formatApiFailure(setupErr);
-				return;
-			}
-			if (!message.startsWith("Unauthorized:")) {
-				loginError = message;
-			}
+	$effect(() => {
+		const baseUrl = clientState.baseUrl;
+		if (!clientState.authResolved || clientState.isAuthenticated) {
+			return;
 		}
-	}
-
-	onMount(() => {
-		void restoreSession();
-		const onAuthError = () => { clearAuth(); loginError = "Session expired. Sign in again."; };
-		window.addEventListener("open-sandbox:auth-error", onAuthError);
-		return () => window.removeEventListener("open-sandbox:auth-error", onAuthError);
+		if (setupStatusCheckedBaseUrl === baseUrl) {
+			return;
+		}
+		setupStatusCheckedBaseUrl = baseUrl;
+		void resolveSetupStatus();
 	});
 
 	// ── Auth actions ───────────────────────────────────────────────────────────
 	async function submitLogin(): Promise<void> {
 		loginLoading = true;
 		loginError = "";
+		clearAuthNotice();
 		try {
 			const r = await runApiEffect(
 				bootstrapRequired
@@ -268,15 +241,7 @@
 	}
 
 	async function signOut(revoke = true): Promise<void> {
-		if (revoke) {
-			try {
-				await runApiEffect(logout({ baseUrl: clientState.baseUrl }), { notifyAuthError: false });
-			} catch {
-				// Clear client state even if the server session is already gone.
-			}
-		}
-
-		clearAuth();
+		await signOutSession(revoke);
 		loginUsername = "";
 		loginPassword = "";
 		loginError = "";
@@ -293,65 +258,103 @@
 	}
 
 	// ── Data actions ───────────────────────────────────────────────────────────
-	async function refreshData(options?: { includeImages?: boolean; showLoading?: boolean; notifyOnError?: boolean }): Promise<void> {
-		const includeImages = options?.includeImages ?? true;
-		const showLoading = options?.showLoading ?? true;
-		const notifyOnError = options?.notifyOnError ?? true;
+	const refreshDataProgram = (options: ResolvedRefreshOptions): Effect.Effect<void, unknown> =>
+		Effect.gen(function* () {
+			const [sb, ct, img] = yield* Effect.all([
+				runApiProgram(listSandboxes(clientState.config)),
+				runApiProgram(listContainers(clientState.config)),
+				options.includeImages ? runApiProgram(listImages(clientState.config)) : Effect.succeed(images)
+			]);
+			sandboxes = sb;
+			containers = ct;
+			images = img;
+			const currentActive = activeWorkload;
+			if (currentActive?.kind === "sandbox" && !sb.some((s) => s.id === currentActive.id)) {
+				activeWorkload = null;
+			}
+			if (currentActive?.kind === "container" && !ct.some((c) => c.id === currentActive.id)) {
+				if (pendingContainerActivationId !== currentActive.id) {
+					activeWorkload = null;
+					activeRuntimeContainerSnapshot = null;
+				}
+			}
+		});
+
+	async function refreshData(options?: RefreshOptions): Promise<void> {
+		const resolved = resolveRefreshOptions(options);
 
 		if (refreshPromise) {
-			queuedRefreshIncludeImages = queuedRefreshIncludeImages || includeImages;
-			queuedRefreshShowLoading = queuedRefreshShowLoading || showLoading;
-			queuedRefreshNotifyOnError = queuedRefreshNotifyOnError || notifyOnError;
+			queuedRefreshIncludeImages = queuedRefreshIncludeImages || resolved.includeImages;
+			queuedRefreshShowLoading = queuedRefreshShowLoading || resolved.showLoading;
+			queuedRefreshNotifyOnError = queuedRefreshNotifyOnError || resolved.notifyOnError;
+			queuedRefreshPollingSafeRetry = queuedRefreshPollingSafeRetry || resolved.pollingSafeRetry;
 			return refreshPromise;
 		}
 
-		refreshPromise = (async () => {
-			if (showLoading) {
-				dataLoading = true;
-			}
-			try {
-				const [sb, ct, img] = await Promise.all([
-					runApiEffect(listSandboxes(clientState.config)),
-					runApiEffect(listContainers(clientState.config)),
-					includeImages ? runApiEffect(listImages(clientState.config)) : Promise.resolve(images)
-				]);
-				sandboxes = sb;
-				containers = ct;
-				images = img;
-				const currentActive = activeWorkload;
-				if (currentActive?.kind === "sandbox" && !sb.some((s) => s.id === currentActive.id)) {
-					activeWorkload = null;
+		const baseProgram = refreshDataProgram(resolved);
+		const resilientProgram = resolved.pollingSafeRetry ? withPollingRetry(baseProgram) : baseProgram;
+		refreshPromise = runProgram(
+			Effect.gen(function* () {
+				if (resolved.showLoading) {
+					dataLoading = true;
 				}
-				if (currentActive?.kind === "container" && !ct.some((c) => c.id === currentActive.id)) {
-					if (pendingContainerActivationId !== currentActive.id) {
-						activeWorkload = null;
-						activeRuntimeContainerSnapshot = null;
+				try {
+					yield* resilientProgram;
+				} catch (err) {
+					if (resolved.notifyOnError) {
+						toast.error(formatApiFailure(err));
+					}
+				} finally {
+					if (resolved.showLoading) {
+						dataLoading = false;
 					}
 				}
-			} catch (err) {
-				if (notifyOnError) {
-					toast.error(formatApiFailure(err));
-				}
-			} finally {
-				if (showLoading) {
-					dataLoading = false;
-				}
-			}
-		})();
+			})
+		);
 
 		try {
 			await refreshPromise;
 		} finally {
 			refreshPromise = null;
-			if (queuedRefreshIncludeImages || queuedRefreshShowLoading) {
+			if (
+				queuedRefreshIncludeImages ||
+				queuedRefreshShowLoading ||
+				queuedRefreshNotifyOnError ||
+				queuedRefreshPollingSafeRetry
+			) {
 				const nextIncludeImages = queuedRefreshIncludeImages;
 				const nextShowLoading = queuedRefreshShowLoading;
 				const nextNotifyOnError = queuedRefreshNotifyOnError;
+				const nextPollingSafeRetry = queuedRefreshPollingSafeRetry;
 				queuedRefreshIncludeImages = false;
 				queuedRefreshShowLoading = false;
 				queuedRefreshNotifyOnError = false;
-				await refreshData({ includeImages: nextIncludeImages, showLoading: nextShowLoading, notifyOnError: nextNotifyOnError });
+				queuedRefreshPollingSafeRetry = false;
+				await refreshData({
+					includeImages: nextIncludeImages,
+					showLoading: nextShowLoading,
+					notifyOnError: nextNotifyOnError,
+					pollingSafeRetry: nextPollingSafeRetry
+				});
 			}
+		}
+	}
+
+	async function runActionProgram<A>(
+		program: Effect.Effect<A, unknown>,
+		options: {
+			successMessage: string;
+			afterSuccess?: (result: A) => void;
+			refreshOptions?: RefreshOptions;
+		}
+	): Promise<void> {
+		try {
+			const result = await runProgram(program);
+			options.afterSuccess?.(result);
+			toast.ok(options.successMessage);
+			await refreshData(options.refreshOptions);
+		} catch (err) {
+			toast.error(formatApiFailure(err));
 		}
 	}
 
@@ -400,60 +403,65 @@
 
 	// Sandbox list actions
 	async function handleRestart(id: string): Promise<void> {
-		try { await runApiEffect(restartSandbox(clientState.config, id)); toast.ok("Restarted."); await refreshData(); }
-		catch (err) { toast.error(formatApiFailure(err)); }
+		await runActionProgram(runApiProgram(restartSandbox(clientState.config, id)), {
+			successMessage: "Restarted."
+		});
 	}
 	async function handleReset(id: string): Promise<void> {
-		try { await runApiEffect(resetSandbox(clientState.config, id)); toast.ok("Reset."); await refreshData(); }
-		catch (err) { toast.error(formatApiFailure(err)); }
+		await runActionProgram(runApiProgram(resetSandbox(clientState.config, id)), {
+			successMessage: "Reset."
+		});
 	}
 	async function handleResetContainer(id: string): Promise<void> {
-		try {
-			const result = await runApiEffect(resetContainer(clientState.config, id));
-			const currentActive = activeWorkload;
-			if (currentActive?.kind === "container" && currentActive.id === id) {
-				activeWorkload = { kind: "container", id: result.id };
-				pendingContainerActivationId = result.id;
+		await runActionProgram(runApiProgram(resetContainer(clientState.config, id)), {
+			successMessage: "Container reset.",
+			afterSuccess: (result) => {
+				const currentActive = activeWorkload;
+				if (currentActive?.kind === "container" && currentActive.id === id) {
+					activeWorkload = { kind: "container", id: result.id };
+					pendingContainerActivationId = result.id;
+				}
 			}
-			toast.ok("Container reset.");
-			await refreshData();
-		}
-		catch (err) { toast.error(formatApiFailure(err)); }
+		});
 	}
 	async function handleStop(id: string): Promise<void> {
-		try { await runApiEffect(stopSandbox(clientState.config, id)); toast.ok("Stopped."); await refreshData(); }
-		catch (err) { toast.error(formatApiFailure(err)); }
+		await runActionProgram(runApiProgram(stopSandbox(clientState.config, id)), {
+			successMessage: "Stopped."
+		});
 	}
 	async function handleDelete(id: string): Promise<void> {
-		try {
-			await runApiEffect(deleteSandbox(clientState.config, id));
-			toast.ok("Deleted.");
-			const currentActive = activeWorkload;
-			if (currentActive?.kind === "sandbox" && currentActive.id === id) activeWorkload = null;
-			await refreshData();
-		} catch (err) { toast.error(formatApiFailure(err)); }
+		await runActionProgram(runApiProgram(deleteSandbox(clientState.config, id)), {
+			successMessage: "Deleted.",
+			afterSuccess: () => {
+				const currentActive = activeWorkload;
+				if (currentActive?.kind === "sandbox" && currentActive.id === id) {
+					activeWorkload = null;
+				}
+			}
+		});
 	}
 	async function handleRestartContainer(id: string): Promise<void> {
-		try { await runApiEffect(restartContainer(clientState.config, id)); toast.ok("Container restarted."); await refreshData(); }
-		catch (err) { toast.error(formatApiFailure(err)); }
+		await runActionProgram(runApiProgram(restartContainer(clientState.config, id)), {
+			successMessage: "Container restarted."
+		});
 	}
 	async function handleStopContainer(id: string): Promise<void> {
-		try { await runApiEffect(stopContainer(clientState.config, id)); toast.ok("Container stopped."); await refreshData(); }
-		catch (err) { toast.error(formatApiFailure(err)); }
+		await runActionProgram(runApiProgram(stopContainer(clientState.config, id)), {
+			successMessage: "Container stopped."
+		});
 	}
 	async function handleRemoveContainer(id: string): Promise<void> {
-		try {
-			await runApiEffect(removeContainer(clientState.config, id));
-			const currentActive = activeWorkload;
-			if (currentActive?.kind === "container" && currentActive.id === id) {
-				activeWorkload = null;
-				pendingContainerActivationId = null;
-				activeRuntimeContainerSnapshot = null;
+		await runActionProgram(runApiProgram(removeContainer(clientState.config, id)), {
+			successMessage: "Container removed.",
+			afterSuccess: () => {
+				const currentActive = activeWorkload;
+				if (currentActive?.kind === "container" && currentActive.id === id) {
+					activeWorkload = null;
+					pendingContainerActivationId = null;
+					activeRuntimeContainerSnapshot = null;
+				}
 			}
-			toast.ok("Container removed.");
-			await refreshData();
-		}
-		catch (err) { toast.error(formatApiFailure(err)); }
+		});
 	}
 
 	function openSandbox(id: string): void {
@@ -480,10 +488,15 @@
 		if (!clientState.isAuthenticated) {
 			return;
 		}
-		const interval = setInterval(() => {
-			void refreshData({ includeImages: false, showLoading: false, notifyOnError: false });
+		const interval = scheduleInterval(() => {
+			void refreshData({
+				includeImages: false,
+				showLoading: false,
+				notifyOnError: false,
+				pollingSafeRetry: true
+			});
 		}, 5000);
-		return () => clearInterval(interval);
+		return () => clearScheduledInterval(interval);
 	});
 </script>
 
@@ -565,8 +578,8 @@
 			<div class="auth-footer">
 				<span class="auth-version">v0.0.1</span>
 				<div class="auth-health">
-					<span class="auth-health-dot health-{health}"></span>
-					<span class="auth-health-text">{healthMessage}</span>
+					<span class="auth-health-dot health-{authController.health}"></span>
+					<span class="auth-health-text">{authController.healthMessage}</span>
 				</div>
 			</div>
 		</form>
@@ -575,8 +588,8 @@
 {:else}
 	<!-- ── Dashboard Shell ──────────────────────────────────────────────────── -->
 	<PageShell
-		{health}
-		{healthMessage}
+		health={authController.health}
+		healthMessage={authController.healthMessage}
 		onPing={() => void checkHealth()}
 		onSignOut={() => { void signOut(); }}
 		currentUsername={clientState.username}

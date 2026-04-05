@@ -1,24 +1,13 @@
 <script lang="ts">
-	import { goto } from "$app/navigation";
-	import { onMount } from "svelte";
+	import { authController, checkHealth, signOut } from "$lib/auth-controller.svelte";
 	import PageShell from "$lib/components/PageShell.svelte";
 	import {
 		formatApiFailure,
-		getSession,
-		healthCheck,
-		logout,
-		refreshSession,
 		runApiEffect,
 		updateUserPassword
 	} from "$lib/api";
-	import { beginAuthCheck, clearAuth, clientState, setAuthSession, setBaseUrl } from "$lib/stores.svelte";
+	import { clientState, setBaseUrl } from "$lib/stores.svelte";
 	import { toast } from "$lib/toast.svelte";
-
-	type HealthState = "unknown" | "checking" | "ok" | "error";
-
-	let health = $state<HealthState>("unknown");
-	let healthMessage = $state("Waiting...");
-	let healthTimer: ReturnType<typeof setTimeout> | null = null;
 
 	// Endpoint settings
 	let endpointValue = $state(clientState.baseUrl);
@@ -69,108 +58,12 @@
 		}
 	}
 
-	async function checkHealth(): Promise<void> {
-		health = "checking";
-		healthMessage = "Checking...";
-		try {
-			const r = await runApiEffect(healthCheck(clientState.config));
-			health = r.status === "ok" ? "ok" : "error";
-			healthMessage = r.status === "ok" ? "Reachable" : `Status: ${r.status}`;
-		} catch (err) {
-			health = "error";
-			healthMessage = formatApiFailure(err);
-		}
-	}
-
-	async function restoreSession(): Promise<void> {
-		beginAuthCheck();
-		try {
-			const session = await runApiEffect(getSession({ baseUrl: clientState.baseUrl }), { notifyAuthError: false });
-			setAuthSession({
-				userId: session.user_id,
-				username: session.username,
-				role: session.role,
-				expiresAt: session.expires_at
-			});
-		} catch (error) {
-			if (await refreshAuthSession()) {
-				return;
-			}
-
-			const message = formatApiFailure(error);
-			clearAuth();
-			if (!message.startsWith("Unauthorized:")) toast.error(message);
-		}
-	}
-
-	async function refreshAuthSession(): Promise<boolean> {
-		try {
-			const refreshed = await runApiEffect(refreshSession({ baseUrl: clientState.baseUrl }), { notifyAuthError: false });
-			setAuthSession({
-				userId: refreshed.user_id,
-				username: refreshed.username,
-				role: refreshed.role,
-				expiresAt: refreshed.expires_at
-			});
-			return true;
-		} catch {
-			return false;
-		}
-	}
-
-	async function signOut(revoke = true): Promise<void> {
-		if (revoke) {
-			try {
-				await runApiEffect(logout({ baseUrl: clientState.baseUrl }), { notifyAuthError: false });
-			} catch {}
-		}
-		clearAuth();
-		await goto("/");
-	}
 
 	$effect(() => {
 		clientState.baseUrl;
 		endpointValue = clientState.baseUrl;
 	});
 
-	$effect(() => {
-		clientState.baseUrl;
-		if (healthTimer) clearTimeout(healthTimer);
-		healthTimer = setTimeout(() => void checkHealth(), 400);
-		return () => { if (healthTimer) { clearTimeout(healthTimer); healthTimer = null; } };
-	});
-
-	$effect(() => {
-		if (!clientState.isAuthenticated || clientState.tokenExpiresAt === null) return;
-		const delay = clientState.tokenExpiresAt * 1000 - Date.now() - 60_000;
-		if (delay <= 0) {
-			void (async () => {
-				if (!(await refreshAuthSession())) {
-					await signOut(false);
-				}
-			})();
-			return;
-		}
-		const timer = setTimeout(() => {
-			void (async () => {
-				if (!(await refreshAuthSession())) {
-					await signOut(false);
-				}
-			})();
-		}, delay);
-		return () => clearTimeout(timer);
-	});
-
-	$effect(() => {
-		if (clientState.authResolved && !clientState.isAuthenticated) void goto("/");
-	});
-
-	onMount(() => {
-		void restoreSession();
-		const onAuthError = () => { clearAuth(); void goto("/"); };
-		window.addEventListener("open-sandbox:auth-error", onAuthError);
-		return () => window.removeEventListener("open-sandbox:auth-error", onAuthError);
-	});
 </script>
 
 {#if !clientState.authResolved}
@@ -182,8 +75,8 @@
 	</div>
 {:else if clientState.isAuthenticated}
 	<PageShell
-		{health}
-		{healthMessage}
+		health={authController.health}
+		healthMessage={authController.healthMessage}
 		onPing={() => void checkHealth()}
 		onSignOut={() => void signOut()}
 		currentUsername={clientState.username}
@@ -236,13 +129,13 @@
 						<div class="health-bar">
 							<div class="health-indicator">
 								<span class="health-dot" style="
-									background: {health === 'ok' ? 'var(--status-ok)' : health === 'error' ? 'var(--status-error)' : health === 'checking' ? 'var(--status-warn)' : 'var(--text-muted)'};
-									box-shadow: {health === 'ok' ? '0 0 6px rgba(74,222,128,0.4)' : 'none'};
+									background: {authController.health === 'ok' ? 'var(--status-ok)' : authController.health === 'error' ? 'var(--status-error)' : authController.health === 'checking' ? 'var(--status-warn)' : 'var(--text-muted)'};
+									box-shadow: {authController.health === 'ok' ? '0 0 6px rgba(74,222,128,0.4)' : 'none'};
 								"></span>
-								<span class="health-label">{healthMessage}</span>
+								<span class="health-label">{authController.healthMessage}</span>
 							</div>
 							<button class="btn-ghost btn-sm" type="button" onclick={() => void checkHealth()}>
-								{health === "checking" ? "Checking..." : "Test connection"}
+								{authController.health === "checking" ? "Checking..." : "Test connection"}
 							</button>
 						</div>
 					</div>
