@@ -2,8 +2,10 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -19,14 +21,16 @@ import (
 
 const (
 	sessionCookieName = "open_sandbox_session"
+	refreshCookieName = "open_sandbox_refresh"
 	roleAdmin         = "admin"
 	roleMember        = "member"
 )
 
 type AuthConfig struct {
-	JWTSecret []byte
-	TokenTTL  time.Duration
-	Issuer    string
+	JWTSecret  []byte
+	TokenTTL   time.Duration
+	RefreshTTL time.Duration
+	Issuer     string
 }
 
 type AuthIdentity struct {
@@ -67,11 +71,24 @@ func LoadAuthConfigFromEnv() (AuthConfig, error) {
 		issuer = "open-sandbox"
 	}
 
+	refreshTTL := 30 * 24 * time.Hour
+	refreshTTLRaw := strings.TrimSpace(os.Getenv("SANDBOX_REFRESH_TTL"))
+	if refreshTTLRaw != "" {
+		parsedRefreshTTL, err := time.ParseDuration(refreshTTLRaw)
+		if err != nil {
+			return AuthConfig{}, errors.New("invalid SANDBOX_REFRESH_TTL: must be a Go duration like 168h or 720h")
+		}
+		if parsedRefreshTTL <= 0 {
+			return AuthConfig{}, errors.New("invalid SANDBOX_REFRESH_TTL: must be greater than zero")
+		}
+		refreshTTL = parsedRefreshTTL
+	}
+
 	if jwtSecret == "" {
 		return AuthConfig{}, errors.New("auth is not configured: set SANDBOX_JWT_SECRET")
 	}
 
-	return AuthConfig{JWTSecret: []byte(jwtSecret), TokenTTL: ttl, Issuer: issuer}, nil
+	return AuthConfig{JWTSecret: []byte(jwtSecret), TokenTTL: ttl, RefreshTTL: refreshTTL, Issuer: issuer}, nil
 }
 
 func (a AuthConfig) Middleware() gin.HandlerFunc {
@@ -154,13 +171,14 @@ func (s *Server) login(c *gin.Context) {
 	}
 
 	identity := AuthIdentity{UserID: user.ID, Username: user.Username, Role: user.Role}
-	signed, expiresAt, err := s.issueAuthToken(identity)
+	signed, refreshToken, expiresAt, refreshExpiresAt, err := s.issueSessionTokens(c.Request.Context(), identity)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 
 	writeSessionCookie(c, signed, expiresAt)
+	writeRefreshCookie(c, refreshToken, refreshExpiresAt)
 	c.JSON(http.StatusOK, LoginResponse{
 		Token:     signed,
 		TokenType: "Bearer",
@@ -229,13 +247,14 @@ func (s *Server) bootstrap(c *gin.Context) {
 	}
 
 	identity := AuthIdentity{UserID: created.ID, Username: created.Username, Role: created.Role}
-	signed, expiresAt, err := s.issueAuthToken(identity)
+	signed, refreshToken, expiresAt, refreshExpiresAt, err := s.issueSessionTokens(c.Request.Context(), identity)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 
 	writeSessionCookie(c, signed, expiresAt)
+	writeRefreshCookie(c, refreshToken, refreshExpiresAt)
 	c.JSON(http.StatusOK, LoginResponse{
 		Token:     signed,
 		TokenType: "Bearer",
@@ -268,8 +287,85 @@ func (s *Server) session(c *gin.Context) {
 }
 
 func (s *Server) logout(c *gin.Context) {
+	if s.userStore != nil {
+		if cookie, err := c.Request.Cookie(refreshCookieName); err == nil {
+			tokenHash := hashTokenValue(cookie.Value)
+			_ = s.userStore.RevokeRefreshTokenByHash(c.Request.Context(), tokenHash, time.Now().Unix())
+		}
+	}
+
 	clearSessionCookie(c)
+	clearRefreshCookie(c)
 	c.JSON(http.StatusOK, gin.H{"signed_out": true})
+}
+
+func (s *Server) refresh(c *gin.Context) {
+	if s.userStore == nil {
+		writeError(c, http.StatusInternalServerError, errors.New("user store is not configured"))
+		return
+	}
+
+	cookie, err := c.Request.Cookie(refreshCookieName)
+	if err != nil || strings.TrimSpace(cookie.Value) == "" {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Reason: "refresh_token_missing"})
+		return
+	}
+
+	now := time.Now().UTC()
+	tokenHash := hashTokenValue(cookie.Value)
+	currentToken, err := s.userStore.GetRefreshTokenByHash(c.Request.Context(), tokenHash)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Reason: "refresh_token_invalid"})
+		return
+	}
+
+	if currentToken.ExpiresAt <= now.Unix() {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Reason: "refresh_token_expired"})
+		return
+	}
+	if currentToken.RotatedAt != 0 || currentToken.RevokedAt != 0 {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Reason: "refresh_token_invalid"})
+		return
+	}
+
+	user, err := s.userStore.GetUserByID(c.Request.Context(), currentToken.UserID)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Reason: "refresh_token_invalid"})
+		return
+	}
+
+	identity := AuthIdentity{UserID: user.ID, Username: user.Username, Role: user.Role}
+	accessToken, accessExpiresAt, err := s.issueAuthToken(identity)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+
+	replacementToken, replacementRecord, refreshExpiresAt, err := s.newRefreshTokenRecord(identity.UserID, now)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+
+	if err := s.userStore.RotateRefreshToken(c.Request.Context(), currentToken.ID, replacementRecord, now.Unix()); err != nil {
+		if errors.Is(err, store.ErrRefreshTokenInactive) || errors.Is(err, store.ErrRefreshTokenNotFound) {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, ErrorResponse{Error: "unauthorized", Reason: "refresh_token_invalid"})
+			return
+		}
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+
+	writeSessionCookie(c, accessToken, accessExpiresAt)
+	writeRefreshCookie(c, replacementToken, refreshExpiresAt)
+	c.JSON(http.StatusOK, LoginResponse{
+		Token:     accessToken,
+		TokenType: "Bearer",
+		UserID:    identity.UserID,
+		Username:  identity.Username,
+		Role:      identity.Role,
+		ExpiresAt: accessExpiresAt.Unix(),
+	})
 }
 
 func (s *Server) bootstrapRequired(ctx context.Context) (bool, error) {
@@ -305,6 +401,48 @@ func (s *Server) issueAuthToken(identity AuthIdentity) (string, time.Time, error
 	}
 
 	return signed, expiresAt, nil
+}
+
+func (s *Server) issueSessionTokens(ctx context.Context, identity AuthIdentity) (string, string, time.Time, time.Time, error) {
+	accessToken, accessExpiresAt, err := s.issueAuthToken(identity)
+	if err != nil {
+		return "", "", time.Time{}, time.Time{}, err
+	}
+
+	now := time.Now().UTC()
+	refreshToken, refreshRecord, refreshExpiresAt, err := s.newRefreshTokenRecord(identity.UserID, now)
+	if err != nil {
+		return "", "", time.Time{}, time.Time{}, err
+	}
+
+	if err := s.userStore.CreateRefreshToken(ctx, refreshRecord); err != nil {
+		return "", "", time.Time{}, time.Time{}, err
+	}
+
+	return accessToken, refreshToken, accessExpiresAt, refreshExpiresAt, nil
+}
+
+func (s *Server) newRefreshTokenRecord(userID string, now time.Time) (string, store.RefreshTokenRecord, time.Time, error) {
+	rawToken, err := newOpaqueToken()
+	if err != nil {
+		return "", store.RefreshTokenRecord{}, time.Time{}, err
+	}
+
+	refreshTTL := s.auth.RefreshTTL
+	if refreshTTL <= 0 {
+		refreshTTL = 30 * 24 * time.Hour
+	}
+
+	expiresAt := now.Add(refreshTTL)
+	record := store.RefreshTokenRecord{
+		ID:        newRequestID(),
+		TokenHash: hashTokenValue(rawToken),
+		UserID:    userID,
+		ExpiresAt: expiresAt.Unix(),
+		CreatedAt: now.Unix(),
+	}
+
+	return rawToken, record, expiresAt, nil
 }
 
 func (a AuthConfig) authenticateRequest(r *http.Request) (AuthIdentity, *authClaims, string, error) {
@@ -439,6 +577,32 @@ func clearSessionCookie(c *gin.Context) {
 	})
 }
 
+func writeRefreshCookie(c *gin.Context, token string, expiresAt time.Time) {
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     refreshCookieName,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   requestIsSecure(c.Request),
+		Expires:  expiresAt,
+		MaxAge:   max(1, int(time.Until(expiresAt).Seconds())),
+	})
+}
+
+func clearRefreshCookie(c *gin.Context) {
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     refreshCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   requestIsSecure(c.Request),
+		Expires:  time.Unix(0, 0),
+		MaxAge:   -1,
+	})
+}
+
 func requestIsSecure(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
@@ -456,4 +620,18 @@ func secureEqual(a string, b string) bool {
 	ha := sha256.Sum256([]byte(a))
 	hb := sha256.Sum256([]byte(b))
 	return subtle.ConstantTimeCompare(ha[:], hb[:]) == 1
+}
+
+func hashTokenValue(raw string) string {
+	hashed := sha256.Sum256([]byte(strings.TrimSpace(raw)))
+	return hex.EncodeToString(hashed[:])
+}
+
+func newOpaqueToken() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+
+	return hex.EncodeToString(bytes), nil
 }

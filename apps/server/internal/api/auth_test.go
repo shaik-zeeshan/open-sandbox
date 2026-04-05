@@ -265,7 +265,7 @@ func TestAuthMiddlewareRejectsQueryToken(t *testing.T) {
 
 func TestLoginEndpoint(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	s := newAuthServer(t, AuthConfig{JWTSecret: []byte("jwt-secret"), TokenTTL: time.Minute, Issuer: "open-sandbox"})
+	s := newAuthServer(t, AuthConfig{JWTSecret: []byte("jwt-secret"), TokenTTL: time.Minute, RefreshTTL: 24 * time.Hour, Issuer: "open-sandbox"})
 	seedUser(t, s, "admin", "test-password", roleAdmin)
 
 	req := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(`{"username":"admin","password":"test-password"}`))
@@ -290,18 +290,17 @@ func TestLoginEndpoint(t *testing.T) {
 		t.Fatal("expected login to set a session cookie")
 	}
 
-	var sessionCookie *http.Cookie
-	for _, cookie := range cookies {
-		if cookie.Name == sessionCookieName {
-			sessionCookie = cookie
-			break
-		}
-	}
+	sessionCookie := findCookie(cookies, sessionCookieName)
 	if sessionCookie == nil {
 		t.Fatalf("expected %s cookie to be set", sessionCookieName)
 	}
 	if !sessionCookie.HttpOnly {
 		t.Fatal("expected session cookie to be httpOnly")
+	}
+
+	refreshCookie := findCookie(cookies, refreshCookieName)
+	if refreshCookie == nil {
+		t.Fatalf("expected %s cookie to be set", refreshCookieName)
 	}
 }
 
@@ -323,7 +322,7 @@ func TestLoginEndpointRejectsWrongUsername(t *testing.T) {
 
 func TestSessionEndpoint(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	s := newAuthServer(t, AuthConfig{JWTSecret: []byte("jwt-secret"), TokenTTL: time.Minute, Issuer: "open-sandbox"})
+	s := newAuthServer(t, AuthConfig{JWTSecret: []byte("jwt-secret"), TokenTTL: time.Minute, RefreshTTL: 24 * time.Hour, Issuer: "open-sandbox"})
 	seedUser(t, s, "admin", "test-password", roleAdmin)
 
 	loginReq := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(`{"username":"admin","password":"test-password"}`))
@@ -331,13 +330,7 @@ func TestSessionEndpoint(t *testing.T) {
 	loginW := httptest.NewRecorder()
 	s.Router().ServeHTTP(loginW, loginReq)
 
-	var sessionCookie *http.Cookie
-	for _, cookie := range loginW.Result().Cookies() {
-		if cookie.Name == sessionCookieName {
-			sessionCookie = cookie
-			break
-		}
-	}
+	sessionCookie := findCookie(loginW.Result().Cookies(), sessionCookieName)
 	if sessionCookie == nil {
 		t.Fatalf("expected %s cookie to be set", sessionCookieName)
 	}
@@ -372,7 +365,7 @@ func TestSessionEndpoint(t *testing.T) {
 
 func TestLogoutEndpointClearsSessionCookie(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	s := newAuthServer(t, AuthConfig{JWTSecret: []byte("jwt-secret"), TokenTTL: time.Minute, Issuer: "open-sandbox"})
+	s := newAuthServer(t, AuthConfig{JWTSecret: []byte("jwt-secret"), TokenTTL: time.Minute, RefreshTTL: 24 * time.Hour, Issuer: "open-sandbox"})
 
 	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
 	w := httptest.NewRecorder()
@@ -383,18 +376,137 @@ func TestLogoutEndpointClearsSessionCookie(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	var sessionCookie *http.Cookie
-	for _, cookie := range w.Result().Cookies() {
-		if cookie.Name == sessionCookieName {
-			sessionCookie = cookie
-			break
-		}
-	}
+	sessionCookie := findCookie(w.Result().Cookies(), sessionCookieName)
 	if sessionCookie == nil {
 		t.Fatalf("expected %s cookie to be cleared", sessionCookieName)
 	}
 	if sessionCookie.MaxAge != -1 {
 		t.Fatalf("expected cleared session cookie max-age -1, got %d", sessionCookie.MaxAge)
+	}
+
+	refreshCookie := findCookie(w.Result().Cookies(), refreshCookieName)
+	if refreshCookie == nil {
+		t.Fatalf("expected %s cookie to be cleared", refreshCookieName)
+	}
+	if refreshCookie.MaxAge != -1 {
+		t.Fatalf("expected cleared refresh cookie max-age -1, got %d", refreshCookie.MaxAge)
+	}
+}
+
+func TestRefreshEndpointRotatesRefreshToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	s := newAuthServer(t, AuthConfig{JWTSecret: []byte("jwt-secret"), TokenTTL: time.Minute, RefreshTTL: 24 * time.Hour, Issuer: "open-sandbox"})
+	seedUser(t, s, "admin", "test-password", roleAdmin)
+
+	loginReq := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(`{"username":"admin","password":"test-password"}`))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginW := httptest.NewRecorder()
+	s.Router().ServeHTTP(loginW, loginReq)
+
+	oldRefresh := findCookie(loginW.Result().Cookies(), refreshCookieName)
+	if oldRefresh == nil {
+		t.Fatalf("expected %s cookie to be set", refreshCookieName)
+	}
+
+	refreshReq := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
+	refreshReq.AddCookie(oldRefresh)
+	refreshW := httptest.NewRecorder()
+	s.Router().ServeHTTP(refreshW, refreshReq)
+
+	if refreshW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", refreshW.Code, refreshW.Body.String())
+	}
+
+	newRefresh := findCookie(refreshW.Result().Cookies(), refreshCookieName)
+	if newRefresh == nil {
+		t.Fatalf("expected rotated %s cookie to be set", refreshCookieName)
+	}
+	if secureEqual(oldRefresh.Value, newRefresh.Value) {
+		t.Fatal("expected refresh token cookie value to rotate")
+	}
+
+	reuseReq := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
+	reuseReq.AddCookie(oldRefresh)
+	reuseW := httptest.NewRecorder()
+	s.Router().ServeHTTP(reuseW, reuseReq)
+
+	if reuseW.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for reused refresh token, got %d", reuseW.Code)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(reuseW.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode reuse response: %v", err)
+	}
+	if payload["reason"] != "refresh_token_invalid" {
+		t.Fatalf("expected reason refresh_token_invalid, got %v", payload["reason"])
+	}
+}
+
+func TestRefreshEndpointRejectsExpiredRefreshToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	s := newAuthServer(t, AuthConfig{JWTSecret: []byte("jwt-secret"), TokenTTL: time.Minute, RefreshTTL: time.Second, Issuer: "open-sandbox"})
+	seedUser(t, s, "admin", "test-password", roleAdmin)
+
+	loginReq := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(`{"username":"admin","password":"test-password"}`))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginW := httptest.NewRecorder()
+	s.Router().ServeHTTP(loginW, loginReq)
+
+	refreshCookie := findCookie(loginW.Result().Cookies(), refreshCookieName)
+	if refreshCookie == nil {
+		t.Fatalf("expected %s cookie to be set", refreshCookieName)
+	}
+
+	time.Sleep(1200 * time.Millisecond)
+
+	refreshReq := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
+	refreshReq.AddCookie(refreshCookie)
+	refreshW := httptest.NewRecorder()
+	s.Router().ServeHTTP(refreshW, refreshReq)
+
+	if refreshW.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", refreshW.Code)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(refreshW.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode expired response: %v", err)
+	}
+	if payload["reason"] != "refresh_token_expired" {
+		t.Fatalf("expected reason refresh_token_expired, got %v", payload["reason"])
+	}
+}
+
+func TestLogoutRevokesRefreshToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	s := newAuthServer(t, AuthConfig{JWTSecret: []byte("jwt-secret"), TokenTTL: time.Minute, RefreshTTL: 24 * time.Hour, Issuer: "open-sandbox"})
+	seedUser(t, s, "admin", "test-password", roleAdmin)
+
+	loginReq := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(`{"username":"admin","password":"test-password"}`))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginW := httptest.NewRecorder()
+	s.Router().ServeHTTP(loginW, loginReq)
+
+	refreshCookie := findCookie(loginW.Result().Cookies(), refreshCookieName)
+	if refreshCookie == nil {
+		t.Fatalf("expected %s cookie to be set", refreshCookieName)
+	}
+
+	logoutReq := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	logoutReq.AddCookie(refreshCookie)
+	logoutW := httptest.NewRecorder()
+	s.Router().ServeHTTP(logoutW, logoutReq)
+
+	if logoutW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", logoutW.Code)
+	}
+
+	refreshReq := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
+	refreshReq.AddCookie(refreshCookie)
+	refreshW := httptest.NewRecorder()
+	s.Router().ServeHTTP(refreshW, refreshReq)
+
+	if refreshW.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 after logout revoke, got %d", refreshW.Code)
 	}
 }
 
@@ -464,9 +576,36 @@ func TestLoadAuthConfigFromEnv(t *testing.T) {
 	if auth.TokenTTL != 30*time.Minute {
 		t.Fatalf("expected token ttl 30m, got %s", auth.TokenTTL)
 	}
+	if auth.RefreshTTL != 30*24*time.Hour {
+		t.Fatalf("expected default refresh ttl 30d, got %s", auth.RefreshTTL)
+	}
 	if auth.Issuer != "custom-issuer" {
 		t.Fatalf("expected custom issuer, got %q", auth.Issuer)
 	}
+}
+
+func TestLoadAuthConfigFromEnvRefreshTTL(t *testing.T) {
+	t.Setenv("SANDBOX_JWT_SECRET", "secret")
+	t.Setenv("SANDBOX_REFRESH_TTL", "168h")
+
+	auth, err := LoadAuthConfigFromEnv()
+	if err != nil {
+		t.Fatalf("expected auth config to load: %v", err)
+	}
+
+	if auth.RefreshTTL != 168*time.Hour {
+		t.Fatalf("expected refresh ttl 168h, got %s", auth.RefreshTTL)
+	}
+}
+
+func findCookie(cookies []*http.Cookie, name string) *http.Cookie {
+	for _, cookie := range cookies {
+		if cookie.Name == name {
+			return cookie
+		}
+	}
+
+	return nil
 }
 
 func TestLoadAuthConfigFromEnvRequiresJWTSecret(t *testing.T) {

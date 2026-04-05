@@ -7,6 +7,7 @@
 		getSession,
 		healthCheck,
 		logout,
+		refreshSession,
 		runApiEffect,
 		updateUserPassword
 	} from "$lib/api";
@@ -95,9 +96,28 @@
 				expiresAt: session.expires_at
 			});
 		} catch (error) {
+			if (await refreshAuthSession()) {
+				return;
+			}
+
 			const message = formatApiFailure(error);
 			clearAuth();
 			if (!message.startsWith("Unauthorized:")) pageError = message;
+		}
+	}
+
+	async function refreshAuthSession(): Promise<boolean> {
+		try {
+			const refreshed = await runApiEffect(refreshSession({ baseUrl: clientState.baseUrl }), { notifyAuthError: false });
+			setAuthSession({
+				userId: refreshed.user_id,
+				username: refreshed.username,
+				role: refreshed.role,
+				expiresAt: refreshed.expires_at
+			});
+			return true;
+		} catch {
+			return false;
 		}
 	}
 
@@ -125,9 +145,22 @@
 
 	$effect(() => {
 		if (!clientState.isAuthenticated || clientState.tokenExpiresAt === null) return;
-		const delay = clientState.tokenExpiresAt * 1000 - Date.now();
-		if (delay <= 0) { void signOut(false); return; }
-		const timer = setTimeout(() => void signOut(false), delay);
+		const delay = clientState.tokenExpiresAt * 1000 - Date.now() - 60_000;
+		if (delay <= 0) {
+			void (async () => {
+				if (!(await refreshAuthSession())) {
+					await signOut(false);
+				}
+			})();
+			return;
+		}
+		const timer = setTimeout(() => {
+			void (async () => {
+				if (!(await refreshAuthSession())) {
+					await signOut(false);
+				}
+			})();
+		}, delay);
 		return () => clearTimeout(timer);
 	});
 

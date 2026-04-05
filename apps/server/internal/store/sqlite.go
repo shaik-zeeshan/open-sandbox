@@ -16,6 +16,8 @@ import (
 var ErrSandboxNotFound = errors.New("sandbox not found")
 var ErrUserNotFound = errors.New("user not found")
 var ErrUsernameTaken = errors.New("username already exists")
+var ErrRefreshTokenNotFound = errors.New("refresh token not found")
+var ErrRefreshTokenInactive = errors.New("refresh token is inactive")
 
 type Sandbox struct {
 	ID            string
@@ -42,6 +44,17 @@ type User struct {
 type UserRecord struct {
 	User
 	PasswordHash string
+}
+
+type RefreshTokenRecord struct {
+	ID                string
+	TokenHash         string
+	UserID            string
+	ExpiresAt         int64
+	CreatedAt         int64
+	RotatedAt         int64
+	RevokedAt         int64
+	ReplacedByTokenID string
 }
 
 func (s *SQLiteStore) HasUsers(ctx context.Context) (bool, error) {
@@ -120,6 +133,20 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE INDEX IF NOT EXISTS idx_sandboxes_created_at ON sandboxes(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sandboxes_container_id ON sandboxes(container_id);
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+	id TEXT PRIMARY KEY,
+	token_hash TEXT NOT NULL UNIQUE,
+	user_id TEXT NOT NULL,
+	expires_at INTEGER NOT NULL,
+	created_at INTEGER NOT NULL,
+	rotated_at INTEGER NOT NULL DEFAULT 0,
+	revoked_at INTEGER NOT NULL DEFAULT 0,
+	replaced_by_token_id TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires_at ON refresh_tokens(expires_at);
 `
 
 	if _, err := s.db.ExecContext(ctx, migration); err != nil {
@@ -426,6 +453,26 @@ func (s *SQLiteStore) GetUserByUsername(ctx context.Context, username string) (U
 	return user, nil
 }
 
+func (s *SQLiteStore) GetUserByID(ctx context.Context, userID string) (UserRecord, error) {
+	row := s.db.QueryRowContext(
+		ctx,
+		`SELECT id, username, password_hash, role, created_at, updated_at
+		 FROM users
+		 WHERE id = ?`,
+		strings.TrimSpace(userID),
+	)
+
+	var user UserRecord
+	if err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &user.Role, &user.CreatedAt, &user.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return UserRecord{}, ErrUserNotFound
+		}
+		return UserRecord{}, fmt.Errorf("query user by id: %w", err)
+	}
+
+	return user, nil
+}
+
 func (s *SQLiteStore) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, username, role, created_at, updated_at
@@ -486,6 +533,174 @@ func (s *SQLiteStore) DeleteUser(ctx context.Context, userID string) error {
 	}
 	if changed == 0 {
 		return ErrUserNotFound
+	}
+
+	return nil
+}
+
+func (s *SQLiteStore) CreateRefreshToken(ctx context.Context, token RefreshTokenRecord) error {
+	if strings.TrimSpace(token.ID) == "" {
+		return errors.New("refresh token id is required")
+	}
+	if strings.TrimSpace(token.TokenHash) == "" {
+		return errors.New("refresh token hash is required")
+	}
+	if strings.TrimSpace(token.UserID) == "" {
+		return errors.New("refresh token user id is required")
+	}
+	if token.ExpiresAt <= 0 {
+		return errors.New("refresh token expires_at must be greater than zero")
+	}
+
+	if token.CreatedAt == 0 {
+		token.CreatedAt = time.Now().Unix()
+	}
+
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO refresh_tokens (id, token_hash, user_id, expires_at, created_at, rotated_at, revoked_at, replaced_by_token_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		token.ID,
+		token.TokenHash,
+		token.UserID,
+		token.ExpiresAt,
+		token.CreatedAt,
+		token.RotatedAt,
+		token.RevokedAt,
+		token.ReplacedByTokenID,
+	)
+	if err != nil {
+		return fmt.Errorf("insert refresh token: %w", err)
+	}
+
+	return nil
+}
+
+func (s *SQLiteStore) GetRefreshTokenByHash(ctx context.Context, tokenHash string) (RefreshTokenRecord, error) {
+	row := s.db.QueryRowContext(
+		ctx,
+		`SELECT id, token_hash, user_id, expires_at, created_at, rotated_at, revoked_at, replaced_by_token_id
+		 FROM refresh_tokens
+		 WHERE token_hash = ?`,
+		strings.TrimSpace(tokenHash),
+	)
+
+	var token RefreshTokenRecord
+	if err := row.Scan(
+		&token.ID,
+		&token.TokenHash,
+		&token.UserID,
+		&token.ExpiresAt,
+		&token.CreatedAt,
+		&token.RotatedAt,
+		&token.RevokedAt,
+		&token.ReplacedByTokenID,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return RefreshTokenRecord{}, ErrRefreshTokenNotFound
+		}
+		return RefreshTokenRecord{}, fmt.Errorf("query refresh token by hash: %w", err)
+	}
+
+	return token, nil
+}
+
+func (s *SQLiteStore) RotateRefreshToken(ctx context.Context, currentTokenID string, replacement RefreshTokenRecord, rotatedAt int64) error {
+	if strings.TrimSpace(currentTokenID) == "" {
+		return errors.New("current refresh token id is required")
+	}
+	if rotatedAt <= 0 {
+		rotatedAt = time.Now().Unix()
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin refresh token rotation transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	result, err := tx.ExecContext(
+		ctx,
+		`UPDATE refresh_tokens
+		 SET rotated_at = ?, replaced_by_token_id = ?
+		 WHERE id = ?
+		   AND revoked_at = 0
+		   AND rotated_at = 0
+		   AND expires_at > ?`,
+		rotatedAt,
+		replacement.ID,
+		strings.TrimSpace(currentTokenID),
+		rotatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("rotate refresh token: %w", err)
+	}
+
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read refresh token rotation rows affected: %w", err)
+	}
+	if changed == 0 {
+		return ErrRefreshTokenInactive
+	}
+
+	if replacement.CreatedAt == 0 {
+		replacement.CreatedAt = rotatedAt
+	}
+
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO refresh_tokens (id, token_hash, user_id, expires_at, created_at, rotated_at, revoked_at, replaced_by_token_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		replacement.ID,
+		replacement.TokenHash,
+		replacement.UserID,
+		replacement.ExpiresAt,
+		replacement.CreatedAt,
+		replacement.RotatedAt,
+		replacement.RevokedAt,
+		replacement.ReplacedByTokenID,
+	); err != nil {
+		return fmt.Errorf("insert replacement refresh token: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit refresh token rotation transaction: %w", err)
+	}
+
+	return nil
+}
+
+func (s *SQLiteStore) RevokeRefreshTokenByHash(ctx context.Context, tokenHash string, revokedAt int64) error {
+	if strings.TrimSpace(tokenHash) == "" {
+		return ErrRefreshTokenNotFound
+	}
+	if revokedAt <= 0 {
+		revokedAt = time.Now().Unix()
+	}
+
+	result, err := s.db.ExecContext(
+		ctx,
+		`UPDATE refresh_tokens
+		 SET revoked_at = ?
+		 WHERE token_hash = ?
+		   AND revoked_at = 0
+		   AND rotated_at = 0
+		   AND expires_at > ?`,
+		revokedAt,
+		strings.TrimSpace(tokenHash),
+		revokedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("revoke refresh token by hash: %w", err)
+	}
+
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read refresh token revoke rows affected: %w", err)
+	}
+	if changed == 0 {
+		return ErrRefreshTokenNotFound
 	}
 
 	return nil

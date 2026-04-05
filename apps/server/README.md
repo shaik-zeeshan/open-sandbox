@@ -24,6 +24,7 @@ Required:
 
 Optional:
 - `SANDBOX_JWT_TTL`: token lifetime (default `15m`)
+- `SANDBOX_REFRESH_TTL`: refresh token lifetime (default `720h` / 30 days)
 - `SANDBOX_JWT_ISSUER`: issuer claim (default `open-sandbox`)
 - `SANDBOX_CORS_ORIGINS`: comma-separated origins (default `http://localhost:5173,http://127.0.0.1:5173`)
 - `SANDBOX_WORKSPACE_DIR`: base directory for `context_path` and managed compose projects (default user home directory)
@@ -88,6 +89,21 @@ curl -X POST "$BASE_URL/auth/bootstrap" \
 curl -X POST "$BASE_URL/auth/login" \
   -H "Content-Type: application/json" \
   -d '{"username":"admin","password":"local-dev-password"}'
+```
+
+### Refresh session
+
+`/auth/refresh` rotates the refresh token cookie and issues a fresh access token.
+
+```bash
+curl -X POST "$BASE_URL/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"local-dev-password"}' \
+  -c ./auth-cookies.txt
+
+curl -X POST "$BASE_URL/auth/refresh" \
+  -b ./auth-cookies.txt \
+  -c ./auth-cookies.txt
 ```
 
 ### List users
@@ -309,7 +325,8 @@ curl -N "$BASE_URL/api/containers/<container-id>/logs?follow=true&tail=100" \
 ## Auth notes
 
 All `/api/*` and `/swagger/*` endpoints require `Authorization: Bearer <token>`.
-Use `/auth/login` to get short-lived tokens.
+Use `/auth/login` to get short-lived access tokens and a refresh cookie.
+Use `/auth/refresh` to rotate the refresh token and mint a new access token before access token expiry.
 
 ## Run endpoint tests
 

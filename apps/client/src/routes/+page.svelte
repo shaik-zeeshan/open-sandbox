@@ -19,6 +19,7 @@
 		listSandboxes,
 		login,
 		logout,
+		refreshSession,
 		removeContainer,
 		pullImage,
 		resetContainer,
@@ -147,6 +148,21 @@
 		}
 	}
 
+	async function refreshAuthSession(): Promise<boolean> {
+		try {
+			const refreshed = await runApiEffect(refreshSession({ baseUrl: clientState.baseUrl }), { notifyAuthError: false });
+			setAuthSession({
+				userId: refreshed.user_id,
+				username: refreshed.username,
+				role: refreshed.role,
+				expiresAt: refreshed.expires_at
+			});
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
 	$effect(() => {
 		clientState.baseUrl;
 		if (healthTimer) clearTimeout(healthTimer);
@@ -156,9 +172,24 @@
 
 	$effect(() => {
 		if (!clientState.isAuthenticated || clientState.tokenExpiresAt === null) return;
-		const delay = clientState.tokenExpiresAt * 1000 - Date.now();
-		if (delay <= 0) { void signOut(false); loginError = "Session expired. Sign in again."; return; }
-		const timer = setTimeout(() => { void signOut(false); loginError = "Session expired. Sign in again."; }, delay);
+		const delay = clientState.tokenExpiresAt * 1000 - Date.now() - 60_000;
+		if (delay <= 0) {
+			void (async () => {
+				if (!(await refreshAuthSession())) {
+					await signOut(false);
+					loginError = "Session expired. Sign in again.";
+				}
+			})();
+			return;
+		}
+		const timer = setTimeout(() => {
+			void (async () => {
+				if (!(await refreshAuthSession())) {
+					await signOut(false);
+					loginError = "Session expired. Sign in again.";
+				}
+			})();
+		}, delay);
 		return () => clearTimeout(timer);
 	});
 
@@ -174,6 +205,10 @@
 				expiresAt: session.expires_at
 			});
 		} catch (err) {
+			if (await refreshAuthSession()) {
+				return;
+			}
+
 			const message = formatApiFailure(err);
 			clearAuth();
 			try {

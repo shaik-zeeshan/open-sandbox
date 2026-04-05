@@ -233,11 +233,17 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null;
 
 const mapAuthReasonToMessage = (reason?: string): string => {
-	switch (reason) {
-		case "invalid_credentials":
-			return "Invalid credentials.";
-		case "token_missing":
-			return "Unauthorized: missing token. Please log in.";
+		switch (reason) {
+			case "invalid_credentials":
+				return "Invalid credentials.";
+			case "refresh_token_missing":
+				return "Unauthorized: your session expired. Please log in again.";
+			case "refresh_token_expired":
+				return "Unauthorized: your session expired. Please log in again.";
+			case "refresh_token_invalid":
+				return "Unauthorized: your session expired. Please log in again.";
+			case "token_missing":
+				return "Unauthorized: missing token. Please log in.";
 		case "token_expired":
 			return "Unauthorized: your session expired. Please log in again.";
 		case "token_invalid":
@@ -474,6 +480,11 @@ export const logout = (
 	config: ApiConfig
 ): Effect.Effect<{ signed_out: boolean }, ApiFailure, HttpClient.HttpClient> =>
 	postJson(config, "/auth/logout", {});
+
+export const refreshSession = (
+	config: ApiConfig
+): Effect.Effect<LoginResponse, ApiFailure, HttpClient.HttpClient> =>
+	postJson(config, "/auth/refresh", {});
 
 export const listUsers = (
 	config: ApiConfig

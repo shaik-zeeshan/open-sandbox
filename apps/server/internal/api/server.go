@@ -80,9 +80,14 @@ type UserStore interface {
 	CreateUser(ctx context.Context, user store.UserRecord) (store.User, error)
 	EnsureUser(ctx context.Context, user store.UserRecord) (store.User, error)
 	GetUserByUsername(ctx context.Context, username string) (store.UserRecord, error)
+	GetUserByID(ctx context.Context, userID string) (store.UserRecord, error)
 	ListUsers(ctx context.Context) ([]store.User, error)
 	UpdateUserPasswordHash(ctx context.Context, userID string, passwordHash string) error
 	DeleteUser(ctx context.Context, userID string) error
+	CreateRefreshToken(ctx context.Context, token store.RefreshTokenRecord) error
+	GetRefreshTokenByHash(ctx context.Context, tokenHash string) (store.RefreshTokenRecord, error)
+	RotateRefreshToken(ctx context.Context, currentTokenID string, replacement store.RefreshTokenRecord, rotatedAt int64) error
+	RevokeRefreshTokenByHash(ctx context.Context, tokenHash string, revokedAt int64) error
 }
 
 type Server struct {
@@ -286,6 +291,7 @@ func (s *Server) registerRoutes() {
 	s.router.GET("/auth/setup", s.setupStatus)
 	s.router.POST("/auth/bootstrap", s.bootstrap)
 	s.router.POST("/auth/login", s.login)
+	s.router.POST("/auth/refresh", s.refresh)
 	s.router.GET("/auth/session", s.session)
 	s.router.POST("/auth/logout", s.logout)
 	secured := s.router.Group("/")
