@@ -1,13 +1,12 @@
 <script lang="ts">
+	import { getCachedImages, invalidateImagesCache, refreshCachedImages } from "$lib/api-cache";
 	import { clearScheduledTimeout, scheduleTimeout, type TimeoutHandle } from "$lib/client/browser";
-	import { onMount } from "svelte";
 	import { toast } from "$lib/toast.svelte";
 	import Combobox from "./Combobox.svelte";
 	import CodeEditor from "./CodeEditor.svelte";
 	import {
 		buildImageStream,
 		formatApiFailure,
-		listImages,
 		pullImage,
 		removeImage,
 		runApiEffect,
@@ -103,7 +102,7 @@
 	};
 
 	interface ImagesApiService {
-		list: Effect.Effect<ImageSummary[], unknown>;
+		list: (options?: { force?: boolean }) => Effect.Effect<ImageSummary[], unknown>;
 		search: (query: string, limit: number) => Effect.Effect<ImageSearchResult[], unknown>;
 		pull: (request: { image: string; tag?: string }) => Effect.Effect<{ output: string; image: string }, unknown>;
 		buildFromContext: (
@@ -132,7 +131,7 @@
 	const DeleteConfirmationService = Context.GenericTag<DeleteConfirmationService>("images-panel/DeleteConfirmationService");
 
 	const imagesApiService: ImagesApiService = {
-		list: Effect.promise(() => runApiEffect(listImages(config))),
+		list: (options) => (options?.force ? refreshCachedImages(config) : getCachedImages(config)),
 		search: (query, limit) => Effect.promise(() => runApiEffect(searchImages(config, query, limit))),
 		pull: (request) => Effect.promise(() => runApiEffect(pullImage(config, request))),
 		buildFromContext: (request, onEvent) =>
@@ -211,7 +210,7 @@
 
 	const runImagesProgram = <A>(program: Effect.Effect<A, unknown>): Promise<A> => Effect.runPromise(program);
 
-	const refreshImagesProgram = (): Effect.Effect<void, unknown> =>
+	const refreshImagesProgram = (options?: { force?: boolean }): Effect.Effect<void, unknown> =>
 		Effect.gen(function* () {
 			const api = yield* ImagesApiService;
 			const feedback = yield* ImagesFeedbackService;
@@ -221,7 +220,7 @@
 			});
 
 			try {
-				const listedImages = yield* api.list;
+				const listedImages = yield* api.list(options);
 				yield* Effect.sync(() => {
 					images = listedImages;
 				});
@@ -426,6 +425,7 @@
 				yield* Effect.sync(() => {
 					createStep = "Done";
 				});
+				yield* invalidateImagesCache(config);
 				yield* refreshImagesProgram();
 			} catch (error) {
 				yield* feedback.error(error);
@@ -449,6 +449,7 @@
 			try {
 				yield* deleteConfirmation.clear;
 				yield* api.remove(image.id);
+				yield* invalidateImagesCache(config);
 				yield* feedback.ok("Image removed.");
 				yield* refreshImagesProgram();
 			} catch (error) {
@@ -472,7 +473,7 @@
 			yield* removeImageProgram(image);
 		}).pipe(Effect.provide(imagesPanelLayer));
 
-	const refreshImages = (): Promise<void> => runImagesProgram(refreshImagesProgram());
+	const refreshImages = (options?: { force?: boolean }): Promise<void> => runImagesProgram(refreshImagesProgram(options));
 
 	const runImageSearch = (queryOverride?: string): Promise<void> =>
 		runImagesProgram(runImageSearchProgram(queryOverride));
@@ -487,10 +488,6 @@
 	const submitCreate = (): Promise<void> => runImagesProgram(submitCreateProgram());
 
 	const submitDelete = (image: ImageSummary): Promise<void> => runImagesProgram(submitDeleteProgram(image));
-
-	onMount(() => {
-		void refreshImages();
-	});
 
 	$effect(() => {
 		return () => {
@@ -516,7 +513,7 @@
 			<p class="section-label">Build</p>
 			<h1 class="images-title">Images</h1>
 		</div>
-		<button class="btn-ghost btn-sm" type="button" onclick={() => void refreshImages()} disabled={loading}>
+		<button class="btn-ghost btn-sm" type="button" onclick={() => void refreshImages({ force: true })} disabled={loading}>
 			{loading ? "Refreshing..." : "Refresh"}
 		</button>
 	</div>

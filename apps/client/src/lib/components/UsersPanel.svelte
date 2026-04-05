@@ -1,11 +1,11 @@
 <script lang="ts">
+	import { getCachedUsers, invalidateUsersCache, refreshCachedUsers } from "$lib/api-cache";
 	import { clearScheduledTimeout, scheduleTimeout, type TimeoutHandle } from "$lib/client/browser";
 	import { toast } from "$lib/toast.svelte";
 	import {
 		createUser as apiCreateUser,
 		deleteUser as apiDeleteUser,
 		formatApiFailure,
-		listUsers,
 		runApiEffect,
 		type ApiConfig,
 		type UserSummary,
@@ -42,7 +42,7 @@
 	let deleteConfirmId = $state<string | null>(null);
 
 	interface UsersApiService {
-		list: Effect.Effect<UserSummary[], unknown>;
+		list: (options?: { force?: boolean }) => Effect.Effect<UserSummary[], unknown>;
 		create: (input: { username: string; password: string; role: string }) => Effect.Effect<void, unknown>;
 		resetPassword: (userId: string, password: string) => Effect.Effect<void, unknown>;
 		remove: (userId: string) => Effect.Effect<void, unknown>;
@@ -63,7 +63,7 @@
 	const DeleteConfirmationService = Context.GenericTag<DeleteConfirmationService>("users-panel/DeleteConfirmationService");
 
 	const usersApiService: UsersApiService = {
-		list: Effect.promise(() => runApiEffect(listUsers(config))),
+		list: (options) => (options?.force ? refreshCachedUsers(config) : getCachedUsers(config)),
 		create: (input) =>
 			Effect.promise(() => runApiEffect(apiCreateUser(config, input))).pipe(Effect.asVoid),
 		resetPassword: (userId, password) =>
@@ -124,7 +124,7 @@
 
 	const runUsersProgram = <A>(program: Effect.Effect<A, unknown>): Promise<A> => Effect.runPromise(program);
 
-	const refreshUsersProgram = (): Effect.Effect<void, unknown> =>
+	const refreshUsersProgram = (options?: { force?: boolean }): Effect.Effect<void, unknown> =>
 		Effect.gen(function* () {
 			const api = yield* UsersApiService;
 			const feedback = yield* UsersFeedbackService;
@@ -134,7 +134,7 @@
 			});
 
 			try {
-				const listedUsers = yield* api.list;
+				const listedUsers = yield* api.list(options);
 				yield* Effect.sync(() => {
 					users = listedUsers;
 				});
@@ -158,6 +158,7 @@
 
 			try {
 				yield* api.create(input);
+				yield* invalidateUsersCache(config);
 				yield* Effect.sync(() => {
 					createUsername = "";
 					createPassword = "";
@@ -208,6 +209,7 @@
 
 			try {
 				yield* api.remove(userId);
+				yield* invalidateUsersCache(config);
 				yield* deleteConfirmation.clear;
 				yield* feedback.ok("User deleted.");
 				yield* refreshUsersProgram();
@@ -225,7 +227,7 @@
 			}
 		}).pipe(Effect.provide(usersPanelLayer));
 
-	const refreshUsers = (): Promise<void> => runUsersProgram(refreshUsersProgram());
+	const refreshUsers = (options?: { force?: boolean }): Promise<void> => runUsersProgram(refreshUsersProgram(options));
 
 	const submitCreate = (): Promise<void> =>
 		runUsersProgram(createUserProgram({
@@ -248,10 +250,6 @@
 	});
 
 	$effect(() => {
-		void refreshUsers();
-	});
-
-	$effect(() => {
 		config.baseUrl;
 		void refreshUsers();
 	});
@@ -265,7 +263,7 @@
 			<h2 class="users-title">User Accounts</h2>
 		</div>
 		<div class="users-header-actions">
-			<button class="btn-ghost btn-sm" type="button" onclick={() => void refreshUsers()} disabled={loading}>
+			<button class="btn-ghost btn-sm" type="button" onclick={() => void refreshUsers({ force: true })} disabled={loading}>
 				{#if loading}
 					<svg class="spin" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.22-8.56"/></svg>
 				{/if}

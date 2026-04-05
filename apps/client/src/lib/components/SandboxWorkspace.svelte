@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { invalidateWorkloadCaches } from "$lib/api-cache";
 	import { onDestroy, onMount, tick } from "svelte";
 	import {
 		clearScheduledTimeout,
@@ -527,11 +528,13 @@
 				} else {
 					await runApiEffect(restartContainer(config, targetId));
 				}
+				Effect.runSync(invalidateWorkloadCaches(config));
 				toast.ok("Restarted.");
 				await Promise.resolve(onRefresh());
 			} else if (action === "reset") {
 				if (workloadKind === "sandbox") {
 					await runApiEffect(resetSandbox(config, targetId));
+					Effect.runSync(invalidateWorkloadCaches(config));
 					toast.ok("Reset to clean workspace.");
 					await Promise.resolve(onRefresh());
 					await loadPath(workspaceDirValue);
@@ -540,6 +543,7 @@
 						throw new Error("Reset is only available for managed direct containers and compose workloads.");
 					}
 					const result = await runApiEffect(resetContainer(config, targetId));
+					Effect.runSync(invalidateWorkloadCaches(config));
 					onContainerReplaced(result.id);
 					toast.ok("Container reset.");
 					await Promise.resolve(onRefresh());
@@ -552,6 +556,7 @@
 				} else {
 					await runApiEffect(stopContainer(config, targetId));
 				}
+				Effect.runSync(invalidateWorkloadCaches(config));
 				toast.ok("Stopped.");
 				await Promise.resolve(onRefresh());
 			} else if (action === "delete") {
@@ -560,6 +565,7 @@
 				} else {
 					await runApiEffect(removeContainer(config, targetId));
 				}
+				Effect.runSync(invalidateWorkloadCaches(config));
 				onDeleted();
 			}
 		} catch (error) {

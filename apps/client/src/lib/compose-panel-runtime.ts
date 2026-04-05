@@ -8,6 +8,7 @@ import {
 	type ComposeRequest,
 	type StreamEvent
 } from "$lib/api";
+import { invalidateWorkloadCaches } from "$lib/api-cache";
 import { toast } from "$lib/toast.svelte";
 import { Effect } from "effect";
 
@@ -108,6 +109,7 @@ const runComposeUpEffect = (
 			return yield* Effect.fail(new Error(composeError));
 		}
 
+		yield* invalidateWorkloadCaches(config);
 		yield* Effect.sync(() => {
 			runtime.setStep("Done");
 			toast.ok("Compose project started.");
@@ -147,6 +149,7 @@ const runComposeDownEffect = (
 		};
 
 		const result = yield* Effect.promise(() => runApiEffect(composeDown(config, downRequest)));
+		yield* invalidateWorkloadCaches(config);
 		yield* Effect.sync(() => {
 			if (result.stdout.trim().length > 0) {
 				runtime.appendLog(result.stdout);

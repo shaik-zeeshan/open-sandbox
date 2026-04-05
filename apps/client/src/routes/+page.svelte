@@ -3,6 +3,15 @@
 	import PageShell from "$lib/components/PageShell.svelte";
 	import SandboxesPanel from "$lib/components/SandboxesPanel.svelte";
 	import SandboxWorkspace from "$lib/components/SandboxWorkspace.svelte";
+	import {
+		getCachedContainers,
+		getCachedImages,
+		getCachedSandboxes,
+		invalidateWorkloadCaches,
+		refreshCachedContainers,
+		refreshCachedImages,
+		refreshCachedSandboxes
+	} from "$lib/api-cache";
 	import type { HttpClient } from "@effect/platform";
 	import {
 		bootstrap,
@@ -10,9 +19,6 @@
 		deleteSandbox,
 		formatApiFailure,
 		getSetupStatus,
-		listContainers,
-		listImages,
-		listSandboxes,
 		login,
 		removeContainer,
 		resetContainer,
@@ -55,12 +61,14 @@
 		showLoading?: boolean;
 		notifyOnError?: boolean;
 		pollingSafeRetry?: boolean;
+		force?: boolean;
 	};
 	type ResolvedRefreshOptions = {
 		includeImages: boolean;
 		showLoading: boolean;
 		notifyOnError: boolean;
 		pollingSafeRetry: boolean;
+		force: boolean;
 	};
 	const POLLING_REFRESH_RETRIES = 2;
 	const POLLING_RETRY_DELAY_MS = 350;
@@ -68,7 +76,8 @@
 		includeImages: options?.includeImages ?? true,
 		showLoading: options?.showLoading ?? true,
 		notifyOnError: options?.notifyOnError ?? true,
-		pollingSafeRetry: options?.pollingSafeRetry ?? false
+		pollingSafeRetry: options?.pollingSafeRetry ?? false,
+		force: options?.force ?? false
 	});
 	const runApiProgram = <A>(
 		effect: Effect.Effect<A, ApiFailure, HttpClient.HttpClient>,
@@ -94,6 +103,7 @@
 	let queuedRefreshShowLoading = false;
 	let queuedRefreshNotifyOnError = false;
 	let queuedRefreshPollingSafeRetry = false;
+	let queuedRefreshForce = false;
 
 	// ── View routing ───────────────────────────────────────────────────────────
 	type ActiveWorkload = { kind: "sandbox" | "container"; id: string } | null;
@@ -260,10 +270,19 @@
 	// ── Data actions ───────────────────────────────────────────────────────────
 	const refreshDataProgram = (options: ResolvedRefreshOptions): Effect.Effect<void, unknown> =>
 		Effect.gen(function* () {
+			const sandboxesEffect = options.force
+				? refreshCachedSandboxes(clientState.config)
+				: getCachedSandboxes(clientState.config);
+			const containersEffect = options.force
+				? refreshCachedContainers(clientState.config)
+				: getCachedContainers(clientState.config);
+			const imagesEffect = options.force
+				? refreshCachedImages(clientState.config)
+				: getCachedImages(clientState.config);
 			const [sb, ct, img] = yield* Effect.all([
-				runApiProgram(listSandboxes(clientState.config)),
-				runApiProgram(listContainers(clientState.config)),
-				options.includeImages ? runApiProgram(listImages(clientState.config)) : Effect.succeed(images)
+				sandboxesEffect,
+				containersEffect,
+				options.includeImages ? imagesEffect : Effect.succeed(images)
 			]);
 			sandboxes = sb;
 			containers = ct;
@@ -288,6 +307,7 @@
 			queuedRefreshShowLoading = queuedRefreshShowLoading || resolved.showLoading;
 			queuedRefreshNotifyOnError = queuedRefreshNotifyOnError || resolved.notifyOnError;
 			queuedRefreshPollingSafeRetry = queuedRefreshPollingSafeRetry || resolved.pollingSafeRetry;
+			queuedRefreshForce = queuedRefreshForce || resolved.force;
 			return refreshPromise;
 		}
 
@@ -320,21 +340,25 @@
 				queuedRefreshIncludeImages ||
 				queuedRefreshShowLoading ||
 				queuedRefreshNotifyOnError ||
-				queuedRefreshPollingSafeRetry
+				queuedRefreshPollingSafeRetry ||
+				queuedRefreshForce
 			) {
 				const nextIncludeImages = queuedRefreshIncludeImages;
 				const nextShowLoading = queuedRefreshShowLoading;
 				const nextNotifyOnError = queuedRefreshNotifyOnError;
 				const nextPollingSafeRetry = queuedRefreshPollingSafeRetry;
+				const nextForce = queuedRefreshForce;
 				queuedRefreshIncludeImages = false;
 				queuedRefreshShowLoading = false;
 				queuedRefreshNotifyOnError = false;
 				queuedRefreshPollingSafeRetry = false;
+				queuedRefreshForce = false;
 				await refreshData({
 					includeImages: nextIncludeImages,
 					showLoading: nextShowLoading,
 					notifyOnError: nextNotifyOnError,
-					pollingSafeRetry: nextPollingSafeRetry
+					pollingSafeRetry: nextPollingSafeRetry,
+					force: nextForce
 				});
 			}
 		}
@@ -346,11 +370,15 @@
 			successMessage: string;
 			afterSuccess?: (result: A) => void;
 			refreshOptions?: RefreshOptions;
+			invalidate?: Effect.Effect<void, unknown>;
 		}
 	): Promise<void> {
 		try {
 			const result = await runProgram(program);
 			options.afterSuccess?.(result);
+			if (options.invalidate) {
+				await runProgram(options.invalidate);
+			}
 			toast.ok(options.successMessage);
 			await refreshData(options.refreshOptions);
 		} catch (err) {
@@ -387,6 +415,7 @@
 			createBranch = "";
 			createWorkdir = "";
 			createPorts = "";
+			await runProgram(invalidateWorkloadCaches(clientState.config));
 			await refreshData();
 			activeWorkload = { kind: "sandbox", id: created.id };
 		} catch (err) {
@@ -404,17 +433,20 @@
 	// Sandbox list actions
 	async function handleRestart(id: string): Promise<void> {
 		await runActionProgram(runApiProgram(restartSandbox(clientState.config, id)), {
-			successMessage: "Restarted."
+			successMessage: "Restarted.",
+			invalidate: invalidateWorkloadCaches(clientState.config)
 		});
 	}
 	async function handleReset(id: string): Promise<void> {
 		await runActionProgram(runApiProgram(resetSandbox(clientState.config, id)), {
-			successMessage: "Reset."
+			successMessage: "Reset.",
+			invalidate: invalidateWorkloadCaches(clientState.config)
 		});
 	}
 	async function handleResetContainer(id: string): Promise<void> {
 		await runActionProgram(runApiProgram(resetContainer(clientState.config, id)), {
 			successMessage: "Container reset.",
+			invalidate: invalidateWorkloadCaches(clientState.config),
 			afterSuccess: (result) => {
 				const currentActive = activeWorkload;
 				if (currentActive?.kind === "container" && currentActive.id === id) {
@@ -426,12 +458,14 @@
 	}
 	async function handleStop(id: string): Promise<void> {
 		await runActionProgram(runApiProgram(stopSandbox(clientState.config, id)), {
-			successMessage: "Stopped."
+			successMessage: "Stopped.",
+			invalidate: invalidateWorkloadCaches(clientState.config)
 		});
 	}
 	async function handleDelete(id: string): Promise<void> {
 		await runActionProgram(runApiProgram(deleteSandbox(clientState.config, id)), {
 			successMessage: "Deleted.",
+			invalidate: invalidateWorkloadCaches(clientState.config),
 			afterSuccess: () => {
 				const currentActive = activeWorkload;
 				if (currentActive?.kind === "sandbox" && currentActive.id === id) {
@@ -442,17 +476,20 @@
 	}
 	async function handleRestartContainer(id: string): Promise<void> {
 		await runActionProgram(runApiProgram(restartContainer(clientState.config, id)), {
-			successMessage: "Container restarted."
+			successMessage: "Container restarted.",
+			invalidate: invalidateWorkloadCaches(clientState.config)
 		});
 	}
 	async function handleStopContainer(id: string): Promise<void> {
 		await runActionProgram(runApiProgram(stopContainer(clientState.config, id)), {
-			successMessage: "Container stopped."
+			successMessage: "Container stopped.",
+			invalidate: invalidateWorkloadCaches(clientState.config)
 		});
 	}
 	async function handleRemoveContainer(id: string): Promise<void> {
 		await runActionProgram(runApiProgram(removeContainer(clientState.config, id)), {
 			successMessage: "Container removed.",
+			invalidate: invalidateWorkloadCaches(clientState.config),
 			afterSuccess: () => {
 				const currentActive = activeWorkload;
 				if (currentActive?.kind === "container" && currentActive.id === id) {
@@ -493,7 +530,8 @@
 				includeImages: false,
 				showLoading: false,
 				notifyOnError: false,
-				pollingSafeRetry: true
+				pollingSafeRetry: true,
+				force: true
 			});
 		}, 5000);
 		return () => clearScheduledInterval(interval);
@@ -603,9 +641,9 @@
 				runtimeContainer={activeVisibleRuntimeContainer}
 				config={clientState.config}
 				onBack={() => { activeWorkload = null; pendingContainerActivationId = null; activeRuntimeContainerSnapshot = null; }}
-				onRefresh={() => refreshData()}
+				onRefresh={() => refreshData({ force: true })}
 				onContainerReplaced={(id) => replaceActiveContainer(id)}
-				onDeleted={() => { activeWorkload = null; pendingContainerActivationId = null; activeRuntimeContainerSnapshot = null; void refreshData(); }}
+				onDeleted={() => { activeWorkload = null; pendingContainerActivationId = null; activeRuntimeContainerSnapshot = null; void refreshData({ force: true }); }}
 			/>
 		{:else}
 			<!-- ── Sandbox List ── -->
@@ -624,7 +662,7 @@
 				onRestartContainer={(id) => void handleRestartContainer(id)}
 				onStopContainer={(id) => void handleStopContainer(id)}
 				onRemoveContainer={(id) => void handleRemoveContainer(id)}
-				onRefresh={() => void refreshData()}
+				onRefresh={() => void refreshData({ force: true })}
 				composeHref="/compose"
 				{showCreateForm}
 				bind:createName

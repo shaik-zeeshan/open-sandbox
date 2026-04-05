@@ -1,4 +1,5 @@
 import { browser } from "$app/environment";
+import { invalidateAllApiCachesSync } from "$lib/api-cache";
 import type { ApiConfig } from "$lib/api";
 import { readStorageItem, writeStorageItem } from "$lib/client/browser";
 
@@ -69,6 +70,7 @@ class ClientState {
 export const clientState = new ClientState();
 
 export const setBaseUrl = (value: string): void => {
+	invalidateAllApiCachesSync();
 	clientState.baseUrl = value;
 	writeStorage(BASE_URL_KEY, value);
 };
@@ -78,6 +80,7 @@ export const beginAuthCheck = (): void => {
 };
 
 export const setAuthSession = (session: { userId: string; username: string; role: string; expiresAt: number | null }): void => {
+	invalidateAllApiCachesSync();
 	clientState.token = "";
 	clientState.userId = session.userId;
 	clientState.username = session.username;
@@ -88,6 +91,7 @@ export const setAuthSession = (session: { userId: string; username: string; role
 };
 
 export const clearAuth = (): void => {
+	invalidateAllApiCachesSync();
 	clientState.token = "";
 	clientState.userId = "";
 	clientState.username = "";
