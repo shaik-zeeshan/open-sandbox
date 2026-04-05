@@ -1,5 +1,5 @@
 import { browser } from "$app/environment";
-import { Context, Effect, Fiber, Layer, Schedule } from "effect";
+import { Context, Effect, Fiber, Layer } from "effect";
 
 export const AUTH_ERROR_EVENT = "open-sandbox:auth-error";
 export const TOAST_EVENT = "open-sandbox:toast";
@@ -160,7 +160,7 @@ export const scheduleInterval = (fn: () => void, delayMs: number): IntervalHandl
 	return Effect.runFork(
 		Effect.sleep(delay).pipe(
 			Effect.andThen(runTask(fn)),
-			Effect.repeat(Schedule.spaced(delay)),
+			Effect.forever,
 			Effect.asVoid
 		)
 	);

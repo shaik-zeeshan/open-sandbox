@@ -55,7 +55,4 @@
 		color: var(--text-muted);
 	}
 
-	.compose-page-error {
-		padding: 1.5rem;
-	}
 </style>

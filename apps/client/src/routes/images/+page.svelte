@@ -55,7 +55,4 @@
 		color: var(--text-muted);
 	}
 
-	.images-page {
-		padding: 1.5rem;
-	}
 </style>

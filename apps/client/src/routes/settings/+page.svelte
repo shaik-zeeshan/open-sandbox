@@ -461,8 +461,7 @@
 		gap: 0.3rem;
 	}
 
-	.password-form .alert-error,
-	.password-form .alert-ok {
+	.password-form .alert-error {
 		grid-column: span 2;
 	}
 
@@ -476,7 +475,6 @@
 		.settings-page { padding: 1rem; }
 		.password-form { grid-template-columns: 1fr; }
 		.password-form .alert-error,
-		.password-form .alert-ok,
 		.form-footer { grid-column: span 1; }
 		.endpoint-row { flex-direction: column; }
 		.endpoint-row .btn-primary { width: 100%; }
