@@ -240,6 +240,7 @@ func (s *Server) resetContainer(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, err)
 		return
 	}
+	s.runtimeLimits.apply(hostConfig)
 	if err := s.runtime.RemoveWorkload(c.Request.Context(), workerID, target.ContainerID, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return

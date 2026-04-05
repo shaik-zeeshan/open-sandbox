@@ -1170,6 +1170,10 @@ func TestListContainersAdminFiltersToManagedWorkloads(t *testing.T) {
 }
 
 func TestResetDirectContainerEndpoint(t *testing.T) {
+	t.Setenv("SANDBOX_RUNTIME_MEMORY_LIMIT", "512m")
+	t.Setenv("SANDBOX_RUNTIME_CPU_LIMIT", "1.5")
+	t.Setenv("SANDBOX_RUNTIME_PIDS_LIMIT", "256")
+
 	original := commandRunner
 	defer func() { commandRunner = original }()
 	commandRunner = func(context.Context, string, ...string) (string, string, error) {
@@ -1194,6 +1198,15 @@ func TestResetDirectContainerEndpoint(t *testing.T) {
 			}
 			if hostConfig.AutoRemove {
 				t.Fatal("expected auto remove to stay false")
+			}
+			if hostConfig.Resources.Memory != 512_000_000 {
+				t.Fatalf("expected memory limit 512000000, got %d", hostConfig.Resources.Memory)
+			}
+			if hostConfig.Resources.NanoCPUs != 1_500_000_000 {
+				t.Fatalf("expected cpu limit 1500000000, got %d", hostConfig.Resources.NanoCPUs)
+			}
+			if hostConfig.Resources.PidsLimit == nil || *hostConfig.Resources.PidsLimit != 256 {
+				t.Fatalf("expected pids limit 256, got %+v", hostConfig.Resources.PidsLimit)
 			}
 			return container.CreateResponse{ID: "direct-2"}, nil
 		},
