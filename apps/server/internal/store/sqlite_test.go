@@ -104,3 +104,79 @@ func TestRevokeRefreshTokenByHash(t *testing.T) {
 		t.Fatalf("expected ErrRefreshTokenNotFound when revoking inactive token, got %v", err)
 	}
 }
+
+func TestCreateSandboxDefaultsWorkerIDToLocal(t *testing.T) {
+	s := newSQLiteStoreForTest(t)
+
+	if err := s.CreateSandbox(t.Context(), Sandbox{
+		ID:            "sb-1",
+		Name:          "sandbox",
+		Image:         "alpine:3.20",
+		ContainerID:   "ctr-1",
+		WorkspaceDir:  "/workspace",
+		RepoURL:       "",
+		Status:        "running",
+		OwnerID:       "user-1",
+		OwnerUsername: "alice",
+	}); err != nil {
+		t.Fatalf("failed to create sandbox: %v", err)
+	}
+
+	stored, err := s.GetSandbox(t.Context(), "sb-1")
+	if err != nil {
+		t.Fatalf("failed to read sandbox: %v", err)
+	}
+	if stored.WorkerID != "local" {
+		t.Fatalf("expected default worker_id local, got %q", stored.WorkerID)
+	}
+}
+
+func TestRuntimeWorkerLifecycle(t *testing.T) {
+	s := newSQLiteStoreForTest(t)
+	now := time.Now().Unix()
+
+	if err := s.UpsertRuntimeWorker(t.Context(), RuntimeWorker{
+		ID:                  "worker-a",
+		Name:                "worker-a",
+		AdvertiseAddress:    "http://10.0.0.2:8080",
+		ExecutionMode:       "docker",
+		Status:              "active",
+		Version:             "v1",
+		Labels:              map[string]string{"zone": "lab"},
+		RegisteredAt:        now,
+		LastHeartbeatAt:     now,
+		HeartbeatTTLSeconds: 15,
+		UpdatedAt:           now,
+	}); err != nil {
+		t.Fatalf("failed to upsert worker: %v", err)
+	}
+
+	if err := s.TouchRuntimeWorkerHeartbeat(t.Context(), "worker-a", now+5, "degraded", "http://10.0.0.2:8081", "v2", map[string]string{"zone": "lab", "gpu": "false"}); err != nil {
+		t.Fatalf("failed to touch worker heartbeat: %v", err)
+	}
+
+	stored, err := s.GetRuntimeWorker(t.Context(), "worker-a")
+	if err != nil {
+		t.Fatalf("failed to get worker: %v", err)
+	}
+	if stored.Status != "degraded" {
+		t.Fatalf("expected worker status degraded, got %q", stored.Status)
+	}
+	if stored.AdvertiseAddress != "http://10.0.0.2:8081" {
+		t.Fatalf("expected updated advertise address, got %q", stored.AdvertiseAddress)
+	}
+	if stored.LastHeartbeatAt != now+5 {
+		t.Fatalf("expected updated heartbeat time %d, got %d", now+5, stored.LastHeartbeatAt)
+	}
+	if stored.Labels["gpu"] != "false" {
+		t.Fatalf("expected labels to persist, got %#v", stored.Labels)
+	}
+
+	workers, err := s.ListRuntimeWorkers(t.Context())
+	if err != nil {
+		t.Fatalf("failed to list workers: %v", err)
+	}
+	if len(workers) != 1 {
+		t.Fatalf("expected one worker, got %d", len(workers))
+	}
+}

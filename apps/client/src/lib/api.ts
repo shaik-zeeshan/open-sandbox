@@ -112,6 +112,7 @@ export interface CreateContainerRequest {
 }
 
 export interface CreateContainerResponse {
+	id: string;
 	container_id: string;
 	warnings: string[];
 	started: boolean;
@@ -136,12 +137,17 @@ export interface ExecResponse {
 
 export interface ContainerSummary {
 	id: string;
+	container_id: string;
 	names: string[];
 	image: string;
 	state: string;
 	status: string;
 	created: number;
 	labels: Record<string, string>;
+	workload_kind?: string;
+	project_name?: string;
+	service_name?: string;
+	resettable: boolean;
 	ports?: PortSummary[];
 }
 
@@ -774,30 +780,30 @@ export const listContainers = (
 
 export const stopContainer = (
 	config: ApiConfig,
-	containerId: string
-): Effect.Effect<{ container_id: string; stopped: boolean }, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, `/api/containers/${encodeURIComponent(containerId)}/stop`, {});
+	workloadId: string
+): Effect.Effect<{ id: string; container_id: string; stopped: boolean }, ApiFailure, HttpClient.HttpClient> =>
+	postJson(config, `/api/containers/${encodeURIComponent(workloadId)}/stop`, {});
 
 export const restartContainer = (
 	config: ApiConfig,
-	containerId: string
-): Effect.Effect<{ container_id: string; restarted: boolean }, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, `/api/containers/${encodeURIComponent(containerId)}/restart`, {});
+	workloadId: string
+): Effect.Effect<{ id: string; container_id: string; restarted: boolean }, ApiFailure, HttpClient.HttpClient> =>
+	postJson(config, `/api/containers/${encodeURIComponent(workloadId)}/restart`, {});
 
 export const resetContainer = (
 	config: ApiConfig,
-	containerId: string
-): Effect.Effect<{ container_id: string; reset: boolean }, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, `/api/containers/${encodeURIComponent(containerId)}/reset`, {});
+	workloadId: string
+): Effect.Effect<{ id: string; container_id: string; reset: boolean }, ApiFailure, HttpClient.HttpClient> =>
+	postJson(config, `/api/containers/${encodeURIComponent(workloadId)}/reset`, {});
 
 export const removeContainer = (
 	config: ApiConfig,
-	containerId: string,
+	workloadId: string,
 	force = true
-): Effect.Effect<{ container_id: string; removed: boolean }, ApiFailure, HttpClient.HttpClient> =>
+): Effect.Effect<{ id: string; container_id: string; removed: boolean }, ApiFailure, HttpClient.HttpClient> =>
 	requestJson(
 		config,
-		HttpClientRequest.del(`/api/containers/${encodeURIComponent(containerId)}`, {
+		HttpClientRequest.del(`/api/containers/${encodeURIComponent(workloadId)}`, {
 			urlParams: force ? { force: "true" } : undefined
 		})
 	);
@@ -904,12 +910,12 @@ export const uploadContainerFile = async (
 	containerId: string,
 	targetPath: string,
 	file: File
-): Promise<{ container_id: string; path: string; uploaded: boolean }> => {
+): Promise<{ id: string; container_id: string; path: string; uploaded: boolean }> => {
 	const formData = new FormData();
 	formData.set("target_path", targetPath);
 	formData.set("file", file, file.name);
 
-	return fetchJson<{ container_id: string; path: string; uploaded: boolean }>(
+	return fetchJson<{ id: string; container_id: string; path: string; uploaded: boolean }>(
 		config,
 		`/api/containers/${encodeURIComponent(containerId)}/files`,
 		{
@@ -924,8 +930,8 @@ export const saveContainerFile = async (
 	containerId: string,
 	targetPath: string,
 	content: string
-): Promise<{ container_id: string; path: string; saved: boolean }> =>
-	fetchJson<{ container_id: string; path: string; saved: boolean }>(
+): Promise<{ id: string; container_id: string; path: string; saved: boolean }> =>
+	fetchJson<{ id: string; container_id: string; path: string; saved: boolean }>(
 		config,
 		`/api/containers/${encodeURIComponent(containerId)}/files`,
 		{

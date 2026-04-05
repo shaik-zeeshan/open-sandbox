@@ -123,7 +123,7 @@
 	const workloadLabel = $derived(workloadKind === "sandbox" ? "sandbox" : "container");
 	const activeContainer = $derived(runtimeContainer ?? container);
 	const targetId = $derived(workloadKind === "sandbox" ? (sandbox?.id ?? "") : (runtimeContainer?.id ?? ""));
-	const backingContainerId = $derived(runtimeContainer?.id ?? sandbox?.container_id ?? container?.id ?? "");
+	const backingContainerId = $derived(runtimeContainer?.container_id ?? sandbox?.container_id ?? container?.container_id ?? "");
 	const sandboxWorkspaceDir = $derived(sandbox?.workspace_dir ?? "");
 	const workspaceDirValue = $derived(sandboxWorkspaceDir.trim().length > 0 ? sandboxWorkspaceDir : "/");
 	const workspaceMetaValue = $derived(workloadKind === "sandbox" && sandboxWorkspaceDir.trim().length === 0 ? "container default" : workspaceDirValue);
@@ -138,8 +138,7 @@
 		if (workloadKind === "sandbox") {
 			return true;
 		}
-		const labels = activeContainer?.labels ?? {};
-		return (labels["com.docker.compose.project"] ?? "").length > 0 || ((labels["open-sandbox.kind"] ?? "") === "direct" && (labels["open-sandbox.managed_id"] ?? "").length > 0);
+		return activeContainer?.resettable ?? false;
 	});
 	const canBrowseFiles = $derived(backingContainerId.length > 0);
 
@@ -319,7 +318,7 @@
 						throw new Error("Reset is only available for managed direct containers and compose workloads.");
 					}
 					const result = await runApiEffect(resetContainer(config, targetId));
-					onContainerReplaced(result.container_id);
+					onContainerReplaced(result.id);
 					notice = "Container reset.";
 					await Promise.resolve(onRefresh());
 					await tick();

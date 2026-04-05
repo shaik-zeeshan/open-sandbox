@@ -29,8 +29,15 @@ Optional:
 - `SANDBOX_CORS_ORIGINS`: comma-separated origins (default `http://localhost:5173,http://127.0.0.1:5173`)
 - `SANDBOX_WORKSPACE_DIR`: base directory for `context_path` and managed compose projects (default user home directory)
 - `SANDBOX_DB_PATH`: SQLite path for sandbox metadata (default resolves to `apps/server/open-sandbox.db` in the repo layout)
+- `SANDBOX_RUNTIME_MEMORY_LIMIT`: default memory limit for created sandboxes and managed containers, for example `4g`
+- `SANDBOX_RUNTIME_CPU_LIMIT`: default CPU limit for created sandboxes and managed containers, for example `2`
+- `SANDBOX_RUNTIME_PIDS_LIMIT`: default PID limit for created sandboxes and managed containers, for example `512`
+- `SANDBOX_MAINTENANCE_ARTIFACT_MAX_AGE`: retention window for stale direct-container specs and compose project directories, default `168h`
+- `SANDBOX_MAINTENANCE_MISSING_SANDBOX_MAX_AGE`: retention window for sandbox records whose container is already gone, default `24h`
 
 `/health` is intentionally public.
+
+`/metrics` is also public so it can be scraped through the same reverse proxy path on a single server.
 
 When the database has no users yet, create the initial admin account through `/auth/bootstrap` or the UI login screen. Additional users are managed through `/api/users` by an admin session.
 

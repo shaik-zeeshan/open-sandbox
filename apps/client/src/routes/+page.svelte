@@ -29,7 +29,7 @@
 		type ImageSummary,
 		type Sandbox
 	} from "$lib/api";
-	import { beginAuthCheck, clearAuth, clientState, setAuthSession } from "$lib/stores.svelte";
+	import { beginAuthCheck, clearAuth, clientState, setAuthSession, setBaseUrl } from "$lib/stores.svelte";
 
 	type HealthState = "unknown" | "checking" | "ok" | "error";
 
@@ -45,6 +45,8 @@
 	let loginLoading = $state(false);
 	let loginError = $state("");
 	let bootstrapRequired = $state(false);
+	let endpointValue = $state(clientState.baseUrl);
+	let endpointSaved = $state(false);
 
 	// ── Data ───────────────────────────────────────────────────────────────────
 	let sandboxes = $state<Sandbox[]>([]);
@@ -59,6 +61,18 @@
 	let activeWorkload = $state<ActiveWorkload>(null);
 	let pendingContainerActivationId = $state<string | null>(null);
 	let activeRuntimeContainerSnapshot = $state<ContainerSummary | null>(null);
+
+	const isValidUrl = (value: string): boolean => {
+		try {
+			new URL(value);
+			return true;
+		} catch {
+			return false;
+		}
+	};
+
+	const endpointDirty = $derived(endpointValue !== clientState.baseUrl);
+	const endpointValid = $derived(isValidUrl(endpointValue));
 
 	const activeSandbox = $derived.by(() => {
 		const currentActive = activeWorkload;
@@ -82,7 +96,7 @@
 		return activeRuntimeContainer ?? activeRuntimeContainerSnapshot;
 	});
 	const activeContainer = $derived(
-		activeVisibleRuntimeContainer ?? (activeSandbox ? (containers.find(c => c.id === activeSandbox.container_id) ?? null) : null)
+		activeVisibleRuntimeContainer ?? (activeSandbox ? (containers.find(c => c.id === activeSandbox.id) ?? null) : null)
 	);
 
 	$effect(() => {
@@ -141,10 +155,24 @@
 
 	$effect(() => {
 		clientState.baseUrl;
+		endpointValue = clientState.baseUrl;
+	});
+
+	$effect(() => {
+		clientState.baseUrl;
 		if (healthTimer) clearTimeout(healthTimer);
 		healthTimer = setTimeout(() => void checkHealth(), 400);
 		return () => { if (healthTimer) { clearTimeout(healthTimer); healthTimer = null; } };
 	});
+
+	function applyEndpoint(): void {
+		if (!endpointValid) return;
+		setBaseUrl(endpointValue.replace(/\/$/, ""));
+		endpointSaved = true;
+		setTimeout(() => {
+			endpointSaved = false;
+		}, 2000);
+	}
 
 	$effect(() => {
 		if (!clientState.isAuthenticated || clientState.tokenExpiresAt === null) return;
@@ -356,8 +384,8 @@
 			const result = await runApiEffect(resetContainer(clientState.config, id));
 			const currentActive = activeWorkload;
 			if (currentActive?.kind === "container" && currentActive.id === id) {
-				activeWorkload = { kind: "container", id: result.container_id };
-				pendingContainerActivationId = result.container_id;
+				activeWorkload = { kind: "container", id: result.id };
+				pendingContainerActivationId = result.id;
 			}
 			dataNotice = "Container reset.";
 			await refreshData();
@@ -455,6 +483,40 @@
 			<div class="auth-heading">
 				<h1 class="auth-title">open<em>sandbox</em></h1>
 				<p class="auth-desc">{bootstrapRequired ? "Create the first admin account for this control plane." : "Sign in with your username and password to access the control plane."}</p>
+			</div>
+			<div class="auth-field">
+				<label class="section-label" for="endpoint">API Endpoint</label>
+				<div class="auth-endpoint-row">
+					<div class="auth-endpoint-input-wrap">
+						<input
+							id="endpoint"
+							type="text"
+							class="field auth-endpoint-field"
+							class:auth-endpoint-field--invalid={endpointValue.length > 0 && !endpointValid}
+							class:auth-endpoint-field--valid={endpointValid && endpointDirty}
+							bind:value={endpointValue}
+							autocapitalize="none"
+							spellcheck="false"
+							placeholder="http://localhost:8080"
+							onkeydown={(event) => {
+								if (event.key === "Enter") {
+									event.preventDefault();
+									applyEndpoint();
+								}
+							}}
+						/>
+						<div class="auth-endpoint-status">
+							{#if endpointValue.length > 0 && !endpointValid}
+								<span class="auth-endpoint-badge auth-endpoint-badge--error">Invalid URL</span>
+							{:else if endpointSaved}
+								<span class="auth-endpoint-badge auth-endpoint-badge--ok">Saved</span>
+							{/if}
+						</div>
+					</div>
+					<button type="button" class="btn-ghost btn-sm auth-endpoint-apply" onclick={applyEndpoint} disabled={!endpointValid || !endpointDirty}>
+						Apply
+					</button>
+				</div>
 			</div>
 			<div class="auth-field">
 				<label class="section-label" for="username">Username</label>
@@ -597,6 +659,47 @@
 		line-height: 1.5;
 	}
 	.auth-field { display: flex; flex-direction: column; gap: 0.35rem; }
+	.auth-endpoint-row {
+		display: flex;
+		align-items: flex-start;
+		gap: 0.65rem;
+	}
+	.auth-endpoint-input-wrap {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		gap: 0.4rem;
+	}
+	.auth-endpoint-field--invalid {
+		border-color: color-mix(in srgb, var(--status-error) 60%, var(--border-mid));
+	}
+	.auth-endpoint-field--valid {
+		border-color: color-mix(in srgb, var(--status-ok) 60%, var(--border-mid));
+	}
+	.auth-endpoint-status {
+		min-height: 1rem;
+	}
+	.auth-endpoint-badge {
+		display: inline-flex;
+		align-items: center;
+		padding: 0.12rem 0.45rem;
+		border-radius: 999px;
+		font-family: var(--font-mono);
+		font-size: 0.6rem;
+		letter-spacing: 0.04em;
+	}
+	.auth-endpoint-badge--error {
+		background: color-mix(in srgb, var(--status-error) 16%, transparent);
+		color: var(--status-error);
+	}
+	.auth-endpoint-badge--ok {
+		background: color-mix(in srgb, var(--status-ok) 16%, transparent);
+		color: var(--status-ok);
+	}
+	.auth-endpoint-apply {
+		flex: none;
+		min-width: 4.75rem;
+	}
 	.auth-submit { width: 100%; padding: 0.625rem 1rem; font-size: 0.72rem; }
 	.auth-footer {
 		display: flex;
@@ -616,5 +719,14 @@
 	.auth-health-dot.health-checking { background: var(--status-warn); }
 	.auth-health-text { font-family: var(--font-mono); font-size: 0.6rem; color: var(--text-muted); }
 
+	@media (max-width: 640px) {
+		.auth-endpoint-row {
+			flex-direction: column;
+		}
+
+		.auth-endpoint-apply {
+			width: 100%;
+		}
+	}
 
 </style>

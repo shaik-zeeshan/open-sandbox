@@ -1,0 +1,11 @@
+.git/
+.turbo/
+.DS_Store
+.env
+.data/
+node_modules/
+opensrc/
+apps/client/build/
+apps/server/open-sandbox
+apps/server/open-sandbox.db
+apps/server/tmp/

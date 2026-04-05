@@ -90,12 +90,24 @@ type UserStore interface {
 	RevokeRefreshTokenByHash(ctx context.Context, tokenHash string, revokedAt int64) error
 }
 
+type WorkerStore interface {
+	UpsertRuntimeWorker(ctx context.Context, worker store.RuntimeWorker) error
+	GetRuntimeWorker(ctx context.Context, workerID string) (store.RuntimeWorker, error)
+	ListRuntimeWorkers(ctx context.Context) ([]store.RuntimeWorker, error)
+	TouchRuntimeWorkerHeartbeat(ctx context.Context, workerID string, observedAt int64, status string, advertiseAddress string, version string, labels map[string]string) error
+}
+
 type Server struct {
 	docker          DockerAPI
+	runtime         workloadRuntime
 	auth            AuthConfig
 	router          *gin.Engine
 	sandboxStore    SandboxStore
 	userStore       UserStore
+	workerStore     WorkerStore
+	logger          *slog.Logger
+	metrics         *operationalMetrics
+	runtimeLimits   runtimeLimits
 	workspaceRoot   string
 	execWaitTimeout time.Duration
 }
@@ -110,12 +122,14 @@ type composeProjectContext struct {
 }
 
 const (
+	localRuntimeWorkerID          = "local"
 	labelOpenSandboxManaged       = "open-sandbox.managed"
 	labelOpenSandboxOwnerID       = "open-sandbox.owner_id"
 	labelOpenSandboxOwnerUsername = "open-sandbox.owner_username"
 	labelOpenSandboxKind          = "open-sandbox.kind"
 	labelOpenSandboxManagedID     = "open-sandbox.managed_id"
 	labelOpenSandboxSandboxID     = "open-sandbox.sandbox_id"
+	labelOpenSandboxWorkerID      = "open-sandbox.worker_id"
 	managedKindDirect             = "direct"
 	managedKindSandbox            = "sandbox"
 	composeOwnerMetadataFile      = ".owner.json"
@@ -213,6 +227,7 @@ type CreateContainerRequest struct {
 }
 
 type CreateContainerResponse struct {
+	ID          string   `json:"id"`
 	ContainerID string   `json:"container_id"`
 	Warnings    []string `json:"warnings"`
 	Started     bool     `json:"started"`
@@ -248,6 +263,7 @@ func NewServer(dockerClient DockerAPI, authConfig AuthConfig) *Server {
 
 func NewServerWithStore(dockerClient DockerAPI, authConfig AuthConfig, sandboxStore SandboxStore) *Server {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	workspaceRoot := resolveWorkspaceRoot()
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(requestIDMiddleware())
@@ -263,9 +279,13 @@ func NewServerWithStore(dockerClient DockerAPI, authConfig AuthConfig, sandboxSt
 	}))
 
 	var userStore UserStore
+	var workerStore WorkerStore
 	if sandboxStore != nil {
 		if configuredUserStore, ok := sandboxStore.(UserStore); ok {
 			userStore = configuredUserStore
+		}
+		if configuredWorkerStore, ok := sandboxStore.(WorkerStore); ok {
+			workerStore = configuredWorkerStore
 		}
 	}
 
@@ -275,9 +295,15 @@ func NewServerWithStore(dockerClient DockerAPI, authConfig AuthConfig, sandboxSt
 		router:          r,
 		sandboxStore:    sandboxStore,
 		userStore:       userStore,
-		workspaceRoot:   resolveWorkspaceRoot(),
+		workerStore:     workerStore,
+		logger:          logger,
+		metrics:         newOperationalMetrics(),
+		runtimeLimits:   loadRuntimeLimitsFromEnv(),
+		workspaceRoot:   workspaceRoot,
 		execWaitTimeout: loadExecWaitTimeout(),
 	}
+	s.runtime = newDelegatingRuntime(workerStore, localRuntimeWorkerID, newDockerRuntime(localRuntimeWorkerID, dockerClient, func() string { return s.workspaceRoot }))
+	s.ensureLocalWorkerRegistration(context.Background())
 	s.registerRoutes()
 	return s
 }
@@ -288,12 +314,19 @@ func (s *Server) Router() *gin.Engine {
 
 func (s *Server) registerRoutes() {
 	s.router.GET("/health", s.health)
+	s.router.GET("/metrics", s.metricsHandler)
 	s.router.GET("/auth/setup", s.setupStatus)
 	s.router.POST("/auth/bootstrap", s.bootstrap)
 	s.router.POST("/auth/login", s.login)
 	s.router.POST("/auth/refresh", s.refresh)
 	s.router.GET("/auth/session", s.session)
 	s.router.POST("/auth/logout", s.logout)
+	workerControl := s.router.Group("/control")
+	workerControl.Use(s.workerAuthMiddleware())
+	{
+		workerControl.POST("/workers/register", s.registerWorker)
+		workerControl.POST("/workers/:id/heartbeat", s.heartbeatWorker)
+	}
 	secured := s.router.Group("/")
 	secured.Use(s.auth.Middleware())
 
@@ -341,6 +374,9 @@ func (s *Server) registerRoutes() {
 		api.GET("/sandboxes/:id/logs", s.streamSandboxLogs)
 		api.GET("/sandboxes/:id/files", s.readSandboxFile)
 		api.PUT("/sandboxes/:id/files", s.writeSandboxFile)
+
+		api.GET("/admin/workers", s.listWorkers)
+		api.POST("/admin/maintenance/cleanup", s.runMaintenanceCleanup)
 	}
 
 	secured.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
@@ -801,7 +837,7 @@ func (s *Server) gitClone(c *gin.Context) {
 	}
 	cmd = append(cmd, req.RepoURL, req.TargetPath)
 
-	execResp, err := s.runContainerExec(c.Request.Context(), req.ContainerID, ExecRequest{Cmd: cmd})
+	execResp, err := s.runContainerExec(c.Request.Context(), localRuntimeWorkerID, req.ContainerID, ExecRequest{Cmd: cmd})
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
@@ -839,30 +875,34 @@ func (s *Server) createContainer(c *gin.Context) {
 		return
 	}
 
-	containerConfig, hostConfig, err := buildDirectContainerConfigs(req, identity.UserID, identity.Username, managedID)
+	containerConfig, hostConfig, err := buildDirectContainerConfigs(req, identity.UserID, identity.Username, managedID, localRuntimeWorkerID)
 	if err != nil {
 		_ = os.Remove(s.directContainerSpecPath(managedID))
 		writeError(c, http.StatusBadRequest, err)
 		return
 	}
+	s.runtimeLimits.apply(hostConfig)
 
-	created, err := s.createContainerWithAutoPull(c.Request.Context(), req.Image, containerConfig, hostConfig, req.Name)
+	created, err := s.createContainerWithAutoPull(c.Request.Context(), localRuntimeWorkerID, req.Image, containerConfig, hostConfig, req.Name)
 	if err != nil {
 		_ = os.Remove(s.directContainerSpecPath(managedID))
+		s.logLifecycleFailure("create_container", err, slog.String("managed_id", managedID), slog.String("image", req.Image))
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 
 	started := false
 	if req.Start {
-		if err := s.docker.ContainerStart(c.Request.Context(), created.ID, container.StartOptions{}); err != nil {
+		if err := s.runtime.StartWorkload(c.Request.Context(), localRuntimeWorkerID, created.ID, container.StartOptions{}); err != nil {
+			s.logLifecycleFailure("start_container", err, slog.String("container_id", created.ID), slog.String("managed_id", managedID))
 			writeError(c, http.StatusInternalServerError, fmt.Errorf("start container: %w", err))
 			return
 		}
 		started = true
 	}
+	s.logLifecycleSuccess("create_container", slog.String("container_id", created.ID), slog.String("managed_id", managedID), slog.Bool("started", started))
 
-	c.JSON(http.StatusOK, CreateContainerResponse{ContainerID: created.ID, Warnings: created.Warnings, Started: started})
+	c.JSON(http.StatusOK, CreateContainerResponse{ID: managedID, ContainerID: created.ID, Warnings: created.Warnings, Started: started})
 }
 
 func isMissingImageError(err error) bool {
@@ -898,7 +938,7 @@ func (s *Server) execInContainer(c *gin.Context) {
 		return
 	}
 
-	resp, err := s.runContainerExec(c.Request.Context(), target.ID, req)
+	resp, err := s.runContainerExec(c.Request.Context(), s.workerIDForContainerSummary(target), target.ContainerID, req)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
@@ -926,7 +966,7 @@ func (s *Server) streamLogs(c *gin.Context) {
 
 	follow, _ := strconv.ParseBool(c.DefaultQuery("follow", "true"))
 	tail := c.DefaultQuery("tail", "100")
-	s.streamLogsForContainer(c, target.ID, follow, tail)
+	s.streamLogsForContainer(c, s.workerIDForContainerSummary(target), target.ContainerID, follow, tail)
 }
 
 func (s *Server) streamContainerTerminal(c *gin.Context) {
@@ -936,10 +976,10 @@ func (s *Server) streamContainerTerminal(c *gin.Context) {
 	}
 
 	workdir := strings.TrimSpace(c.Query("workdir"))
-	s.streamTerminalForContainer(c, target.ID, workdir)
+	s.streamTerminalForContainer(c, s.workerIDForContainerSummary(target), target.ContainerID, workdir)
 }
 
-func (s *Server) streamTerminalForContainer(c *gin.Context, containerID string, workdir string) {
+func (s *Server) streamTerminalForContainer(c *gin.Context, workerID string, containerID string, workdir string) {
 	cols := parseTerminalDimension(c.Query("cols"), 120)
 	rows := parseTerminalDimension(c.Query("rows"), 32)
 
@@ -956,12 +996,14 @@ func (s *Server) streamTerminalForContainer(c *gin.Context, containerID string, 
 
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
+		s.logStreamFailure("terminal_websocket_upgrade", err, slog.String("container_id", containerID))
 		return
 	}
 	conn.SetReadLimit(1 << 20)
 
-	execID, attached, err := s.startInteractiveExec(c.Request.Context(), containerID, workdir, cols, rows)
+	execID, attached, err := s.startInteractiveExec(c.Request.Context(), workerID, containerID, workdir, cols, rows)
 	if err != nil {
+		s.logStreamFailure("terminal_exec", err, slog.String("container_id", containerID))
 		_ = conn.WriteControl(
 			websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "terminal setup failed"),
@@ -1025,7 +1067,7 @@ func (s *Server) streamTerminalForContainer(c *gin.Context, containerID string, 
 			if message.Cols == 0 || message.Rows == 0 {
 				continue
 			}
-			if err := s.docker.ContainerExecResize(c.Request.Context(), execID, container.ResizeOptions{Width: message.Cols, Height: message.Rows}); err != nil {
+			if err := s.runtime.ExecResize(c.Request.Context(), workerID, execID, container.ResizeOptions{Width: message.Cols, Height: message.Rows}); err != nil {
 				cleanup.Do(cleanupSession)
 				return
 			}
@@ -1035,6 +1077,7 @@ func (s *Server) streamTerminalForContainer(c *gin.Context, containerID string, 
 
 func (s *Server) startInteractiveExec(
 	ctx context.Context,
+	workerID string,
 	containerID string,
 	workdir string,
 	cols uint,
@@ -1052,12 +1095,12 @@ func (s *Server) startInteractiveExec(
 		AttachStderr: true,
 	}
 
-	created, err := s.docker.ContainerExecCreate(ctx, containerID, execConfig)
+	created, err := s.runtime.ExecCreate(ctx, workerID, containerID, execConfig)
 	if err != nil {
 		return "", dockertypes.HijackedResponse{}, fmt.Errorf("create interactive exec: %w", err)
 	}
 
-	attached, err := s.docker.ContainerExecAttach(ctx, created.ID, container.ExecAttachOptions{Tty: true, ConsoleSize: consoleSize})
+	attached, err := s.runtime.ExecAttach(ctx, workerID, created.ID, container.ExecAttachOptions{Tty: true, ConsoleSize: consoleSize})
 	if err != nil {
 		return "", dockertypes.HijackedResponse{}, fmt.Errorf("attach interactive exec: %w", err)
 	}
@@ -1082,7 +1125,7 @@ func parseTerminalDimension(raw string, fallback uint) uint {
 	return uint(value)
 }
 
-func (s *Server) runContainerExec(ctx context.Context, containerID string, req ExecRequest) (ExecResponse, error) {
+func (s *Server) runContainerExec(ctx context.Context, workerID string, containerID string, req ExecRequest) (ExecResponse, error) {
 	execConfig := container.ExecOptions{
 		Cmd:          req.Cmd,
 		User:         req.User,
@@ -1093,20 +1136,20 @@ func (s *Server) runContainerExec(ctx context.Context, containerID string, req E
 		AttachStderr: !req.Detach,
 	}
 
-	created, err := s.docker.ContainerExecCreate(ctx, containerID, execConfig)
+	created, err := s.runtime.ExecCreate(ctx, workerID, containerID, execConfig)
 	if err != nil {
 		return ExecResponse{}, fmt.Errorf("create exec: %w", err)
 	}
 
 	if req.Detach {
-		if err := s.docker.ContainerExecStart(ctx, created.ID, container.ExecStartOptions{Detach: true, Tty: req.TTY}); err != nil {
+		if err := s.runtime.ExecStart(ctx, workerID, created.ID, container.ExecStartOptions{Detach: true, Tty: req.TTY}); err != nil {
 			return ExecResponse{}, fmt.Errorf("start detached exec: %w", err)
 		}
 
 		return ExecResponse{ExecID: created.ID, Detached: true}, nil
 	}
 
-	attached, err := s.docker.ContainerExecAttach(ctx, created.ID, container.ExecAttachOptions{Tty: req.TTY})
+	attached, err := s.runtime.ExecAttach(ctx, workerID, created.ID, container.ExecAttachOptions{Tty: req.TTY})
 	if err != nil {
 		return ExecResponse{}, fmt.Errorf("attach exec: %w", err)
 	}
@@ -1127,7 +1170,7 @@ func (s *Server) runContainerExec(ctx context.Context, containerID string, req E
 	waitCtx, cancel := context.WithTimeout(ctx, s.execWaitTimeout)
 	defer cancel()
 
-	inspect, err := s.waitForExec(waitCtx, created.ID)
+	inspect, err := s.waitForExec(waitCtx, workerID, created.ID)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return ExecResponse{}, fmt.Errorf("exec did not finish within %s", s.execWaitTimeout)
@@ -1144,12 +1187,12 @@ func (s *Server) runContainerExec(ctx context.Context, containerID string, req E
 	}, nil
 }
 
-func (s *Server) waitForExec(ctx context.Context, execID string) (container.ExecInspect, error) {
+func (s *Server) waitForExec(ctx context.Context, workerID string, execID string) (container.ExecInspect, error) {
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
-		inspect, err := s.docker.ContainerExecInspect(ctx, execID)
+		inspect, err := s.runtime.ExecInspect(ctx, workerID, execID)
 		if err != nil {
 			return container.ExecInspect{}, fmt.Errorf("inspect exec: %w", err)
 		}
@@ -1248,7 +1291,7 @@ func buildComposeArgs(project composeProjectContext, req ComposeRequest, cmd str
 	return args
 }
 
-func buildDirectContainerConfigs(req CreateContainerRequest, ownerID string, ownerUsername string, managedID string) (*container.Config, *container.HostConfig, error) {
+func buildDirectContainerConfigs(req CreateContainerRequest, ownerID string, ownerUsername string, managedID string, workerID string) (*container.Config, *container.HostConfig, error) {
 	containerConfig := &container.Config{
 		Image:      req.Image,
 		Cmd:        req.Cmd,
@@ -1262,6 +1305,7 @@ func buildDirectContainerConfigs(req CreateContainerRequest, ownerID string, own
 			labelOpenSandboxOwnerUsername: ownerUsername,
 			labelOpenSandboxKind:          managedKindDirect,
 			labelOpenSandboxManagedID:     managedID,
+			labelOpenSandboxWorkerID:      normalizeManagedWorkerID(workerID),
 		},
 	}
 	hostConfig := &container.HostConfig{
@@ -1309,20 +1353,7 @@ func (s *Server) prepareComposeProject(req ComposeRequest) (composeProjectContex
 }
 
 func (s *Server) existingComposeProject(projectName string) (composeProjectContext, error) {
-	sanitized := sanitizeComposeProjectName(projectName)
-	if sanitized == "" {
-		return composeProjectContext{}, errors.New("compose project name is required")
-	}
-	projectDir := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", sanitized)
-	composeFile := filepath.Join(projectDir, "docker-compose.yml")
-	if _, err := os.Stat(composeFile); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return composeProjectContext{}, fmt.Errorf("compose project %q not found", sanitized)
-		}
-		return composeProjectContext{}, fmt.Errorf("inspect compose project: %w", err)
-	}
-
-	return composeProjectContext{ProjectName: sanitized, ProjectDir: projectDir, ComposeFile: composeFile}, nil
+	return existingComposeProjectAt(s.workspaceRoot, projectName)
 }
 
 func (s *Server) composeProjectContextForName(projectName string) composeProjectContext {

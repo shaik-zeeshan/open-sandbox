@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +16,7 @@ import (
 
 var ErrSandboxNotFound = errors.New("sandbox not found")
 var ErrUserNotFound = errors.New("user not found")
+var ErrRuntimeWorkerNotFound = errors.New("runtime worker not found")
 var ErrUsernameTaken = errors.New("username already exists")
 var ErrRefreshTokenNotFound = errors.New("refresh token not found")
 var ErrRefreshTokenInactive = errors.New("refresh token is inactive")
@@ -24,6 +26,7 @@ type Sandbox struct {
 	Name          string
 	Image         string
 	ContainerID   string
+	WorkerID      string
 	WorkspaceDir  string
 	RepoURL       string
 	Status        string
@@ -31,6 +34,20 @@ type Sandbox struct {
 	OwnerUsername string
 	CreatedAt     int64
 	UpdatedAt     int64
+}
+
+type RuntimeWorker struct {
+	ID                  string
+	Name                string
+	AdvertiseAddress    string
+	ExecutionMode       string
+	Status              string
+	Version             string
+	Labels              map[string]string
+	RegisteredAt        int64
+	LastHeartbeatAt     int64
+	HeartbeatTTLSeconds int64
+	UpdatedAt           int64
 }
 
 type User struct {
@@ -114,6 +131,7 @@ CREATE TABLE IF NOT EXISTS sandboxes (
 	name TEXT NOT NULL,
 	image TEXT NOT NULL,
 	container_id TEXT NOT NULL UNIQUE,
+	worker_id TEXT NOT NULL DEFAULT 'local',
 	workspace_dir TEXT NOT NULL,
 	repo_url TEXT NOT NULL DEFAULT '',
 	status TEXT NOT NULL,
@@ -147,6 +165,22 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
 
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires_at ON refresh_tokens(expires_at);
+
+CREATE TABLE IF NOT EXISTS runtime_workers (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
+	advertise_address TEXT NOT NULL DEFAULT '',
+	execution_mode TEXT NOT NULL,
+	status TEXT NOT NULL,
+	version TEXT NOT NULL DEFAULT '',
+	labels_json TEXT NOT NULL DEFAULT '{}',
+	registered_at INTEGER NOT NULL,
+	last_heartbeat_at INTEGER NOT NULL,
+	heartbeat_ttl_seconds INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_workers_last_heartbeat_at ON runtime_workers(last_heartbeat_at DESC);
 `
 
 	if _, err := s.db.ExecContext(ctx, migration); err != nil {
@@ -156,6 +190,9 @@ CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires_at ON refresh_tokens(expir
 		return err
 	}
 	if err := s.ensureColumn(ctx, "sandboxes", "owner_username", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "sandboxes", "worker_id", "TEXT NOT NULL DEFAULT 'local'"); err != nil {
 		return err
 	}
 
@@ -210,12 +247,13 @@ func (s *SQLiteStore) CreateSandbox(ctx context.Context, sandbox Sandbox) error 
 
 	_, err := s.db.ExecContext(
 		ctx,
-		`INSERT INTO sandboxes (id, name, image, container_id, workspace_dir, repo_url, status, owner_id, owner_username, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO sandboxes (id, name, image, container_id, worker_id, workspace_dir, repo_url, status, owner_id, owner_username, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sandbox.ID,
 		sandbox.Name,
 		sandbox.Image,
 		sandbox.ContainerID,
+		normalizeWorkerID(sandbox.WorkerID),
 		sandbox.WorkspaceDir,
 		sandbox.RepoURL,
 		sandbox.Status,
@@ -233,7 +271,7 @@ func (s *SQLiteStore) CreateSandbox(ctx context.Context, sandbox Sandbox) error 
 
 func (s *SQLiteStore) ListSandboxes(ctx context.Context) ([]Sandbox, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, image, container_id, workspace_dir, repo_url, status, owner_id, owner_username, created_at, updated_at
+		SELECT id, name, image, container_id, worker_id, workspace_dir, repo_url, status, owner_id, owner_username, created_at, updated_at
 		FROM sandboxes
 		ORDER BY created_at DESC`)
 	if err != nil {
@@ -260,7 +298,7 @@ func (s *SQLiteStore) ListSandboxes(ctx context.Context) ([]Sandbox, error) {
 func (s *SQLiteStore) GetSandbox(ctx context.Context, sandboxID string) (Sandbox, error) {
 	row := s.db.QueryRowContext(
 		ctx,
-		`SELECT id, name, image, container_id, workspace_dir, repo_url, status, owner_id, owner_username, created_at, updated_at
+		`SELECT id, name, image, container_id, worker_id, workspace_dir, repo_url, status, owner_id, owner_username, created_at, updated_at
 		 FROM sandboxes
 		 WHERE id = ?`,
 		sandboxID,
@@ -357,6 +395,7 @@ func scanSandbox(scanner sandboxScanner) (Sandbox, error) {
 		&sandbox.Name,
 		&sandbox.Image,
 		&sandbox.ContainerID,
+		&sandbox.WorkerID,
 		&sandbox.WorkspaceDir,
 		&sandbox.RepoURL,
 		&sandbox.Status,
@@ -372,6 +411,206 @@ func scanSandbox(scanner sandboxScanner) (Sandbox, error) {
 	}
 
 	return sandbox, nil
+}
+
+func normalizeWorkerID(workerID string) string {
+	trimmed := strings.TrimSpace(workerID)
+	if trimmed == "" {
+		return "local"
+	}
+	return trimmed
+}
+
+func (s *SQLiteStore) UpsertRuntimeWorker(ctx context.Context, worker RuntimeWorker) error {
+	worker.ID = normalizeWorkerID(worker.ID)
+	if strings.TrimSpace(worker.Name) == "" {
+		worker.Name = worker.ID
+	}
+	if strings.TrimSpace(worker.ExecutionMode) == "" {
+		worker.ExecutionMode = "docker"
+	}
+	if strings.TrimSpace(worker.Status) == "" {
+		worker.Status = "active"
+	}
+	if worker.HeartbeatTTLSeconds <= 0 {
+		worker.HeartbeatTTLSeconds = 30
+	}
+	now := time.Now().Unix()
+	if worker.RegisteredAt == 0 {
+		worker.RegisteredAt = now
+	}
+	if worker.LastHeartbeatAt == 0 {
+		worker.LastHeartbeatAt = now
+	}
+	if worker.UpdatedAt == 0 {
+		worker.UpdatedAt = now
+	}
+
+	labelsJSON, err := marshalWorkerLabels(worker.Labels)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO runtime_workers (
+			id, name, advertise_address, execution_mode, status, version, labels_json,
+			registered_at, last_heartbeat_at, heartbeat_ttl_seconds, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			name = excluded.name,
+			advertise_address = excluded.advertise_address,
+			execution_mode = excluded.execution_mode,
+			status = excluded.status,
+			version = excluded.version,
+			labels_json = excluded.labels_json,
+			last_heartbeat_at = excluded.last_heartbeat_at,
+			heartbeat_ttl_seconds = excluded.heartbeat_ttl_seconds,
+			updated_at = excluded.updated_at`,
+		worker.ID,
+		worker.Name,
+		strings.TrimSpace(worker.AdvertiseAddress),
+		worker.ExecutionMode,
+		worker.Status,
+		strings.TrimSpace(worker.Version),
+		labelsJSON,
+		worker.RegisteredAt,
+		worker.LastHeartbeatAt,
+		worker.HeartbeatTTLSeconds,
+		worker.UpdatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert runtime worker: %w", err)
+	}
+
+	return nil
+}
+
+func (s *SQLiteStore) GetRuntimeWorker(ctx context.Context, workerID string) (RuntimeWorker, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, name, advertise_address, execution_mode, status, version, labels_json,
+		       registered_at, last_heartbeat_at, heartbeat_ttl_seconds, updated_at
+		FROM runtime_workers
+		WHERE id = ?`, normalizeWorkerID(workerID))
+
+	worker, err := scanRuntimeWorker(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return RuntimeWorker{}, ErrRuntimeWorkerNotFound
+		}
+		return RuntimeWorker{}, err
+	}
+
+	return worker, nil
+}
+
+func (s *SQLiteStore) ListRuntimeWorkers(ctx context.Context) ([]RuntimeWorker, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, name, advertise_address, execution_mode, status, version, labels_json,
+		       registered_at, last_heartbeat_at, heartbeat_ttl_seconds, updated_at
+		FROM runtime_workers
+		ORDER BY id ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("query runtime workers: %w", err)
+	}
+	defer rows.Close()
+
+	workers := make([]RuntimeWorker, 0)
+	for rows.Next() {
+		worker, scanErr := scanRuntimeWorker(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		workers = append(workers, worker)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate runtime workers: %w", err)
+	}
+
+	return workers, nil
+}
+
+func (s *SQLiteStore) TouchRuntimeWorkerHeartbeat(ctx context.Context, workerID string, observedAt int64, status string, advertiseAddress string, version string, labels map[string]string) error {
+	worker, err := s.GetRuntimeWorker(ctx, workerID)
+	if err != nil {
+		return err
+	}
+	if observedAt == 0 {
+		observedAt = time.Now().Unix()
+	}
+	worker.LastHeartbeatAt = observedAt
+	worker.UpdatedAt = observedAt
+	if strings.TrimSpace(status) != "" {
+		worker.Status = strings.TrimSpace(status)
+	}
+	if strings.TrimSpace(advertiseAddress) != "" {
+		worker.AdvertiseAddress = strings.TrimSpace(advertiseAddress)
+	}
+	if strings.TrimSpace(version) != "" {
+		worker.Version = strings.TrimSpace(version)
+	}
+	if labels != nil {
+		worker.Labels = labels
+	}
+
+	return s.UpsertRuntimeWorker(ctx, worker)
+}
+
+type runtimeWorkerScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanRuntimeWorker(scanner runtimeWorkerScanner) (RuntimeWorker, error) {
+	var worker RuntimeWorker
+	var labelsJSON string
+	if err := scanner.Scan(
+		&worker.ID,
+		&worker.Name,
+		&worker.AdvertiseAddress,
+		&worker.ExecutionMode,
+		&worker.Status,
+		&worker.Version,
+		&labelsJSON,
+		&worker.RegisteredAt,
+		&worker.LastHeartbeatAt,
+		&worker.HeartbeatTTLSeconds,
+		&worker.UpdatedAt,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return RuntimeWorker{}, sql.ErrNoRows
+		}
+		return RuntimeWorker{}, fmt.Errorf("scan runtime worker row: %w", err)
+	}
+
+	labels, err := unmarshalWorkerLabels(labelsJSON)
+	if err != nil {
+		return RuntimeWorker{}, err
+	}
+	worker.Labels = labels
+
+	return worker, nil
+}
+
+func marshalWorkerLabels(labels map[string]string) (string, error) {
+	if len(labels) == 0 {
+		return "{}", nil
+	}
+	encoded, err := json.Marshal(labels)
+	if err != nil {
+		return "", fmt.Errorf("marshal runtime worker labels: %w", err)
+	}
+	return string(encoded), nil
+}
+
+func unmarshalWorkerLabels(raw string) (map[string]string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return map[string]string{}, nil
+	}
+	labels := make(map[string]string)
+	if err := json.Unmarshal([]byte(trimmed), &labels); err != nil {
+		return nil, fmt.Errorf("unmarshal runtime worker labels: %w", err)
+	}
+	return labels, nil
 }
 
 func normalizeUsername(username string) string {
