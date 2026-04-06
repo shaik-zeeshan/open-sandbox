@@ -8,6 +8,7 @@ Traefik is the only public proxy in self-hosted deployments. The client containe
 
 - `apps/server`: Go API service for sandbox/container management
 - `apps/client`: Svelte dashboard UI
+- `compose.dev.yaml`: Docker Compose hot-reload development stack
 - `compose.yaml`: local build-based Docker deployment
 - `compose.ghcr.yaml`: image-based Docker deployment from GHCR
 - `install.sh`: standalone installer for GHCR images (`docker run` based)
@@ -21,6 +22,8 @@ Traefik is the only public proxy in self-hosted deployments. The client containe
 ## Local development
 
 The server auto-loads `apps/server/.env` via `godotenv` if present.
+
+See `make help` for a full command list (workspace + compose shortcuts).
 
 ```bash
 bun install
@@ -44,6 +47,29 @@ Notes:
 
 On first launch, create the initial admin account from the login screen.
 
+### Docker Compose hot reload (DX)
+
+Use `compose.dev.yaml` when you want both apps running in containers with live reload while editing source files on the host.
+
+```bash
+docker compose -f compose.dev.yaml up
+```
+
+Or via Make:
+
+```bash
+make compose-dev-up
+```
+
+Default URL:
+- UI + API + auth + preview routes: `http://localhost:3000`
+
+Notes:
+- server hot reload runs with `go tool air -c .air.toml`
+- client hot reload runs with Vite on port `80` inside the container, proxied by Traefik
+- code is bind-mounted from the repo (`./:/workspace`) so edits are reflected immediately
+- development data defaults to `/tmp/open-sandbox` unless `OPEN_SANDBOX_DATA_DIR` is set
+
 ## Common commands
 
 ```bash
@@ -55,6 +81,7 @@ bun run build:client
 Equivalent Make targets:
 
 ```bash
+make help
 make test-server
 make check-client
 make build-client
