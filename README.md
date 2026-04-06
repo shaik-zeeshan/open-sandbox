@@ -98,6 +98,46 @@ Backend env vars inside the stack:
 
 `OPEN_SANDBOX_DATA_DIR` should be an absolute host path. The workspace directory is mounted into the server container at the same absolute path so `docker compose` and other Docker path-based operations keep resolving correctly through the host daemon.
 
+## GHCR images
+
+GitHub Actions publishes public images to GHCR:
+- `ghcr.io/shaik-zeeshan/open-sandbox-client`
+- `ghcr.io/shaik-zeeshan/open-sandbox-server`
+
+Published tags include:
+- `latest` from `main`
+- `sha-<commit>`
+- branch names
+- `pr-<number>` for same-repository pull requests while PR publishing is enabled
+- `v*` git tags
+
+The repo also includes `compose.ghcr.yaml` for image-based deploys that pull from GHCR instead of building locally.
+
+## Install from GHCR
+
+Use the installer to pull the published images and start the stack:
+
+```bash
+./install.sh
+```
+
+Optional tag override:
+
+```bash
+IMAGE_TAG=v1.2.3 ./install.sh
+```
+
+What `install.sh` does:
+- works as a standalone script and does not require the repo checkout after you have the script file
+- creates or updates `/var/lib/open-sandbox/config/open-sandbox.env`
+- generates `SANDBOX_JWT_SECRET` with `openssl` if needed
+- sets `OPEN_SANDBOX_DATA_DIR=/var/lib/open-sandbox`
+- creates `/var/lib/open-sandbox/db` and `/var/lib/open-sandbox/workspace`
+- sets directory permissions for the persistent data folders
+- pulls the GHCR images and starts the containers with `docker run`
+
+Because the install path uses `/var/lib/open-sandbox`, the script may prompt for `sudo`.
+
 ### Persistent data
 
 The compose stack keeps data under `${OPEN_SANDBOX_DATA_DIR}`:
@@ -126,4 +166,3 @@ docker compose up -d
 For image-based deploys, replace the build step with `docker compose pull`.
 
 If you need a backup before upgrading, back up `${OPEN_SANDBOX_DATA_DIR}` and any host Docker volumes or images you want to preserve.
-

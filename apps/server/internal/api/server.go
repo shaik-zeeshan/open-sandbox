@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -270,12 +271,12 @@ func NewServerWithStore(dockerClient DockerAPI, authConfig AuthConfig, sandboxSt
 	r.Use(requestLoggerMiddleware(logger))
 	origins := loadAllowedOrigins()
 	r.Use(cors.New(cors.Config{
-		AllowOriginFunc:  buildAllowOriginFunc(origins),
-		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Authorization", "Content-Type", "Accept", "X-Request-ID", "Traceparent", "Tracestate", "Baggage", "B3", "X-B3-TraceId", "X-B3-SpanId", "X-B3-ParentSpanId", "X-B3-Sampled", "X-B3-Flags", "Sentry-Trace"},
-		ExposeHeaders:    []string{"X-Request-ID"},
-		AllowCredentials: true,
-		MaxAge:           12 * time.Hour,
+		AllowOriginWithContextFunc: buildAllowOriginWithContextFunc(origins),
+		AllowMethods:               []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowHeaders:               []string{"Authorization", "Content-Type", "Accept", "X-Request-ID", "Traceparent", "Tracestate", "Baggage", "B3", "X-B3-TraceId", "X-B3-SpanId", "X-B3-ParentSpanId", "X-B3-Sampled", "X-B3-Flags", "Sentry-Trace"},
+		ExposeHeaders:              []string{"X-Request-ID"},
+		AllowCredentials:           true,
+		MaxAge:                     12 * time.Hour,
 	}))
 
 	var userStore UserStore
@@ -990,7 +991,7 @@ func (s *Server) streamTerminalForContainer(c *gin.Context, workerID string, con
 			if origin == "" {
 				return true
 			}
-			return allowOrigin(origin)
+			return allowOrigin(origin) || requestOriginMatchesForwardedHost(r, origin)
 		},
 	}
 
@@ -1928,6 +1929,90 @@ func buildAllowOriginFunc(allowedOrigins []string) func(string) bool {
 		host := parsed.Hostname()
 		return host == "localhost" || host == "127.0.0.1"
 	}
+}
+
+func buildAllowOriginWithContextFunc(allowedOrigins []string) func(*gin.Context, string) bool {
+	allowOrigin := buildAllowOriginFunc(allowedOrigins)
+	return func(c *gin.Context, origin string) bool {
+		return allowOrigin(origin) || requestOriginMatchesForwardedHost(c.Request, origin)
+	}
+}
+
+func requestOriginMatchesForwardedHost(r *http.Request, origin string) bool {
+	parsedOrigin, err := url.Parse(origin)
+	if err != nil || parsedOrigin.Host == "" || parsedOrigin.Hostname() == "" {
+		return false
+	}
+
+	requestScheme := forwardedRequestProto(r)
+	if requestScheme == "" {
+		if r.TLS != nil {
+			requestScheme = "https"
+		} else {
+			requestScheme = "http"
+		}
+	}
+	if !strings.EqualFold(parsedOrigin.Scheme, requestScheme) {
+		return false
+	}
+
+	requestHost := forwardedRequestHost(r)
+	if requestHost == "" {
+		return false
+	}
+
+	parsedRequestHost, err := url.Parse("//" + requestHost)
+	if err != nil || parsedRequestHost.Hostname() == "" {
+		return false
+	}
+
+	requestHostIncludesPort := parsedRequestHost.Host != parsedRequestHost.Hostname()
+	if requestHostIncludesPort {
+		return strings.EqualFold(parsedOrigin.Host, parsedRequestHost.Host)
+	}
+
+	return strings.EqualFold(parsedOrigin.Hostname(), parsedRequestHost.Hostname())
+}
+
+func forwardedRequestHost(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+
+	raw := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	if raw == "" {
+		raw = strings.TrimSpace(r.Host)
+	}
+	if raw == "" {
+		return ""
+	}
+
+	if parts := strings.Split(raw, ","); len(parts) > 0 {
+		raw = strings.TrimSpace(parts[0])
+	}
+
+	if host, port, err := net.SplitHostPort(raw); err == nil {
+		return net.JoinHostPort(host, port)
+	}
+
+	return raw
+}
+
+func forwardedRequestProto(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+
+	raw := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
+	if raw == "" {
+		return ""
+	}
+
+	if parts := strings.Split(raw, ","); len(parts) > 0 {
+		return strings.TrimSpace(parts[0])
+	}
+
+	return raw
 }
 
 func loadExecWaitTimeout() time.Duration {

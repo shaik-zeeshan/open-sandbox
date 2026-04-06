@@ -1906,7 +1906,9 @@ func TestSandboxTerminalWebSocket(t *testing.T) {
 	resizeCalls := make([]container.ResizeOptions, 0, 1)
 	resizeReceived := make(chan container.ResizeOptions, 1)
 	receivedInput := make(chan string, 1)
+	keepSessionOpen := make(chan struct{})
 	go func() {
+		defer close(receivedInput)
 		_, _ = peerConn.Write([]byte("terminal ready\r\n"))
 		buffer := make([]byte, 64)
 		_ = peerConn.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -1914,8 +1916,10 @@ func TestSandboxTerminalWebSocket(t *testing.T) {
 		if err == nil && count > 0 {
 			receivedInput <- string(buffer[:count])
 		}
+		<-keepSessionOpen
 		_ = peerConn.Close()
 	}()
+	defer close(keepSessionOpen)
 
 	m := &mockDocker{
 		containerExecCreateFn: func(_ context.Context, containerID string, options container.ExecOptions) (container.ExecCreateResponse, error) {
@@ -2018,6 +2022,20 @@ func TestSandboxTerminalWebSocket(t *testing.T) {
 	}
 	if resizeCalls[0].Width != 140 || resizeCalls[0].Height != 48 {
 		t.Fatalf("unexpected resize call: %+v", resizeCalls[0])
+	}
+}
+
+func TestTerminalWebSocketAllowsSameHostOriginBehindProxy(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/sandboxes/sandbox-1/terminal/ws?cols=100&rows=32", nil)
+	req.Host = "192.168.0.8"
+	req.Header.Set("Origin", "http://192.168.0.8:8010")
+	req.Header.Set("X-Forwarded-Host", "192.168.0.8")
+	req.Header.Set("X-Forwarded-Proto", "http")
+
+	allowOrigin := buildAllowOriginFunc(loadAllowedOrigins())
+	allowed := allowOrigin("http://192.168.0.8:8010") || requestOriginMatchesForwardedHost(req, "http://192.168.0.8:8010")
+	if !allowed {
+		t.Fatal("expected websocket origin to be allowed for proxied same-host request")
 	}
 }
 
