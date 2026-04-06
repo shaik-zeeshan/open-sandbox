@@ -1,51 +1,56 @@
 # open-sandbox monorepo
 
-Monorepo for the open-sandbox backend and dashboard.
+Monorepo for the open-sandbox API and dashboard.
 
-## Structure
+## Repo layout
 
-- `apps/server`: Go API service (existing open-sandbox backend)
-- `apps/client`: Svelte dashboard for managing sandboxes and containers
+- `apps/server`: Go API service for sandbox/container management
+- `apps/client`: Svelte dashboard UI
+- `compose.yaml`: local build-based Docker deployment
+- `compose.ghcr.yaml`: image-based Docker deployment from GHCR
+- `install.sh`: standalone installer for GHCR images (`docker run` based)
 
-## Quick start
+## Prerequisites
 
-`apps/server` auto-loads a local `.env` file via `godotenv`, so you can set env vars there.
+- Bun `1.3.x`
+- Go `1.25.x`
+- Docker (for runtime features and self-hosting)
+
+## Local development
+
+The server auto-loads `apps/server/.env` via `godotenv` if present.
 
 ```bash
 bun install
 bun run dev
 ```
 
-On first launch, create the initial admin account from the UI login screen.
-
-Default URLs:
+Default dev URLs:
 - API: `http://localhost:8080`
 - UI: `http://localhost:5173`
 
-Run individual apps when needed:
+Run each app separately when needed:
 
 ```bash
 bun run dev:server
 bun run dev:client
 ```
 
-`bun run dev:server` uses `air` for Go hot reload, with a local fallback `SANDBOX_JWT_SECRET` for development.
+Notes:
+- `bun run dev:server` uses `go tool air -c .air.toml` and falls back to `SANDBOX_JWT_SECRET=dev-jwt-signing-secret` for local development.
+- If `SANDBOX_DB_PATH` is not set, SQLite defaults to `apps/server/open-sandbox.db` (including when `air` runs binaries from `apps/server/tmp`).
 
-Unless `SANDBOX_DB_PATH` is set, the server keeps its default SQLite file at `apps/server/open-sandbox.db`, even when the dev watcher starts the process from a nested temp directory.
+On first launch, create the initial admin account from the login screen.
 
-## Run server tests
+## Common commands
 
 ```bash
 bun run test:server
-```
-
-## Run client checks
-
-```bash
 bun run check:client
+bun run build:client
 ```
 
-## Helpful Make targets
+Equivalent Make targets:
 
 ```bash
 make test-server
@@ -53,18 +58,9 @@ make check-client
 make build-client
 ```
 
-The Make targets are thin wrappers around the root Bun/Turbo scripts, so `bun run ...` and `make ...` are interchangeable for the common workflows above.
-
-More API usage docs are in `apps/server/README.md`.
-
 ## Self-host with Docker Compose
 
-The repo now includes a top-level `compose.yaml` for a single-server deployment.
-
-Prerequisites:
-- Docker with the Compose plugin
-
-Setup:
+Use `compose.yaml` to build and run the stack on one host.
 
 ```bash
 cp .env.example .env
@@ -74,48 +70,62 @@ docker compose up -d
 ```
 
 Default URL:
-- UI, API proxy, and Swagger: `http://localhost:3000`
+- UI + API proxy + Swagger: `http://localhost:3000`
 
-The stack runs three containers:
-- `client`: Nginx serving the built dashboard and proxying backend routes
+The stack runs two containers:
 - `server`: Go API service
+- `client`: Nginx serving the dashboard and proxying backend routes
 
-The API uses the host Docker daemon through `/var/run/docker.sock`.
+The API talks to the host Docker daemon through `/var/run/docker.sock`.
 
-### Compose env vars
+### Compose environment variables
 
-Top-level `.env` values used by `compose.yaml`:
-- `SANDBOX_JWT_SECRET`: required; set this to a strong secret before production use
-- `OPEN_SANDBOX_DATA_DIR`: required absolute host path for persistent state, default example `/var/lib/open-sandbox`
-- `OPEN_SANDBOX_HTTP_PORT`: optional public port for the UI/proxy container, default `3000`
-- `SANDBOX_RUNTIME_MEMORY_LIMIT`: optional default memory limit for created sandboxes/direct containers, default `4g`
-- `SANDBOX_RUNTIME_CPU_LIMIT`: optional default CPU limit for created sandboxes/direct containers, default `2`
-- `SANDBOX_RUNTIME_PIDS_LIMIT`: optional default PID limit for created sandboxes/direct containers, default `512`
+Top-level values (from `.env`):
+- `SANDBOX_JWT_SECRET` (required): set a strong secret for production
+- `OPEN_SANDBOX_DATA_DIR` (required): absolute host path for persistent state (example: `/var/lib/open-sandbox`)
+- `OPEN_SANDBOX_HTTP_PORT` (optional, default `3000`)
+- `SANDBOX_RUNTIME_MEMORY_LIMIT` (optional, default `4g`)
+- `SANDBOX_RUNTIME_CPU_LIMIT` (optional, default `2`)
+- `SANDBOX_RUNTIME_PIDS_LIMIT` (optional, default `512`)
+- `SANDBOX_MAINTENANCE_ARTIFACT_MAX_AGE` (optional, default `168h`)
+- `SANDBOX_MAINTENANCE_MISSING_SANDBOX_MAX_AGE` (optional, default `24h`)
 
-Backend env vars inside the stack:
+Backend values inside the server container:
 - `SANDBOX_DB_PATH=/data/open-sandbox.db`
 - `SANDBOX_WORKSPACE_DIR=${OPEN_SANDBOX_DATA_DIR}/workspace`
 
-`OPEN_SANDBOX_DATA_DIR` should be an absolute host path. The workspace directory is mounted into the server container at the same absolute path so `docker compose` and other Docker path-based operations keep resolving correctly through the host daemon.
+`OPEN_SANDBOX_DATA_DIR` must be an absolute host path. The workspace directory is bind-mounted at the same absolute path inside the server container so Docker path-based operations resolve correctly via the host daemon.
 
 ## GHCR images
 
-GitHub Actions publishes public images to GHCR:
+Published images:
 - `ghcr.io/shaik-zeeshan/open-sandbox-client`
 - `ghcr.io/shaik-zeeshan/open-sandbox-server`
 
-Published tags include:
-- `latest` from `main`
+Common tags:
+- `latest` (from `main`)
 - `sha-<commit>`
 - branch names
-- `pr-<number>` for same-repository pull requests while PR publishing is enabled
+- `pr-<number>` (same-repo pull requests)
 - `v*` git tags
 
-The repo also includes `compose.ghcr.yaml` for image-based deploys that pull from GHCR instead of building locally.
+Use `compose.ghcr.yaml` when you want to pull images instead of building locally.
 
 ## Install from GHCR
 
-Use the installer to pull the published images and start the stack:
+Quick install (download and run in one command):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shaik-zeeshan/open-sandbox/main/install.sh | bash
+```
+
+Or download first and inspect the script:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shaik-zeeshan/open-sandbox/main/install.sh -o install.sh
+chmod +x install.sh
+./install.sh
+```
 
 ```bash
 ./install.sh
@@ -127,42 +137,38 @@ Optional tag override:
 IMAGE_TAG=v1.2.3 ./install.sh
 ```
 
-What `install.sh` does:
-- works as a standalone script and does not require the repo checkout after you have the script file
-- creates or updates `/var/lib/open-sandbox/config/open-sandbox.env`
-- generates `SANDBOX_JWT_SECRET` with `openssl` if needed
-- sets `OPEN_SANDBOX_DATA_DIR=/var/lib/open-sandbox`
-- creates `/var/lib/open-sandbox/db` and `/var/lib/open-sandbox/workspace`
-- sets directory permissions for the persistent data folders
-- pulls the GHCR images and starts the containers with `docker run`
+`install.sh`:
+- can run as a standalone script
+- creates/updates `/var/lib/open-sandbox/config/open-sandbox.env`
+- generates `SANDBOX_JWT_SECRET` with `openssl` if missing
+- prepares `/var/lib/open-sandbox/db` and `/var/lib/open-sandbox/workspace`
+- sets required directory permissions
+- pulls GHCR images and starts containers with `docker run`
 
-Because the install path uses `/var/lib/open-sandbox`, the script may prompt for `sudo`.
+Because it writes under `/var/lib/open-sandbox`, it may prompt for `sudo`.
 
-### Persistent data
+## Data and upgrades
 
-The compose stack keeps data under `${OPEN_SANDBOX_DATA_DIR}`:
-- `${OPEN_SANDBOX_DATA_DIR}/db`: SQLite users, refresh tokens, and sandbox metadata
-- `${OPEN_SANDBOX_DATA_DIR}/workspace`: managed compose projects and other workspace state
+Persistent data under `${OPEN_SANDBOX_DATA_DIR}`:
+- `${OPEN_SANDBOX_DATA_DIR}/db`: SQLite users, refresh tokens, sandbox metadata
+- `${OPEN_SANDBOX_DATA_DIR}/workspace`: managed compose projects and workspace state
 
-Sandbox containers, images, and named Docker volumes are stored in the host Docker engine because the stack uses the host socket.
+After first start:
+- open `http://localhost:${OPEN_SANDBOX_HTTP_PORT:-3000}`
+- create the initial admin account from the login screen
+- health endpoint: `/health`
+- Swagger: `/swagger/index.html`
 
-### Startup notes
-
-After the first start:
-- Open `http://localhost:${OPEN_SANDBOX_HTTP_PORT:-3000}`
-- Create the initial admin account from the login screen
-- API health is available through the same origin at `/health`
-- Swagger is available through the same origin at `/swagger/index.html`
-
-### Upgrade basics
-
-Container upgrades keep the named volumes by default.
+Upgrade commands:
 
 ```bash
 docker compose build
 docker compose up -d
 ```
 
-For image-based deploys, replace the build step with `docker compose pull`.
+For image-based deploys, use `docker compose pull` before `docker compose up -d`.
 
-If you need a backup before upgrading, back up `${OPEN_SANDBOX_DATA_DIR}` and any host Docker volumes or images you want to preserve.
+## App-level docs
+
+- API/service details: `apps/server/README.md`
+- Dashboard details: `apps/client/README.md`
