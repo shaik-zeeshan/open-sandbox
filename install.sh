@@ -20,6 +20,9 @@ SERVER_CONTAINER_NAME="open-sandbox-server"
 CLIENT_CONTAINER_NAME="open-sandbox-client"
 TRAEFIK_CONTAINER_NAME="open-sandbox-traefik"
 TRAEFIK_DYNAMIC_VOLUME="open-sandbox-traefik-dynamic"
+SERVER_HEALTH_WAIT_SECONDS="${SERVER_HEALTH_WAIT_SECONDS:-180}"
+STACK_HEALTH_WAIT_SECONDS="${STACK_HEALTH_WAIT_SECONDS:-180}"
+HEALTH_WAIT_POLL_SECONDS="${HEALTH_WAIT_POLL_SECONDS:-2}"
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -77,8 +80,13 @@ ensure_volume() {
 
 wait_for_server_health() {
   local status
+  local attempts=$((SERVER_HEALTH_WAIT_SECONDS / HEALTH_WAIT_POLL_SECONDS))
 
-  for ((i = 0; i < 30; i += 1)); do
+  if ((attempts < 1)); then
+    attempts=1
+  fi
+
+  for ((i = 0; i < attempts; i += 1)); do
     status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}starting{{end}}' "$SERVER_CONTAINER_NAME")
     if [[ "$status" == "healthy" ]]; then
       return
@@ -87,10 +95,10 @@ wait_for_server_health() {
       break
     fi
 
-    sleep 2
+    sleep "$HEALTH_WAIT_POLL_SECONDS"
   done
 
-  printf 'The server container did not become healthy in time.\n' >&2
+  printf 'The server container did not become healthy within %ss.\n' "$SERVER_HEALTH_WAIT_SECONDS" >&2
   docker logs "$SERVER_CONTAINER_NAME" >&2 || true
   exit 1
 }
@@ -155,6 +163,7 @@ docker run -d \
   --health-interval 10s \
   --health-timeout 5s \
   --health-retries 12 \
+  --health-start-period 30s \
   -e PORT=8080 \
   -e SANDBOX_DB_PATH=/data/open-sandbox.db \
   -e SANDBOX_JWT_SECRET="$JWT_SECRET" \
@@ -193,12 +202,18 @@ docker run -d \
   -p "$OPEN_SANDBOX_HTTP_PORT:80" \
   -v "$TRAEFIK_DYNAMIC_VOLUME:/etc/traefik/dynamic:ro" \
   "$TRAEFIK_IMAGE" \
+  --log.level=INFO \
+  --accesslog=true \
   --entrypoints.web.address=:80 \
   --entrypoints.web.forwardedHeaders.insecure=false \
   --providers.file.directory=/etc/traefik/dynamic \
   --providers.file.watch=true >/dev/null
 
-for ((i = 0; i < 30; i += 1)); do
+stack_attempts=$((STACK_HEALTH_WAIT_SECONDS / HEALTH_WAIT_POLL_SECONDS))
+if ((stack_attempts < 1)); then
+  stack_attempts=1
+fi
+for ((i = 0; i < stack_attempts; i += 1)); do
   if curl -fsS "http://127.0.0.1:${OPEN_SANDBOX_HTTP_PORT}/health" >/dev/null 2>&1; then
     printf 'open-sandbox is ready at http://localhost:%s\n' "$OPEN_SANDBOX_HTTP_PORT"
     printf 'Config: %s\n' "$CONFIG_DIR"
@@ -206,9 +221,9 @@ for ((i = 0; i < 30; i += 1)); do
     exit 0
   fi
 
-  sleep 2
+  sleep "$HEALTH_WAIT_POLL_SECONDS"
 done
 
-printf 'The stack started but the health check did not pass in time.\n' >&2
+printf 'The stack started but the health check did not pass within %ss.\n' "$STACK_HEALTH_WAIT_SECONDS" >&2
 printf 'Inspect it with: docker ps --filter name=%s --filter name=%s --filter name=%s\n' "$SERVER_CONTAINER_NAME" "$CLIENT_CONTAINER_NAME" "$TRAEFIK_CONTAINER_NAME" >&2
 exit 1

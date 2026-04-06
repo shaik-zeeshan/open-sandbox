@@ -15,7 +15,7 @@ VITE_SANDBOX_BASE_URL=http://localhost:8080
 VITE_ALLOWED_HOSTS=app.lvh.me,.lvh.me,my.custom.host
 ```
 
-`VITE_ALLOWED_HOSTS` is a comma-separated list of additional hostnames that the Vite dev server should accept.
+By default the Vite dev server accepts requests from any hostname. Set `VITE_ALLOWED_HOSTS` (comma-separated) only when you want to restrict allowed hostnames.
 
 ## Production build
 

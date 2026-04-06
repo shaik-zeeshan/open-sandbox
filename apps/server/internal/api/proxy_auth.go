@@ -128,15 +128,21 @@ func (s *Server) previewLaunch(c *gin.Context) {
 		return
 	}
 
-	callbackHost := s.previewCallbackHost(previewHost)
+	requestHost := forwardedRequestHost(c.Request)
+	callbackHost := s.previewCallbackHost(previewHost, requestHost)
 	grantToken, err := s.issuePreviewToken(previewTokenTypeGrant, identity, target, callbackHost)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 
+	scheme := strings.TrimSpace(forwardedRequestProto(c.Request))
+	if scheme == "" {
+		scheme = s.previewRouting.PublicBaseScheme
+	}
+
 	callbackURL := url.URL{
-		Scheme: s.previewRouting.PublicBaseScheme,
+		Scheme: scheme,
 		Host:   callbackHost,
 		Path:   s.previewRouting.CallbackPath,
 	}
@@ -148,12 +154,19 @@ func (s *Server) previewLaunch(c *gin.Context) {
 	c.Redirect(http.StatusFound, callbackURL.String())
 }
 
-func (s *Server) previewCallbackHost(previewHost string) string {
+func (s *Server) previewCallbackHost(previewHost string, requestHost string) string {
 	host := strings.TrimSpace(previewHost)
 	if host == "" {
 		return ""
 	}
-	port := strings.TrimSpace(s.previewRouting.PublicBaseURLPort)
+	port := ""
+	trimmedRequestHost := strings.TrimSpace(requestHost)
+	if _, parsedPort, err := net.SplitHostPort(trimmedRequestHost); err == nil {
+		port = strings.TrimSpace(parsedPort)
+	}
+	if port == "" && trimmedRequestHost == "" {
+		port = strings.TrimSpace(s.previewRouting.PublicBaseURLPort)
+	}
 	if port == "" {
 		return host
 	}

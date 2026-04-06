@@ -9,9 +9,10 @@ export default defineConfig(({ mode }) => {
 		.map((host) => host.trim())
 		.filter(Boolean);
 
-	const allowedHosts = Array.from(
-		new Set(['app.lvh.me', '.lvh.me', 'localhost', '127.0.0.1', '::1', ...userAllowedHosts])
-	);
+	const allowedHosts =
+		userAllowedHosts.length === 0
+			? true
+			: Array.from(new Set(['localhost', '127.0.0.1', '::1', ...userAllowedHosts]));
 
 	return {
 		plugins: [tailwindcss(), sveltekit()],

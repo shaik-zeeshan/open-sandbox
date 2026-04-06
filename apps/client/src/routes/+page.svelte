@@ -571,7 +571,7 @@
 							bind:value={endpointValue}
 							autocapitalize="none"
 							spellcheck="false"
-							placeholder="http://app.lvh.me:8080"
+							placeholder="http://localhost:8080"
 							onkeydown={(event) => {
 								if (event.key === "Enter") {
 									event.preventDefault();

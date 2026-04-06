@@ -115,7 +115,7 @@
 									class:endpoint-field--valid={endpointValid && endpointDirty}
 									bind:value={endpointValue}
 									spellcheck={false}
-								placeholder="http://app.lvh.me:8080"
+								placeholder="http://localhost:8080"
 									onkeydown={(e) => { if (e.key === "Enter") applyEndpoint(); }}
 								/>
 								<div class="endpoint-status">

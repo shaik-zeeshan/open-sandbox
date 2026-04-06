@@ -11,6 +11,8 @@ services:
     cpus: 0.25
     pids_limit: 128
     command:
+      - --log.level=INFO
+      - --accesslog=true
       - --entrypoints.web.address=:80
       - --entrypoints.web.forwardedHeaders.insecure=false
       - --providers.file.directory=/etc/traefik/dynamic
