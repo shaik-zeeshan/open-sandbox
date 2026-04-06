@@ -1906,7 +1906,9 @@ func TestSandboxTerminalWebSocket(t *testing.T) {
 	resizeCalls := make([]container.ResizeOptions, 0, 1)
 	resizeReceived := make(chan container.ResizeOptions, 1)
 	receivedInput := make(chan string, 1)
+	keepSessionOpen := make(chan struct{})
 	go func() {
+		defer close(receivedInput)
 		_, _ = peerConn.Write([]byte("terminal ready\r\n"))
 		buffer := make([]byte, 64)
 		_ = peerConn.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -1914,8 +1916,10 @@ func TestSandboxTerminalWebSocket(t *testing.T) {
 		if err == nil && count > 0 {
 			receivedInput <- string(buffer[:count])
 		}
+		<-keepSessionOpen
 		_ = peerConn.Close()
 	}()
+	defer close(keepSessionOpen)
 
 	m := &mockDocker{
 		containerExecCreateFn: func(_ context.Context, containerID string, options container.ExecOptions) (container.ExecCreateResponse, error) {
