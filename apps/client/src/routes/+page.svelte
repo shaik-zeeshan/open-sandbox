@@ -4,10 +4,12 @@
 	import SandboxesPanel from "$lib/components/SandboxesPanel.svelte";
 	import SandboxWorkspace from "$lib/components/SandboxWorkspace.svelte";
 	import {
+		getCachedComposeProjects,
 		getCachedContainers,
 		getCachedImages,
 		getCachedSandboxes,
 		invalidateWorkloadCaches,
+		refreshCachedComposeProjects,
 		refreshCachedContainers,
 		refreshCachedImages,
 		refreshCachedSandboxes
@@ -29,6 +31,7 @@
 		stopContainer,
 		stopSandbox,
 		type ApiFailure,
+		type ComposeProjectPreview,
 		type ContainerSummary,
 		type ImageSummary,
 		type Sandbox
@@ -54,6 +57,7 @@
 	// ── Data ───────────────────────────────────────────────────────────────────
 	let sandboxes = $state<Sandbox[]>([]);
 	let containers = $state<ContainerSummary[]>([]);
+	let composeProjects = $state<ComposeProjectPreview[]>([]);
 	let images = $state<ImageSummary[]>([]);
 	let dataLoading = $state(false);
 	type RefreshOptions = {
@@ -279,13 +283,18 @@
 			const imagesEffect = options.force
 				? refreshCachedImages(clientState.config)
 				: getCachedImages(clientState.config);
-			const [sb, ct, img] = yield* Effect.all([
+			const composeProjectsEffect = options.force
+				? refreshCachedComposeProjects(clientState.config)
+				: getCachedComposeProjects(clientState.config);
+			const [sb, ct, cp, img] = yield* Effect.all([
 				sandboxesEffect,
 				containersEffect,
+				composeProjectsEffect,
 				options.includeImages ? imagesEffect : Effect.succeed(images)
 			]);
 			sandboxes = sb;
 			containers = ct;
+			composeProjects = cp;
 			images = img;
 			const currentActive = activeWorkload;
 			if (currentActive?.kind === "sandbox" && !sb.some((s) => s.id === currentActive.id)) {
@@ -650,6 +659,7 @@
 			<SandboxesPanel
 				{sandboxes}
 				{containers}
+				{composeProjects}
 				{images}
 				loading={dataLoading}
 				onOpen={(id) => openSandbox(id)}

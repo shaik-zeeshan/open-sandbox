@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -181,11 +182,31 @@ func workloadConfig(workloadType string, workloadID string, ports []WorkloadPort
 	buf.WriteString("  routers:\n")
 	for _, port := range normalizedPorts {
 		routerName := fmt.Sprintf("preview-%s-%s-%d-router", workloadType, safeID, port.Private)
+		exactRouterName := fmt.Sprintf("preview-%s-%s-%d-exact-router", workloadType, safeID, port.Private)
 		serviceName := fmt.Sprintf("preview-%s-%s-%d-service", workloadType, safeID, port.Private)
 		stripName := fmt.Sprintf("preview-%s-%s-%d-strip", workloadType, safeID, port.Private)
 
 		prefix := "/proxy/" + workloadType + "/" + escapedID + "/" + strconv.Itoa(port.Private)
+		exactPathRule := "^" + regexp.QuoteMeta(prefix) + "$"
 		pathRule := prefix + "/"
+		buf.WriteString("    ")
+		buf.WriteString(exactRouterName)
+		buf.WriteString(":\n")
+		buf.WriteString("      entryPoints:\n")
+		buf.WriteString("        - web\n")
+		buf.WriteString("      rule: \"PathRegexp(`")
+		buf.WriteString(exactPathRule)
+		buf.WriteString("`)\"\n")
+		buf.WriteString("      service: ")
+		buf.WriteString(serviceName)
+		buf.WriteString("\n")
+		buf.WriteString("      middlewares:\n")
+		buf.WriteString("        - preview-forward-auth-placeholder\n")
+		buf.WriteString("        - ")
+		buf.WriteString(stripName)
+		buf.WriteString("\n")
+		buf.WriteString("        - preview-header-placeholder\n")
+		buf.WriteString("      priority: 210\n")
 
 		buf.WriteString("    ")
 		buf.WriteString(routerName)
@@ -199,11 +220,11 @@ func workloadConfig(workloadType string, workloadID string, ports []WorkloadPort
 		buf.WriteString(serviceName)
 		buf.WriteString("\n")
 		buf.WriteString("      middlewares:\n")
+		buf.WriteString("        - preview-forward-auth-placeholder\n")
 		buf.WriteString("        - ")
 		buf.WriteString(stripName)
 		buf.WriteString("\n")
 		buf.WriteString("        - preview-header-placeholder\n")
-		buf.WriteString("        - preview-forward-auth-placeholder\n")
 		buf.WriteString("      priority: 200\n")
 	}
 
@@ -262,11 +283,32 @@ func composeConfig(projectName string, ports []ComposeServicePort) []byte {
 		escapedService := url.PathEscape(item.Service)
 		safeService := sanitizeResourceToken(item.Service)
 		routerName := fmt.Sprintf("preview-compose-%s-%s-%d-router", safeProject, safeService, item.Private)
+		exactRouterName := fmt.Sprintf("preview-compose-%s-%s-%d-exact-router", safeProject, safeService, item.Private)
 		serviceName := fmt.Sprintf("preview-compose-%s-%s-%d-service", safeProject, safeService, item.Private)
 		stripName := fmt.Sprintf("preview-compose-%s-%s-%d-strip", safeProject, safeService, item.Private)
 
 		prefix := "/proxy/compose/" + escapedProject + "/" + escapedService + "/" + strconv.Itoa(item.Private)
+		exactPathRule := "^" + regexp.QuoteMeta(prefix) + "$"
 		pathRule := prefix + "/"
+
+		buf.WriteString("    ")
+		buf.WriteString(exactRouterName)
+		buf.WriteString(":\n")
+		buf.WriteString("      entryPoints:\n")
+		buf.WriteString("        - web\n")
+		buf.WriteString("      rule: \"PathRegexp(`")
+		buf.WriteString(exactPathRule)
+		buf.WriteString("`)\"\n")
+		buf.WriteString("      service: ")
+		buf.WriteString(serviceName)
+		buf.WriteString("\n")
+		buf.WriteString("      middlewares:\n")
+		buf.WriteString("        - preview-forward-auth-placeholder\n")
+		buf.WriteString("        - ")
+		buf.WriteString(stripName)
+		buf.WriteString("\n")
+		buf.WriteString("        - preview-header-placeholder\n")
+		buf.WriteString("      priority: 210\n")
 
 		buf.WriteString("    ")
 		buf.WriteString(routerName)
@@ -280,11 +322,11 @@ func composeConfig(projectName string, ports []ComposeServicePort) []byte {
 		buf.WriteString(serviceName)
 		buf.WriteString("\n")
 		buf.WriteString("      middlewares:\n")
+		buf.WriteString("        - preview-forward-auth-placeholder\n")
 		buf.WriteString("        - ")
 		buf.WriteString(stripName)
 		buf.WriteString("\n")
 		buf.WriteString("        - preview-header-placeholder\n")
-		buf.WriteString("        - preview-forward-auth-placeholder\n")
 		buf.WriteString("      priority: 200\n")
 	}
 

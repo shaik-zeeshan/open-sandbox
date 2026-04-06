@@ -420,6 +420,7 @@ func (s *Server) registerRoutes() {
 		api.GET("/admin/workers", s.listWorkers)
 		api.GET("/admin/traefik/routes", s.getTraefikRouteState)
 		api.POST("/admin/maintenance/cleanup", s.runMaintenanceCleanup)
+		api.POST("/admin/maintenance/reconcile", s.runMaintenanceReconcile)
 	}
 
 	secured.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
@@ -784,7 +785,8 @@ func (s *Server) composeDown(c *gin.Context) {
 	}
 
 	existingProject := s.composeProjectContextForName(composeProjectName(req.ProjectName, req.Content))
-	if _, err := s.authorizeComposeProjectAccess(identity, existingProject); err != nil {
+	shouldWriteOwner, err := s.authorizeComposeProjectAccess(identity, existingProject)
+	if err != nil {
 		writeError(c, http.StatusNotFound, err)
 		return
 	}
@@ -793,6 +795,12 @@ func (s *Server) composeDown(c *gin.Context) {
 	if err != nil {
 		writeError(c, http.StatusBadRequest, err)
 		return
+	}
+	if shouldWriteOwner {
+		if err := s.writeComposeProjectOwnerMetadata(project.ProjectDir, identity); err != nil {
+			writeError(c, http.StatusInternalServerError, err)
+			return
+		}
 	}
 
 	args := buildComposeArgs(project, req, "down")
@@ -831,7 +839,8 @@ func (s *Server) composeStatus(c *gin.Context) {
 	}
 
 	existingProject := s.composeProjectContextForName(composeProjectName(req.ProjectName, req.Content))
-	if _, err := s.authorizeComposeProjectAccess(identity, existingProject); err != nil {
+	shouldWriteOwner, err := s.authorizeComposeProjectAccess(identity, existingProject)
+	if err != nil {
 		writeError(c, http.StatusNotFound, err)
 		return
 	}
@@ -840,6 +849,12 @@ func (s *Server) composeStatus(c *gin.Context) {
 	if err != nil {
 		writeError(c, http.StatusBadRequest, err)
 		return
+	}
+	if shouldWriteOwner {
+		if err := s.writeComposeProjectOwnerMetadata(project.ProjectDir, identity); err != nil {
+			writeError(c, http.StatusInternalServerError, err)
+			return
+		}
 	}
 
 	args := buildComposeArgs(project, req, "ps", "--format", "json")
@@ -859,12 +874,7 @@ func (s *Server) listComposeProjects(c *gin.Context) {
 		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
 		return
 	}
-
-	ownedProjects, err := s.ownedComposeProjects(identity.UserID)
-	if err != nil {
-		writeError(c, http.StatusInternalServerError, err)
-		return
-	}
+	s.syncTraefikRoutes(c.Request.Context())
 
 	containers, err := s.visibleManagedContainers(c.Request.Context(), identity)
 	if err != nil {
@@ -872,8 +882,20 @@ func (s *Server) listComposeProjects(c *gin.Context) {
 		return
 	}
 
-	projects := make([]ComposeProjectPreviewResponse, 0, len(ownedProjects))
-	for projectName := range ownedProjects {
+	projectNames := make(map[string]struct{})
+	for _, item := range containers {
+		projectName := strings.TrimSpace(item.ProjectName)
+		if projectName == "" {
+			projectName = strings.TrimSpace(item.Labels["com.docker.compose.project"])
+		}
+		if projectName == "" {
+			continue
+		}
+		projectNames[projectName] = struct{}{}
+	}
+
+	projects := make([]ComposeProjectPreviewResponse, 0, len(projectNames))
+	for projectName := range projectNames {
 		projects = append(projects, buildComposeProjectPreview(projectName, containers))
 	}
 	sort.Slice(projects, func(i, j int) bool {
@@ -889,6 +911,7 @@ func (s *Server) getComposeProject(c *gin.Context) {
 		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
 		return
 	}
+	s.syncTraefikRoutes(c.Request.Context())
 
 	projectName := sanitizeComposeProjectName(strings.TrimSpace(c.Param("projectName")))
 	if projectName == "" {
@@ -911,8 +934,13 @@ func (s *Server) getComposeProject(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
+	preview := buildComposeProjectPreview(project.ProjectName, containers)
+	if len(preview.Services) == 0 {
+		writeError(c, http.StatusNotFound, errors.New("compose project not found"))
+		return
+	}
 
-	c.JSON(http.StatusOK, buildComposeProjectPreview(project.ProjectName, containers))
+	c.JSON(http.StatusOK, preview)
 }
 
 func (s *Server) visibleManagedContainers(ctx context.Context, identity AuthIdentity) ([]ContainerSummary, error) {
@@ -948,10 +976,17 @@ func (s *Server) visibleManagedContainers(ctx context.Context, identity AuthIden
 func buildComposeProjectPreview(projectName string, containers []ContainerSummary) ComposeProjectPreviewResponse {
 	servicesByName := map[string]*ComposeServicePreviewResponse{}
 	for _, item := range containers {
-		if strings.TrimSpace(item.ProjectName) != projectName {
+		itemProjectName := strings.TrimSpace(item.ProjectName)
+		if itemProjectName == "" {
+			itemProjectName = strings.TrimSpace(item.Labels["com.docker.compose.project"])
+		}
+		if itemProjectName != projectName {
 			continue
 		}
 		serviceName := strings.TrimSpace(item.ServiceName)
+		if serviceName == "" {
+			serviceName = strings.TrimSpace(item.Labels["com.docker.compose.service"])
+		}
 		if serviceName == "" {
 			continue
 		}
@@ -1129,6 +1164,15 @@ func isMissingImageError(err error) bool {
 
 	errText := strings.ToLower(err.Error())
 	return strings.Contains(errText, "no such image") || strings.Contains(errText, "not found")
+}
+
+func isMissingWorkloadError(err error) bool {
+	if errdefs.IsNotFound(err) {
+		return true
+	}
+
+	errText := strings.ToLower(err.Error())
+	return strings.Contains(errText, "no such container") || strings.Contains(errText, "container not found")
 }
 
 // execInContainer godoc
@@ -1594,7 +1638,7 @@ func (s *Server) authorizeComposeProjectAccess(identity AuthIdentity, project co
 	}
 	if _, err := os.Stat(project.ComposeFile); err == nil {
 		if identity.IsAdmin() {
-			return false, nil
+			return true, nil
 		}
 		return false, errors.New("compose project not found")
 	} else if !errors.Is(err, os.ErrNotExist) {

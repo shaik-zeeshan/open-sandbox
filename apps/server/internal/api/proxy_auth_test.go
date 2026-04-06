@@ -210,3 +210,63 @@ func TestProxyAuthorizeAllowsComposePublishedPort(t *testing.T) {
 		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
 	}
 }
+
+func TestProxyAuthorizeAllowsOwnedDirectContainerPublishedPort(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return `{"ID":"direct-web","Image":"nginx:latest","Names":"direct-web","Ports":"0.0.0.0:58080->80/tcp,3000/tcp","Status":"Up 1 minute","Labels":"open-sandbox.kind=direct,open-sandbox.managed_id=ctr-123,open-sandbox.owner_id=member-1"}` + "\n", "", nil
+	}
+
+	s := newTestServer(&mockDocker{})
+	req := httptest.NewRequest(http.MethodGet, "/auth/proxy/authorize", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	req.Header.Set("X-Forwarded-Uri", "/proxy/containers/ctr-123/80/")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+}
+
+func TestProxyAuthorizeRejectsUnpublishedDirectContainerPort(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return `{"ID":"direct-web","Image":"nginx:latest","Names":"direct-web","Ports":"0.0.0.0:58080->80/tcp,3000/tcp","Status":"Up 1 minute","Labels":"open-sandbox.kind=direct,open-sandbox.managed_id=ctr-123,open-sandbox.owner_id=member-1"}` + "\n", "", nil
+	}
+
+	s := newTestServer(&mockDocker{})
+	req := httptest.NewRequest(http.MethodGet, "/auth/proxy/authorize", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	req.Header.Set("X-Forwarded-Uri", "/proxy/containers/ctr-123/3000/")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unpublished direct port, got %d", w.Code)
+	}
+}
+
+func TestProxyAuthorizeRejectsForeignDirectContainerAccess(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return `{"ID":"direct-web","Image":"nginx:latest","Names":"direct-web","Ports":"0.0.0.0:58080->80/tcp","Status":"Up 1 minute","Labels":"open-sandbox.kind=direct,open-sandbox.managed_id=ctr-123,open-sandbox.owner_id=member-1"}` + "\n", "", nil
+	}
+
+	s := newTestServer(&mockDocker{})
+	req := httptest.NewRequest(http.MethodGet, "/auth/proxy/authorize", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-2", Username: "bob", Role: roleMember}))
+	req.Header.Set("X-Forwarded-Uri", "/proxy/containers/ctr-123/80/")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for foreign direct container, got %d", w.Code)
+	}
+}

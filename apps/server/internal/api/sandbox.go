@@ -129,11 +129,17 @@ func (s *Server) listContainers(c *gin.Context) {
 		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
 		return
 	}
+	s.syncTraefikRoutes(c.Request.Context())
 
 	containers, err := s.runtime.ListWorkloads(c.Request.Context())
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
+	}
+	if len(containers) > 0 {
+		s.reconcileContainerArtifacts(containerIndexByContainerID(containers))
+	} else {
+		s.reconcileContainerArtifacts(map[string]ContainerSummary{})
 	}
 	managedComposeProjects, err := s.managedComposeProjects()
 	if err != nil {
@@ -549,23 +555,46 @@ func (s *Server) listSandboxes(c *gin.Context) {
 		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
 		return
 	}
+	s.syncTraefikRoutes(c.Request.Context())
 
-	stateByContainer, statusByContainer, portsByContainer := s.liveContainerState(c.Request.Context())
-	out := make([]SandboxResponse, 0, len(sandboxes))
+	runtimeByContainer, err := s.runtimeContainersByID(c.Request.Context())
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+
+	reconciledSandboxes := make([]store.Sandbox, 0, len(sandboxes))
 	for _, sandbox := range sandboxes {
+		if _, ok := runtimeByContainer[sandbox.ContainerID]; ok {
+			reconciledSandboxes = append(reconciledSandboxes, sandbox)
+			continue
+		}
+		if sandbox.OwnerID != identity.UserID {
+			continue
+		}
+		if err := s.sandboxStore.DeleteSandbox(c.Request.Context(), sandbox.ID); err != nil {
+			s.logLifecycleFailure("reconcile_missing_sandbox", err, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
+			reconciledSandboxes = append(reconciledSandboxes, sandbox)
+			continue
+		}
+		s.logLifecycleSuccess("reconcile_missing_sandbox", slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
+	}
+
+	out := make([]SandboxResponse, 0, len(sandboxes))
+	for _, sandbox := range reconciledSandboxes {
 		if sandbox.OwnerID != identity.UserID {
 			continue
 		}
 		response := sandboxToResponse(sandbox)
-		if liveState, ok := stateByContainer[sandbox.ContainerID]; ok {
-			response.Status = liveState
-			if liveStatus, statusOK := statusByContainer[sandbox.ContainerID]; statusOK && strings.TrimSpace(liveStatus) != "" {
+		if runtime, ok := runtimeByContainer[sandbox.ContainerID]; ok {
+			if liveState := strings.TrimSpace(runtime.State); liveState != "" {
+				response.Status = liveState
+			}
+			if liveStatus := strings.TrimSpace(runtime.Status); liveStatus != "" {
 				response.Status = liveStatus
 			}
-		}
-		if ports, ok := portsByContainer[sandbox.ContainerID]; ok {
-			response.Ports = ports
-			response.PreviewURLs = previewURLsForSandbox(sandbox.ID, ports)
+			response.Ports = runtime.Ports
+			response.PreviewURLs = previewURLsForSandbox(sandbox.ID, runtime.Ports)
 		}
 		out = append(out, response)
 	}
@@ -733,9 +762,11 @@ func (s *Server) deleteSandbox(c *gin.Context) {
 	workerID := s.workerIDForSandbox(sandbox)
 	_ = s.runtime.StopWorkload(c.Request.Context(), workerID, sandbox.ContainerID, container.StopOptions{})
 	if err := s.runtime.RemoveWorkload(c.Request.Context(), workerID, sandbox.ContainerID, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil {
-		s.logLifecycleFailure("delete_sandbox", err, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
-		writeError(c, http.StatusInternalServerError, err)
-		return
+		if !isMissingWorkloadError(err) {
+			s.logLifecycleFailure("delete_sandbox", err, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
+			writeError(c, http.StatusInternalServerError, err)
+			return
+		}
 	}
 
 	if err := s.sandboxStore.DeleteSandbox(c.Request.Context(), sandbox.ID); err != nil {
@@ -1223,6 +1254,19 @@ func (s *Server) runtimeContainersByID(ctx context.Context) (map[string]Containe
 		byID[item.ContainerID] = item
 	}
 	return byID, nil
+}
+
+func containerIndexByContainerID(containers []ContainerSummary) map[string]ContainerSummary {
+	byID := make(map[string]ContainerSummary, len(containers))
+	for _, item := range containers {
+		byID[item.ContainerID] = item
+	}
+	return byID
+}
+
+func (s *Server) reconcileContainerArtifacts(runtimeContainers map[string]ContainerSummary) {
+	cutoff := time.Now().Add(time.Second)
+	_, _ = s.cleanupDirectContainerSpecs(runtimeContainers, cutoff, false)
 }
 
 func (s *Server) resolveSandboxWorkdir(ctx context.Context, imageRef string, requestedWorkdir string) (string, error) {

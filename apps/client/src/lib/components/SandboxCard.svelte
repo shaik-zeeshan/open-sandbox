@@ -12,6 +12,7 @@
 		metaValue = "",
 		isSelected,
 		showReset = true,
+		showActions = true,
 		deleteLabel = "Delete",
 		deleteTitle = "Delete workload",
 		animDelay = 0,
@@ -31,6 +32,7 @@
 		metaValue?: string;
 		isSelected: boolean;
 		showReset?: boolean;
+		showActions?: boolean;
 		deleteLabel?: string;
 		deleteTitle?: string;
 		animDelay?: number;
@@ -213,6 +215,7 @@
 
 	<!-- Actions -->
 	<td class="cell cell-actions">
+		{#if showActions}
 		<div class="actions">
 
 			<!-- Stop (when running) / Start (when stopped/idle) -->
@@ -249,6 +252,9 @@
 			</button>
 
 		</div>
+		{:else}
+			<span class="nil">—</span>
+		{/if}
 	</td>
 </tr>
 

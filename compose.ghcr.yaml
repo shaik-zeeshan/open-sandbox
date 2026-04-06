@@ -38,7 +38,7 @@ services:
       SANDBOX_RUNTIME_PIDS_LIMIT: ${SANDBOX_RUNTIME_PIDS_LIMIT:-512}
       SANDBOX_MAINTENANCE_ARTIFACT_MAX_AGE: ${SANDBOX_MAINTENANCE_ARTIFACT_MAX_AGE:-168h}
       SANDBOX_MAINTENANCE_MISSING_SANDBOX_MAX_AGE: ${SANDBOX_MAINTENANCE_MISSING_SANDBOX_MAX_AGE:-24h}
-      SANDBOX_TRAEFIK_DYNAMIC_CONFIG_DIR: /data/traefik/dynamic
+      SANDBOX_TRAEFIK_DYNAMIC_CONFIG_DIR: /traefik/dynamic
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
       interval: 10s
@@ -48,7 +48,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${OPEN_SANDBOX_DATA_DIR:?set OPEN_SANDBOX_DATA_DIR in .env}/db:/data
       - ${OPEN_SANDBOX_DATA_DIR:?set OPEN_SANDBOX_DATA_DIR in .env}/workspace:${OPEN_SANDBOX_DATA_DIR:?set OPEN_SANDBOX_DATA_DIR in .env}/workspace
-      - ${OPEN_SANDBOX_DATA_DIR:?set OPEN_SANDBOX_DATA_DIR in .env}/traefik/dynamic:/data/traefik/dynamic
+      - ${OPEN_SANDBOX_DATA_DIR:?set OPEN_SANDBOX_DATA_DIR in .env}/traefik/dynamic:/traefik/dynamic
     expose:
       - "8080"
 

@@ -43,16 +43,22 @@ func TestReconcileWritesCoreAndWorkloadConfigs(t *testing.T) {
 	assertFileContains(t, filepath.Join(dir, "00-core.yaml"), "address: \"http://server:8080/auth/proxy/authorize\"")
 	assertFileContains(t, filepath.Join(dir, "00-core.yaml"), "trustForwardHeader: false")
 	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "PathPrefix(`/proxy/sandboxes/sandbox-1/3000/`)")
+	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "PathRegexp(`^/proxy/sandboxes/sandbox-1/3000$`)")
 	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "url: \"http://host.docker.internal:43000\"")
 	assertFileNotContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "url: \"http://host.docker.internal:43010\"")
 	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "preview-header-placeholder")
 	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "preview-forward-auth-placeholder")
+	assertMiddlewareOrder(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "preview-forward-auth-placeholder", "preview-sandboxes-sandbox-1-3000-strip")
+	assertFileNotContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "-         -")
 	assertFileContains(t, filepath.Join(dir, "container-ctr-1.yaml"), "PathPrefix(`/proxy/containers/ctr-1/8080/`)")
 	assertFileContains(t, filepath.Join(dir, "container-ctr-1.yaml"), "url: \"http://host.docker.internal:48080\"")
 	assertFileContains(t, filepath.Join(dir, "compose-demo.yaml"), "PathPrefix(`/proxy/compose/demo/web/80/`)")
+	assertFileContains(t, filepath.Join(dir, "compose-demo.yaml"), "PathRegexp(`^/proxy/compose/demo/web/80$`)")
 	assertFileContains(t, filepath.Join(dir, "compose-demo.yaml"), "PathPrefix(`/proxy/compose/demo/api/3000/`)")
 	assertFileContains(t, filepath.Join(dir, "compose-demo.yaml"), "url: \"http://host.docker.internal:50080\"")
 	assertFileNotContains(t, filepath.Join(dir, "compose-demo.yaml"), "url: \"http://host.docker.internal:50090\"")
+	assertMiddlewareOrder(t, filepath.Join(dir, "compose-demo.yaml"), "preview-forward-auth-placeholder", "preview-compose-demo-web-80-strip")
+	assertFileNotContains(t, filepath.Join(dir, "compose-demo.yaml"), "-         -")
 }
 
 func TestReconcileRemovesStaleWorkloadFiles(t *testing.T) {
@@ -93,6 +99,46 @@ func TestReconcileRemovesStaleWorkloadFiles(t *testing.T) {
 	}
 }
 
+func TestReconcileUpdatesRouteFilesAndKeepsUnmanagedFiles(t *testing.T) {
+	dir := t.TempDir()
+	writer, err := NewConfigWriter(dir)
+	if err != nil {
+		t.Fatalf("new config writer: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "sandbox-stale.yaml"), []byte("stale"), 0o644); err != nil {
+		t.Fatalf("write stale sandbox route: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("keep me"), 0o644); err != nil {
+		t.Fatalf("write unmanaged file: %v", err)
+	}
+
+	if err := writer.Reconcile(WorkloadRoutes{
+		Sandboxes: map[string][]WorkloadPort{
+			"sandbox-1": {{Private: 3000, Public: 43000}},
+		},
+	}); err != nil {
+		t.Fatalf("seed reconcile routes: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "sandbox-stale.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("expected stale sandbox route to be removed, err=%v", err)
+	}
+	assertFileContains(t, filepath.Join(dir, "notes.txt"), "keep me")
+	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "url: \"http://host.docker.internal:43000\"")
+
+	if err := writer.Reconcile(WorkloadRoutes{
+		Sandboxes: map[string][]WorkloadPort{
+			"sandbox-1": {{Private: 3000, Public: 43123}},
+		},
+	}); err != nil {
+		t.Fatalf("update reconcile routes: %v", err)
+	}
+
+	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "url: \"http://host.docker.internal:43123\"")
+	assertFileNotContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "url: \"http://host.docker.internal:43000\"")
+}
+
 func assertFileContains(t *testing.T, path string, expected string) {
 	t.Helper()
 
@@ -114,5 +160,23 @@ func assertFileNotContains(t *testing.T, path string, expected string) {
 	}
 	if strings.Contains(string(content), expected) {
 		t.Fatalf("did not expect %q in %s", expected, path)
+	}
+}
+
+func assertMiddlewareOrder(t *testing.T, path string, first string, second string) {
+	t.Helper()
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	raw := string(content)
+	firstIndex := strings.Index(raw, first)
+	secondIndex := strings.Index(raw, second)
+	if firstIndex == -1 || secondIndex == -1 {
+		t.Fatalf("expected both %q and %q in %s", first, second, path)
+	}
+	if firstIndex >= secondIndex {
+		t.Fatalf("expected %q to appear before %q in %s", first, second, path)
 	}
 }
