@@ -69,9 +69,12 @@ func NewConfigWriter(dir string, options ...ConfigWriterOptions) (*ConfigWriter,
 
 	previewCallbackPath := strings.TrimSpace(cfg.PreviewCallbackPath)
 	if previewCallbackPath == "" {
-		previewCallbackPath = "/_sandbox/auth/"
+		previewCallbackPath = "/_sandbox/auth/callback"
 	}
-	previewCallbackPath = ensureTrailingSlash(ensureLeadingSlash(previewCallbackPath))
+	previewCallbackPath = strings.TrimSuffix(ensureLeadingSlash(previewCallbackPath), "/")
+	if previewCallbackPath == "" {
+		previewCallbackPath = "/_sandbox/auth/callback"
+	}
 
 	return &ConfigWriter{
 		dir:                 filepath.Clean(trimmed),

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -127,7 +128,8 @@ func (s *Server) previewLaunch(c *gin.Context) {
 		return
 	}
 
-	grantToken, err := s.issuePreviewToken(previewTokenTypeGrant, identity, target, previewHost)
+	callbackHost := s.previewCallbackHost(previewHost)
+	grantToken, err := s.issuePreviewToken(previewTokenTypeGrant, identity, target, callbackHost)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
@@ -135,7 +137,7 @@ func (s *Server) previewLaunch(c *gin.Context) {
 
 	callbackURL := url.URL{
 		Scheme: s.previewRouting.PublicBaseScheme,
-		Host:   previewHost,
+		Host:   callbackHost,
 		Path:   s.previewRouting.CallbackPath,
 	}
 	query := callbackURL.Query()
@@ -144,6 +146,21 @@ func (s *Server) previewLaunch(c *gin.Context) {
 	callbackURL.RawQuery = query.Encode()
 
 	c.Redirect(http.StatusFound, callbackURL.String())
+}
+
+func (s *Server) previewCallbackHost(previewHost string) string {
+	host := strings.TrimSpace(previewHost)
+	if host == "" {
+		return ""
+	}
+	port := strings.TrimSpace(s.previewRouting.PublicBaseURLPort)
+	if port == "" {
+		return host
+	}
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return host
+	}
+	return net.JoinHostPort(host, port)
 }
 
 func (s *Server) previewAuthCallback(c *gin.Context) {

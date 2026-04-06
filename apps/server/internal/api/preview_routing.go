@@ -24,6 +24,7 @@ const (
 type previewRoutingConfig struct {
 	PublicBaseURL      string
 	PublicBaseURLHost  string
+	PublicBaseURLPort  string
 	PublicBaseScheme   string
 	AppHost            string
 	PreviewBaseDomain  string
@@ -71,9 +72,11 @@ func loadPreviewRoutingConfig() previewRoutingConfig {
 	}
 
 	appHost := ""
+	publicBasePort := ""
 	publicBaseScheme := "http"
 	if parsedPublicBase != nil {
 		appHost = strings.TrimSpace(parsedPublicBase.Hostname())
+		publicBasePort = strings.TrimSpace(parsedPublicBase.Port())
 		if scheme := strings.TrimSpace(parsedPublicBase.Scheme); scheme != "" {
 			publicBaseScheme = scheme
 		}
@@ -82,6 +85,7 @@ func loadPreviewRoutingConfig() previewRoutingConfig {
 	return previewRoutingConfig{
 		PublicBaseURL:      strings.TrimRight(publicBase, "/"),
 		PublicBaseURLHost:  appHost,
+		PublicBaseURLPort:  publicBasePort,
 		PublicBaseScheme:   publicBaseScheme,
 		AppHost:            appHost,
 		PreviewBaseDomain:  previewBaseDomain,

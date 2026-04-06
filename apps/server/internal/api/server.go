@@ -338,7 +338,7 @@ func NewServerWithStore(dockerClient DockerAPI, authConfig AuthConfig, sandboxSt
 		writer, writerErr := traefikcfg.NewConfigWriter(traefikDir, traefikcfg.ConfigWriterOptions{
 			AppHost:             s.previewRouting.AppHost,
 			PreviewBaseDomain:   s.previewRouting.PreviewBaseDomain,
-			PreviewCallbackPath: s.previewRouting.CallbackPathPrefix,
+			PreviewCallbackPath: s.previewRouting.CallbackPath,
 		})
 		if writerErr != nil {
 			logger.Warn("traefik_route_writer_disabled", slog.String("reason", writerErr.Error()))

@@ -45,7 +45,7 @@ func TestReconcileWritesCoreAndWorkloadConfigs(t *testing.T) {
 	assertFileContains(t, filepath.Join(dir, "00-core.yaml"), "Host(`app.lvh.me:3000`) && (PathPrefix(`/api`)")
 	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "Host(`sbx-sandbox-1-p3000-")
 	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), ".preview.lvh.me`) && PathPrefix(`/`)")
-	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "PathPrefix(`/_sandbox/auth/`)")
+	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "PathPrefix(`/_sandbox/auth/callback`)")
 	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "url: \"http://host.docker.internal:43000\"")
 	assertFileNotContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "url: \"http://host.docker.internal:43010\"")
 	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "preview-header-placeholder")
@@ -138,6 +138,29 @@ func TestReconcileUpdatesRouteFilesAndKeepsUnmanagedFiles(t *testing.T) {
 
 	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "url: \"http://host.docker.internal:43123\"")
 	assertFileNotContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "url: \"http://host.docker.internal:43000\"")
+}
+
+func TestReconcileNormalizesCallbackPathWithoutTrailingSlash(t *testing.T) {
+	dir := t.TempDir()
+	writer, err := NewConfigWriter(dir, ConfigWriterOptions{
+		AppHost:             "app.lvh.me:3000",
+		PreviewBaseDomain:   "preview.lvh.me",
+		PreviewCallbackPath: "/_sandbox/auth/callback/",
+	})
+	if err != nil {
+		t.Fatalf("new config writer: %v", err)
+	}
+
+	if err := writer.Reconcile(WorkloadRoutes{
+		Sandboxes: map[string][]WorkloadPort{
+			"sandbox-1": {{Private: 3000, Public: 43000}},
+		},
+	}); err != nil {
+		t.Fatalf("reconcile routes: %v", err)
+	}
+
+	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "PathPrefix(`/_sandbox/auth/callback`)")
+	assertFileNotContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "PathPrefix(`/_sandbox/auth/callback/`)")
 }
 
 func assertFileContains(t *testing.T, path string, expected string) {

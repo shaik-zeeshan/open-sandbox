@@ -4,9 +4,11 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -274,6 +276,101 @@ func TestProxyAuthorizeRejectsForeignDirectContainerAccess(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for foreign direct container, got %d", w.Code)
+	}
+}
+
+func TestPreviewLaunchRedirectIncludesConfiguredPublicPort(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return `{"ID":"sandbox-container","Image":"ubuntu:24.04","Names":"sandbox-one","Ports":"0.0.0.0:8080->80/tcp","Status":"Up 5 minutes","Labels":"open-sandbox.sandbox_id=sandbox-1,open-sandbox.owner_id=member-1"}` + "\n", "", nil
+	}
+
+	t.Setenv("SANDBOX_PUBLIC_BASE_URL", "http://app.lvh.me:3000")
+	t.Setenv("SANDBOX_PREVIEW_CALLBACK_PATH", "/_sandbox/auth/callback")
+
+	sandboxStore := &mockSandboxStore{
+		getSandboxFn: func(context.Context, string) (store.Sandbox, error) {
+			return store.Sandbox{ID: "sandbox-1", ContainerID: "sandbox-container", OwnerID: "member-1", OwnerUsername: "alice"}, nil
+		},
+	}
+
+	s := newTestServerWithStore(&mockDocker{}, sandboxStore)
+	req := httptest.NewRequest(http.MethodGet, "/auth/preview/launch/sandboxes/sandbox-1/80", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d (%s)", w.Code, w.Body.String())
+	}
+
+	redirectURL, err := url.Parse(w.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse redirect url: %v", err)
+	}
+	if redirectURL.Scheme != "http" {
+		t.Fatalf("expected http scheme, got %q", redirectURL.Scheme)
+	}
+	if redirectURL.Path != "/_sandbox/auth/callback" {
+		t.Fatalf("expected callback path without trailing slash, got %q", redirectURL.Path)
+	}
+	if !strings.Contains(redirectURL.Host, ":3000") {
+		t.Fatalf("expected redirect host to include configured public port, got %q", redirectURL.Host)
+	}
+	if strings.TrimSpace(redirectURL.Query().Get("grant")) == "" {
+		t.Fatal("expected grant query token in redirect")
+	}
+}
+
+func TestPreviewAuthCallbackAcceptsGrantForForwardedHostWithConfiguredPort(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return `{"ID":"sandbox-container","Image":"ubuntu:24.04","Names":"sandbox-one","Ports":"0.0.0.0:8080->80/tcp","Status":"Up 5 minutes","Labels":"open-sandbox.sandbox_id=sandbox-1,open-sandbox.owner_id=member-1"}` + "\n", "", nil
+	}
+
+	t.Setenv("SANDBOX_PUBLIC_BASE_URL", "http://app.lvh.me:3000")
+	t.Setenv("SANDBOX_PREVIEW_CALLBACK_PATH", "/_sandbox/auth/callback/")
+
+	sandboxStore := &mockSandboxStore{
+		getSandboxFn: func(context.Context, string) (store.Sandbox, error) {
+			return store.Sandbox{ID: "sandbox-1", ContainerID: "sandbox-container", OwnerID: "member-1", OwnerUsername: "alice"}, nil
+		},
+	}
+
+	s := newTestServerWithStore(&mockDocker{}, sandboxStore)
+	launchReq := httptest.NewRequest(http.MethodGet, "/auth/preview/launch/sandboxes/sandbox-1/80", nil)
+	launchReq.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	launchW := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(launchW, launchReq)
+
+	if launchW.Code != http.StatusFound {
+		t.Fatalf("expected launch 302, got %d (%s)", launchW.Code, launchW.Body.String())
+	}
+
+	redirectURL, err := url.Parse(launchW.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse launch redirect url: %v", err)
+	}
+	grant := strings.TrimSpace(redirectURL.Query().Get("grant"))
+	if grant == "" {
+		t.Fatal("expected grant query token in launch redirect")
+	}
+
+	callbackReq := httptest.NewRequest(http.MethodGet, s.previewRouting.CallbackPath+"?grant="+url.QueryEscape(grant), nil)
+	callbackReq.Header.Set("X-Forwarded-Host", redirectURL.Host)
+	callbackW := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(callbackW, callbackReq)
+
+	if callbackW.Code != http.StatusFound {
+		t.Fatalf("expected callback 302, got %d (%s)", callbackW.Code, callbackW.Body.String())
+	}
+	if callbackW.Header().Get("Set-Cookie") == "" {
+		t.Fatal("expected callback to set preview session cookie")
 	}
 }
 
