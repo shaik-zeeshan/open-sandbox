@@ -1361,7 +1361,7 @@ func previewURLsForSandbox(sandboxID string, ports []PortSummary) []PreviewURL {
 	}
 	return previewURLsForPorts(ports, func(privatePort int) string {
 		return fmt.Sprintf("/proxy/sandboxes/%s/%d/", url.PathEscape(trimmedID), privatePort)
-	}, false)
+	}, true)
 }
 
 func previewURLsForManagedContainer(managedID string, ports []PortSummary) []PreviewURL {
@@ -1371,7 +1371,7 @@ func previewURLsForManagedContainer(managedID string, ports []PortSummary) []Pre
 	}
 	return previewURLsForPorts(ports, func(privatePort int) string {
 		return fmt.Sprintf("/proxy/containers/%s/%d/", url.PathEscape(trimmedID), privatePort)
-	}, false)
+	}, true)
 }
 
 func previewURLsForComposeService(projectName string, serviceName string, ports []PortSummary) []PreviewURL {

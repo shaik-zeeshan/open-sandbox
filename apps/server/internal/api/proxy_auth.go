@@ -196,7 +196,7 @@ func (s *Server) authorizeSandboxProxyTarget(ctx context.Context, identity AuthI
 		return errProxyAccessDenied
 	}
 
-	if !containerHasPrivatePort(container, target.PrivatePort, false) {
+	if !containerHasPrivatePort(container, target.PrivatePort, true) {
 		return errProxyAccessDenied
 	}
 
@@ -214,7 +214,7 @@ func (s *Server) authorizeContainerProxyTarget(ctx context.Context, identity Aut
 		if managedID != target.WorkloadID {
 			continue
 		}
-		if containerHasPrivatePort(item, target.PrivatePort, false) {
+		if containerHasPrivatePort(item, target.PrivatePort, true) {
 			return nil
 		}
 		return errProxyAccessDenied

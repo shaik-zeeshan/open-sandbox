@@ -18,6 +18,7 @@ func TestReconcileWritesCoreAndWorkloadConfigs(t *testing.T) {
 		Sandboxes: map[string][]WorkloadPort{
 			"sandbox-1": {
 				{Private: 3000, Public: 43000},
+				{Private: 3000, Public: 43010},
 				{Private: 80, Public: 40080},
 			},
 		},
@@ -29,6 +30,7 @@ func TestReconcileWritesCoreAndWorkloadConfigs(t *testing.T) {
 		ComposeProjects: map[string][]ComposeServicePort{
 			"demo": {
 				{Service: "web", Private: 80, Public: 50080},
+				{Service: "web", Private: 80, Public: 50090},
 				{Service: "api", Private: 3000, Public: 53000},
 			},
 		},
@@ -41,11 +43,16 @@ func TestReconcileWritesCoreAndWorkloadConfigs(t *testing.T) {
 	assertFileContains(t, filepath.Join(dir, "00-core.yaml"), "address: \"http://server:8080/auth/proxy/authorize\"")
 	assertFileContains(t, filepath.Join(dir, "00-core.yaml"), "trustForwardHeader: false")
 	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "PathPrefix(`/proxy/sandboxes/sandbox-1/3000/`)")
+	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "url: \"http://host.docker.internal:43000\"")
+	assertFileNotContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "url: \"http://host.docker.internal:43010\"")
 	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "preview-header-placeholder")
 	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "preview-forward-auth-placeholder")
 	assertFileContains(t, filepath.Join(dir, "container-ctr-1.yaml"), "PathPrefix(`/proxy/containers/ctr-1/8080/`)")
+	assertFileContains(t, filepath.Join(dir, "container-ctr-1.yaml"), "url: \"http://host.docker.internal:48080\"")
 	assertFileContains(t, filepath.Join(dir, "compose-demo.yaml"), "PathPrefix(`/proxy/compose/demo/web/80/`)")
 	assertFileContains(t, filepath.Join(dir, "compose-demo.yaml"), "PathPrefix(`/proxy/compose/demo/api/3000/`)")
+	assertFileContains(t, filepath.Join(dir, "compose-demo.yaml"), "url: \"http://host.docker.internal:50080\"")
+	assertFileNotContains(t, filepath.Join(dir, "compose-demo.yaml"), "url: \"http://host.docker.internal:50090\"")
 }
 
 func TestReconcileRemovesStaleWorkloadFiles(t *testing.T) {
@@ -95,5 +102,17 @@ func assertFileContains(t *testing.T, path string, expected string) {
 	}
 	if !strings.Contains(string(content), expected) {
 		t.Fatalf("expected %q in %s", expected, path)
+	}
+}
+
+func assertFileNotContains(t *testing.T, path string, expected string) {
+	t.Helper()
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if strings.Contains(string(content), expected) {
+		t.Fatalf("did not expect %q in %s", expected, path)
 	}
 }

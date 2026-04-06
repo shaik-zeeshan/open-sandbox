@@ -1182,8 +1182,8 @@ func TestListContainersIncludesServerGeneratedPreviewURLs(t *testing.T) {
 	defer func() { commandRunner = original }()
 	commandRunner = func(context.Context, string, ...string) (string, string, error) {
 		return strings.Join([]string{
-			`{"ID":"sandbox-container","Image":"ubuntu:24.04","Names":"sandbox-one","Ports":"3000/tcp","Status":"Up 5 minutes","Labels":"open-sandbox.sandbox_id=sandbox-1,open-sandbox.owner_id=member-1"}`,
-			`{"ID":"direct-container","Image":"nginx:latest","Names":"direct-one","Ports":"0.0.0.0:8080->80/tcp","Status":"Up 5 minutes","Labels":"open-sandbox.kind=direct,open-sandbox.managed_id=ctr-123,open-sandbox.owner_id=member-1"}`,
+			`{"ID":"sandbox-container","Image":"ubuntu:24.04","Names":"sandbox-one","Ports":"3000/tcp,0.0.0.0:8080->80/tcp","Status":"Up 5 minutes","Labels":"open-sandbox.sandbox_id=sandbox-1,open-sandbox.owner_id=member-1"}`,
+			`{"ID":"direct-container","Image":"nginx:latest","Names":"direct-one","Ports":"0.0.0.0:8080->80/tcp,3000/tcp","Status":"Up 5 minutes","Labels":"open-sandbox.kind=direct,open-sandbox.managed_id=ctr-123,open-sandbox.owner_id=member-1"}`,
 			`{"ID":"compose-container","Image":"nginx:latest","Names":"demo-web-1","Ports":"0.0.0.0:9000->8080/tcp,8081/tcp","Status":"Up 5 minutes","Labels":"com.docker.compose.project=demo,com.docker.compose.service=web"}`,
 		}, "\n"), "", nil
 	}
@@ -1223,7 +1223,7 @@ func TestListContainersIncludesServerGeneratedPreviewURLs(t *testing.T) {
 	for _, item := range containers {
 		previewByID[item.ContainerID] = item.PreviewURLs
 	}
-	if len(previewByID["sandbox-container"]) != 1 || previewByID["sandbox-container"][0].URL != "/proxy/sandboxes/sandbox-1/3000/" {
+	if len(previewByID["sandbox-container"]) != 1 || previewByID["sandbox-container"][0].URL != "/proxy/sandboxes/sandbox-1/80/" {
 		t.Fatalf("unexpected sandbox preview urls: %+v", previewByID["sandbox-container"])
 	}
 	if len(previewByID["direct-container"]) != 1 || previewByID["direct-container"][0].URL != "/proxy/containers/ctr-123/80/" {
@@ -2048,11 +2048,7 @@ func TestListSandboxesIncludesServerGeneratedPreviewURLs(t *testing.T) {
 	if len(sandboxes) != 1 {
 		t.Fatalf("expected a single sandbox in response, got %d", len(sandboxes))
 	}
-	if len(sandboxes[0].PreviewURLs) != 2 {
-		t.Fatalf("expected preview urls for both private ports, got %+v", sandboxes[0].PreviewURLs)
-	}
-	got := []string{sandboxes[0].PreviewURLs[0].URL, sandboxes[0].PreviewURLs[1].URL}
-	if !(strings.Contains(strings.Join(got, ","), "/proxy/sandboxes/sandbox-1/80/") && strings.Contains(strings.Join(got, ","), "/proxy/sandboxes/sandbox-1/3000/")) {
+	if len(sandboxes[0].PreviewURLs) != 1 || sandboxes[0].PreviewURLs[0].URL != "/proxy/sandboxes/sandbox-1/80/" {
 		t.Fatalf("unexpected sandbox preview urls: %+v", sandboxes[0].PreviewURLs)
 	}
 }

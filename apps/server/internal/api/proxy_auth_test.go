@@ -40,7 +40,7 @@ func TestProxyAuthorizeRejectsMissingCredentials(t *testing.T) {
 	}
 }
 
-func TestProxyAuthorizeAllowsOwnedSandboxPort(t *testing.T) {
+func TestProxyAuthorizeAllowsOwnedSandboxPublishedPort(t *testing.T) {
 	original := commandRunner
 	defer func() { commandRunner = original }()
 	commandRunner = func(context.Context, string, ...string) (string, string, error) {
@@ -56,7 +56,7 @@ func TestProxyAuthorizeAllowsOwnedSandboxPort(t *testing.T) {
 	s := newTestServerWithStore(&mockDocker{}, sandboxStore)
 	req := httptest.NewRequest(http.MethodGet, "/auth/proxy/authorize", nil)
 	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
-	req.Header.Set("X-Forwarded-Uri", "/proxy/sandboxes/sandbox-1/3000/")
+	req.Header.Set("X-Forwarded-Uri", "/proxy/sandboxes/sandbox-1/80/")
 	w := httptest.NewRecorder()
 
 	s.Router().ServeHTTP(w, req)
@@ -84,7 +84,7 @@ func TestProxyAuthorizeRateLimited(t *testing.T) {
 
 	first := httptest.NewRequest(http.MethodGet, "/auth/proxy/authorize", nil)
 	first.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
-	first.Header.Set("X-Forwarded-Uri", "/proxy/sandboxes/sandbox-1/3000/")
+	first.Header.Set("X-Forwarded-Uri", "/proxy/sandboxes/sandbox-1/80/")
 	firstWriter := httptest.NewRecorder()
 	s.Router().ServeHTTP(firstWriter, first)
 	if firstWriter.Code != http.StatusOK {
@@ -93,7 +93,7 @@ func TestProxyAuthorizeRateLimited(t *testing.T) {
 
 	second := httptest.NewRequest(http.MethodGet, "/auth/proxy/authorize", nil)
 	second.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
-	second.Header.Set("X-Forwarded-Uri", "/proxy/sandboxes/sandbox-1/3000/")
+	second.Header.Set("X-Forwarded-Uri", "/proxy/sandboxes/sandbox-1/80/")
 	secondWriter := httptest.NewRecorder()
 	s.Router().ServeHTTP(secondWriter, second)
 	if secondWriter.Code != http.StatusTooManyRequests {
@@ -117,7 +117,7 @@ func TestProxyAuthorizeRejectsForeignSandboxAccess(t *testing.T) {
 	s := newTestServerWithStore(&mockDocker{}, sandboxStore)
 	req := httptest.NewRequest(http.MethodGet, "/auth/proxy/authorize", nil)
 	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-2", Username: "bob", Role: roleMember}))
-	req.Header.Set("X-Forwarded-Uri", "/proxy/sandboxes/sandbox-1/3000/")
+	req.Header.Set("X-Forwarded-Uri", "/proxy/sandboxes/sandbox-1/80/")
 	w := httptest.NewRecorder()
 
 	s.Router().ServeHTTP(w, req)
@@ -153,6 +153,32 @@ func TestProxyAuthorizeComposeRequiresPublishedPort(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for unpublished compose port, got %d", w.Code)
+	}
+}
+
+func TestProxyAuthorizeSandboxRequiresPublishedPort(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return `{"ID":"sandbox-container","Image":"ubuntu:24.04","Names":"sandbox-one","Ports":"3000/tcp,0.0.0.0:8080->80/tcp","Status":"Up 5 minutes","Labels":"open-sandbox.sandbox_id=sandbox-1,open-sandbox.owner_id=member-1"}` + "\n", "", nil
+	}
+
+	sandboxStore := &mockSandboxStore{
+		getSandboxFn: func(context.Context, string) (store.Sandbox, error) {
+			return store.Sandbox{ID: "sandbox-1", ContainerID: "sandbox-container", OwnerID: "member-1", OwnerUsername: "alice"}, nil
+		},
+	}
+
+	s := newTestServerWithStore(&mockDocker{}, sandboxStore)
+	req := httptest.NewRequest(http.MethodGet, "/auth/proxy/authorize", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	req.Header.Set("X-Forwarded-Uri", "/proxy/sandboxes/sandbox-1/3000/")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unpublished sandbox port, got %d", w.Code)
 	}
 }
 
