@@ -2025,6 +2025,20 @@ func TestSandboxTerminalWebSocket(t *testing.T) {
 	}
 }
 
+func TestTerminalWebSocketAllowsSameHostOriginBehindProxy(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/sandboxes/sandbox-1/terminal/ws?cols=100&rows=32", nil)
+	req.Host = "192.168.0.8"
+	req.Header.Set("Origin", "http://192.168.0.8:8010")
+	req.Header.Set("X-Forwarded-Host", "192.168.0.8")
+	req.Header.Set("X-Forwarded-Proto", "http")
+
+	allowOrigin := buildAllowOriginFunc(loadAllowedOrigins())
+	allowed := allowOrigin("http://192.168.0.8:8010") || requestOriginMatchesForwardedHost(req, "http://192.168.0.8:8010")
+	if !allowed {
+		t.Fatal("expected websocket origin to be allowed for proxied same-host request")
+	}
+}
+
 func TestGitCloneEndpointBuildsExpectedCommand(t *testing.T) {
 	var capturedCmd []string
 	hijacked := fakeHijackedResponse([]byte(""), []byte(""))

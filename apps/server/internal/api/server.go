@@ -992,7 +992,7 @@ func (s *Server) streamTerminalForContainer(c *gin.Context, workerID string, con
 			if origin == "" {
 				return true
 			}
-			return allowOrigin(origin)
+			return allowOrigin(origin) || requestOriginMatchesForwardedHost(r, origin)
 		},
 	}
 
