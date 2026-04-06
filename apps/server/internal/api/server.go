@@ -100,19 +100,20 @@ type WorkerStore interface {
 }
 
 type Server struct {
-	docker          DockerAPI
-	runtime         workloadRuntime
-	auth            AuthConfig
-	router          *gin.Engine
-	sandboxStore    SandboxStore
-	userStore       UserStore
-	workerStore     WorkerStore
-	logger          *slog.Logger
-	metrics         *operationalMetrics
-	runtimeLimits   runtimeLimits
-	workspaceRoot   string
-	traefikWriter   *traefikcfg.ConfigWriter
-	execWaitTimeout time.Duration
+	docker           DockerAPI
+	runtime          workloadRuntime
+	auth             AuthConfig
+	router           *gin.Engine
+	sandboxStore     SandboxStore
+	userStore        UserStore
+	workerStore      WorkerStore
+	logger           *slog.Logger
+	metrics          *operationalMetrics
+	runtimeLimits    runtimeLimits
+	workspaceRoot    string
+	traefikWriter    *traefikcfg.ConfigWriter
+	proxyAuthLimiter *proxyAuthRateLimiter
+	execWaitTimeout  time.Duration
 }
 
 var commandRunner = runCommand
@@ -317,18 +318,19 @@ func NewServerWithStore(dockerClient DockerAPI, authConfig AuthConfig, sandboxSt
 	}
 
 	s := &Server{
-		docker:          dockerClient,
-		auth:            authConfig,
-		router:          r,
-		sandboxStore:    sandboxStore,
-		userStore:       userStore,
-		workerStore:     workerStore,
-		logger:          logger,
-		metrics:         newOperationalMetrics(),
-		runtimeLimits:   loadRuntimeLimitsFromEnv(),
-		workspaceRoot:   workspaceRoot,
-		traefikWriter:   nil,
-		execWaitTimeout: loadExecWaitTimeout(),
+		docker:           dockerClient,
+		auth:             authConfig,
+		router:           r,
+		sandboxStore:     sandboxStore,
+		userStore:        userStore,
+		workerStore:      workerStore,
+		logger:           logger,
+		metrics:          newOperationalMetrics(),
+		runtimeLimits:    loadRuntimeLimitsFromEnv(),
+		workspaceRoot:    workspaceRoot,
+		traefikWriter:    nil,
+		proxyAuthLimiter: newProxyAuthRateLimiter(loadProxyAuthRateLimitConfig()),
+		execWaitTimeout:  loadExecWaitTimeout(),
 	}
 	if traefikDir := strings.TrimSpace(os.Getenv("SANDBOX_TRAEFIK_DYNAMIC_CONFIG_DIR")); traefikDir != "" {
 		writer, writerErr := traefikcfg.NewConfigWriter(traefikDir)
@@ -357,6 +359,7 @@ func (s *Server) registerRoutes() {
 	s.router.POST("/auth/login", s.login)
 	s.router.POST("/auth/refresh", s.refresh)
 	s.router.GET("/auth/session", s.session)
+	s.router.GET("/auth/proxy/authorize", s.proxyAuthorize)
 	s.router.POST("/auth/logout", s.logout)
 	workerControl := s.router.Group("/control")
 	workerControl.Use(s.workerAuthMiddleware())

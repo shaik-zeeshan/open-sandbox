@@ -158,8 +158,8 @@ func coreConfig() string {
 		"          X-Open-Sandbox-Preview: \"1\"\n" +
 		"    preview-forward-auth-placeholder:\n" +
 		"      forwardAuth:\n" +
-		"        address: \"http://server:8080/health\"\n" +
-		"        trustForwardHeader: true\n"
+		"        address: \"http://server:8080/auth/proxy/authorize\"\n" +
+		"        trustForwardHeader: false\n"
 }
 
 func workloadConfig(workloadType string, workloadID string, ports []WorkloadPort) []byte {

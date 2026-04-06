@@ -12,6 +12,7 @@ services:
     pids_limit: 128
     command:
       - --entrypoints.web.address=:80
+      - --entrypoints.web.forwardedHeaders.insecure=false
       - --providers.file.directory=/etc/traefik/dynamic
       - --providers.file.watch=true
     volumes:

@@ -34,6 +34,9 @@ Optional:
 - `SANDBOX_RUNTIME_PIDS_LIMIT`: default PID limit for created sandboxes and managed containers, for example `512`
 - `SANDBOX_MAINTENANCE_ARTIFACT_MAX_AGE`: retention window for stale direct-container specs and compose project directories, default `168h`
 - `SANDBOX_MAINTENANCE_MISSING_SANDBOX_MAX_AGE`: retention window for sandbox records whose container is already gone, default `24h`
+- `SANDBOX_PROXY_AUTH_RATE_LIMIT_RPS`: per-user ForwardAuth request rate limit for `/auth/proxy/authorize`, default `120`
+- `SANDBOX_PROXY_AUTH_RATE_LIMIT_BURST`: per-user ForwardAuth burst allowance, default `240`
+- `SANDBOX_PROXY_AUTH_RATE_LIMIT_IDLE_TTL`: cleanup TTL for idle per-user rate limiter entries, default `10m`
 
 `/health` is intentionally public.
 

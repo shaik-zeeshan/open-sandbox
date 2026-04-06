@@ -38,6 +38,8 @@ func TestReconcileWritesCoreAndWorkloadConfigs(t *testing.T) {
 	}
 
 	assertFileContains(t, filepath.Join(dir, "00-core.yaml"), "preview-forward-auth-placeholder")
+	assertFileContains(t, filepath.Join(dir, "00-core.yaml"), "address: \"http://server:8080/auth/proxy/authorize\"")
+	assertFileContains(t, filepath.Join(dir, "00-core.yaml"), "trustForwardHeader: false")
 	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "PathPrefix(`/proxy/sandboxes/sandbox-1/3000/`)")
 	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "preview-header-placeholder")
 	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "preview-forward-auth-placeholder")

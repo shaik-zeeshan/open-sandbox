@@ -89,6 +89,9 @@ Top-level values (from `.env`):
 - `SANDBOX_RUNTIME_PIDS_LIMIT` (optional, default `512`)
 - `SANDBOX_MAINTENANCE_ARTIFACT_MAX_AGE` (optional, default `168h`)
 - `SANDBOX_MAINTENANCE_MISSING_SANDBOX_MAX_AGE` (optional, default `24h`)
+- `SANDBOX_PROXY_AUTH_RATE_LIMIT_RPS` (optional, default `120`)
+- `SANDBOX_PROXY_AUTH_RATE_LIMIT_BURST` (optional, default `240`)
+- `SANDBOX_PROXY_AUTH_RATE_LIMIT_IDLE_TTL` (optional, default `10m`)
 
 Backend values inside the server container:
 - `SANDBOX_DB_PATH=/data/open-sandbox.db`
