@@ -186,6 +186,7 @@ docker run -d \
   --name "$CLIENT_CONTAINER_NAME" \
   --restart unless-stopped \
   --network "$NETWORK_NAME" \
+  --network-alias client \
   --memory 256m \
   --cpus 0.5 \
   --pids-limit 128 \
