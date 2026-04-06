@@ -1,0 +1,24 @@
+http:
+  routers:
+    server:
+      entryPoints:
+        - web
+      rule: "PathPrefix(`/api`) || PathPrefix(`/auth`) || PathPrefix(`/health`) || PathPrefix(`/metrics`) || PathPrefix(`/swagger`)"
+      service: server
+      priority: 100
+    client:
+      entryPoints:
+        - web
+      rule: "PathPrefix(`/`)"
+      service: client
+      priority: 1
+
+  services:
+    server:
+      loadBalancer:
+        servers:
+          - url: "http://server:8080"
+    client:
+      loadBalancer:
+        servers:
+          - url: "http://client:80"
