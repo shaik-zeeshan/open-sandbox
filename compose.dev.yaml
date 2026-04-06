@@ -5,7 +5,7 @@ services:
       server:
         condition: service_healthy
       client:
-        condition: service_started
+        condition: service_healthy
     command:
       - --log.level=INFO
       - --accesslog=true
@@ -70,6 +70,11 @@ services:
     environment:
       VITE_SANDBOX_BASE_URL: /
       CHOKIDAR_USEPOLLING: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:80/"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     volumes:
       - ./:/workspace
       - bun-modules:/workspace/node_modules

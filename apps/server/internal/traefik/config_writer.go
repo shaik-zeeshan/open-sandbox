@@ -93,7 +93,7 @@ func (w *ConfigWriter) Reconcile(routes WorkloadRoutes) error {
 	}
 
 	desiredFiles := map[string][]byte{
-		coreConfigFileName: []byte(coreConfig(w.appHost)),
+		coreConfigFileName: []byte(coreConfig()),
 	}
 
 	for _, sandboxID := range sortedKeys(routes.Sandboxes) {
@@ -153,15 +153,10 @@ func (w *ConfigWriter) Reconcile(routes WorkloadRoutes) error {
 	return nil
 }
 
-func coreConfig(appHost string) string {
+func coreConfig() string {
 	bt := "`"
 	serverRule := "PathPrefix(" + bt + "/api" + bt + ") || PathPrefix(" + bt + "/auth" + bt + ") || PathPrefix(" + bt + "/health" + bt + ") || PathPrefix(" + bt + "/metrics" + bt + ") || PathPrefix(" + bt + "/swagger" + bt + ")"
 	clientRule := "PathPrefix(" + bt + "/" + bt + ")"
-	host := strings.TrimSpace(appHost)
-	if host != "" {
-		serverRule = "Host(" + bt + host + bt + ") && (" + serverRule + ")"
-		clientRule = "Host(" + bt + host + bt + ") && " + clientRule
-	}
 	return "http:\n" +
 		"  routers:\n" +
 		"    server:\n" +

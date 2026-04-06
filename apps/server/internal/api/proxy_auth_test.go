@@ -298,6 +298,8 @@ func TestPreviewLaunchRedirectIncludesConfiguredPublicPort(t *testing.T) {
 	s := newTestServerWithStore(&mockDocker{}, sandboxStore)
 	req := httptest.NewRequest(http.MethodGet, "/auth/preview/launch/sandboxes/sandbox-1/80", nil)
 	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	req.Header.Set("X-Forwarded-Host", "app.lvh.me:3000")
+	req.Header.Set("X-Forwarded-Proto", "http")
 	w := httptest.NewRecorder()
 
 	s.Router().ServeHTTP(w, req)
@@ -371,6 +373,44 @@ func TestPreviewAuthCallbackAcceptsGrantForForwardedHostWithConfiguredPort(t *te
 	}
 	if callbackW.Header().Get("Set-Cookie") == "" {
 		t.Fatal("expected callback to set preview session cookie")
+	}
+}
+
+func TestPreviewLaunchRedirectUsesForwardedHostWithoutForcedConfiguredPort(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return `{"ID":"sandbox-container","Image":"ubuntu:24.04","Names":"sandbox-one","Ports":"0.0.0.0:8080->80/tcp","Status":"Up 5 minutes","Labels":"open-sandbox.sandbox_id=sandbox-1,open-sandbox.owner_id=member-1"}` + "\n", "", nil
+	}
+
+	t.Setenv("SANDBOX_PUBLIC_BASE_URL", "http://app.lvh.me:3000")
+	t.Setenv("SANDBOX_PREVIEW_CALLBACK_PATH", "/_sandbox/auth/callback")
+
+	sandboxStore := &mockSandboxStore{
+		getSandboxFn: func(context.Context, string) (store.Sandbox, error) {
+			return store.Sandbox{ID: "sandbox-1", ContainerID: "sandbox-container", OwnerID: "member-1", OwnerUsername: "alice"}, nil
+		},
+	}
+
+	s := newTestServerWithStore(&mockDocker{}, sandboxStore)
+	req := httptest.NewRequest(http.MethodGet, "/auth/preview/launch/sandboxes/sandbox-1/80", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	req.Header.Set("X-Forwarded-Host", "app.lvh.me")
+	req.Header.Set("X-Forwarded-Proto", "http")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d (%s)", w.Code, w.Body.String())
+	}
+
+	redirectURL, err := url.Parse(w.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse redirect url: %v", err)
+	}
+	if strings.Contains(redirectURL.Host, ":3000") {
+		t.Fatalf("expected redirect host to omit configured public port when forwarded host has none, got %q", redirectURL.Host)
 	}
 }
 

@@ -62,7 +62,7 @@ make compose-dev-up
 ```
 
 Default URL:
-- UI + API + auth launcher routes: `http://app.lvh.me:3000`
+- UI + API + auth launcher routes: `http://localhost:3000` (or any hostname resolving to this machine)
 
 Notes:
 - server hot reload runs with `go tool air -c .air.toml`
@@ -99,7 +99,7 @@ docker compose up -d
 ```
 
 Default URL:
-- UI + API + auth launcher routes: `http://app.lvh.me:3000`
+- UI + API + auth launcher routes: `http://localhost:3000` (or any hostname resolving to this machine)
 
 The stack runs three containers:
 - `traefik`: public edge proxy (the only published port)
@@ -135,6 +135,7 @@ Top-level values (from `.env`):
 - `SANDBOX_PROXY_AUTH_RATE_LIMIT_BURST` (optional, default `240`)
 - `SANDBOX_PROXY_AUTH_RATE_LIMIT_IDLE_TTL` (optional, default `10m`)
 - `SANDBOX_PUBLIC_BASE_URL` (optional, default `http://app.lvh.me:${OPEN_SANDBOX_HTTP_PORT}`)
+  - set this to your external app URL when you expose a non-default host/port (for preview callback links)
 - `SANDBOX_PREVIEW_BASE_DOMAIN` (optional, default `preview.lvh.me`)
 - `SANDBOX_PREVIEW_SESSION_TTL` (optional, default `10m`)
 
@@ -203,7 +204,7 @@ Persistent data under `${OPEN_SANDBOX_DATA_DIR}`:
 - `${OPEN_SANDBOX_DATA_DIR}/workspace`: managed compose projects and workspace state
 
 After first start:
-- open `http://app.lvh.me:${OPEN_SANDBOX_HTTP_PORT:-3000}`
+- open `http://localhost:${OPEN_SANDBOX_HTTP_PORT:-3000}` (or your mapped hostname)
 - create the initial admin account from the login screen
 - health endpoint: `/health`
 - Swagger: `/swagger/index.html`
