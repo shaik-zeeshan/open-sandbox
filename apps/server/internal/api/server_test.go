@@ -659,6 +659,98 @@ func TestComposeStatusRequiresContent(t *testing.T) {
 	}
 }
 
+func TestComposeProjectPreviewEndpointsIncludePublishedPortsOnly(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return strings.Join([]string{
+			`{"ID":"demo-web-1","Image":"nginx:latest","Names":"demo-web-1","Ports":"0.0.0.0:8080->80/tcp,3000/tcp","Status":"Up 1 minute","Labels":"com.docker.compose.project=demo,com.docker.compose.service=web"}`,
+			`{"ID":"demo-db-1","Image":"postgres:16","Names":"demo-db-1","Ports":"5432/tcp","Status":"Up 1 minute","Labels":"com.docker.compose.project=demo,com.docker.compose.service=db"}`,
+			`{"ID":"hidden-web-1","Image":"nginx:latest","Names":"hidden-web-1","Ports":"0.0.0.0:9000->80/tcp","Status":"Up 1 minute","Labels":"com.docker.compose.project=hidden,com.docker.compose.service=web"}`,
+		}, "\n"), "", nil
+	}
+
+	s := newTestServer(&mockDocker{})
+	s.workspaceRoot = t.TempDir()
+	demoProjectDir := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", "demo")
+	if err := ensurePrivateDir(demoProjectDir); err != nil {
+		t.Fatalf("expected demo compose project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(demoProjectDir, "docker-compose.yml"), []byte("services:\n  web:\n    image: nginx:latest\n"), 0o600); err != nil {
+		t.Fatalf("expected demo compose file: %v", err)
+	}
+	if err := s.writeComposeProjectOwnerMetadata(demoProjectDir, AuthIdentity{UserID: "member-1", Username: "alice"}); err != nil {
+		t.Fatalf("expected demo owner metadata: %v", err)
+	}
+
+	hiddenProjectDir := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", "hidden")
+	if err := ensurePrivateDir(hiddenProjectDir); err != nil {
+		t.Fatalf("expected hidden compose project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hiddenProjectDir, "docker-compose.yml"), []byte("services:\n  web:\n    image: nginx:latest\n"), 0o600); err != nil {
+		t.Fatalf("expected hidden compose file: %v", err)
+	}
+	if err := s.writeComposeProjectOwnerMetadata(hiddenProjectDir, AuthIdentity{UserID: "member-2", Username: "bob"}); err != nil {
+		t.Fatalf("expected hidden owner metadata: %v", err)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/compose/projects", nil)
+	listReq.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	listW := httptest.NewRecorder()
+	s.Router().ServeHTTP(listW, listReq)
+
+	if listW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", listW.Code, listW.Body.String())
+	}
+
+	var projects []ComposeProjectPreviewResponse
+	if err := json.Unmarshal(listW.Body.Bytes(), &projects); err != nil {
+		t.Fatalf("decode compose projects response: %v", err)
+	}
+	if len(projects) != 1 || projects[0].ProjectName != "demo" {
+		t.Fatalf("expected only demo project, got %+v", projects)
+	}
+	if len(projects[0].Services) != 2 {
+		t.Fatalf("expected 2 demo services, got %+v", projects[0].Services)
+	}
+	for _, service := range projects[0].Services {
+		switch service.ServiceName {
+		case "web":
+			if len(service.Ports) != 1 {
+				t.Fatalf("expected web to expose only published ports, got %+v", service.Ports)
+			}
+			if service.Ports[0].PrivatePort != 80 || service.Ports[0].PublicPort != 8080 {
+				t.Fatalf("unexpected web published port mapping: %+v", service.Ports[0])
+			}
+			if service.Ports[0].PreviewURL != "/proxy/compose/demo/web/80/" {
+				t.Fatalf("unexpected web preview url: %q", service.Ports[0].PreviewURL)
+			}
+		case "db":
+			if len(service.Ports) != 0 {
+				t.Fatalf("expected db to have no preview ports for internal-only port, got %+v", service.Ports)
+			}
+		default:
+			t.Fatalf("unexpected service in compose project response: %+v", service)
+		}
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/compose/projects/demo", nil)
+	getReq.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	getW := httptest.NewRecorder()
+	s.Router().ServeHTTP(getW, getReq)
+
+	if getW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", getW.Code, getW.Body.String())
+	}
+	var project ComposeProjectPreviewResponse
+	if err := json.Unmarshal(getW.Body.Bytes(), &project); err != nil {
+		t.Fatalf("decode compose project response: %v", err)
+	}
+	if project.ProjectName != "demo" {
+		t.Fatalf("expected demo project response, got %+v", project)
+	}
+}
+
 func TestComposeUpReservesOwnerBeforeCommandSucceeds(t *testing.T) {
 	dockerBinDir := t.TempDir()
 	dockerScript := filepath.Join(dockerBinDir, "docker")
@@ -1018,6 +1110,63 @@ func TestListContainersEndpoint(t *testing.T) {
 
 	if !bytes.Contains(w.Body.Bytes(), []byte("sandbox-one")) {
 		t.Fatalf("expected container response body: %s", w.Body.String())
+	}
+}
+
+func TestListContainersIncludesServerGeneratedPreviewURLs(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return strings.Join([]string{
+			`{"ID":"sandbox-container","Image":"ubuntu:24.04","Names":"sandbox-one","Ports":"3000/tcp","Status":"Up 5 minutes","Labels":"open-sandbox.sandbox_id=sandbox-1,open-sandbox.owner_id=member-1"}`,
+			`{"ID":"direct-container","Image":"nginx:latest","Names":"direct-one","Ports":"0.0.0.0:8080->80/tcp","Status":"Up 5 minutes","Labels":"open-sandbox.kind=direct,open-sandbox.managed_id=ctr-123,open-sandbox.owner_id=member-1"}`,
+			`{"ID":"compose-container","Image":"nginx:latest","Names":"demo-web-1","Ports":"0.0.0.0:9000->8080/tcp,8081/tcp","Status":"Up 5 minutes","Labels":"com.docker.compose.project=demo,com.docker.compose.service=web"}`,
+		}, "\n"), "", nil
+	}
+
+	s := newTestServer(&mockDocker{})
+	s.workspaceRoot = t.TempDir()
+	projectDir := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", "demo")
+	if err := ensurePrivateDir(projectDir); err != nil {
+		t.Fatalf("expected compose project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "docker-compose.yml"), []byte("services:\n  web:\n    image: nginx:latest\n"), 0o600); err != nil {
+		t.Fatalf("expected compose file: %v", err)
+	}
+	if err := s.writeComposeProjectOwnerMetadata(projectDir, AuthIdentity{UserID: "member-1", Username: "alice"}); err != nil {
+		t.Fatalf("expected compose owner metadata: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/containers", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+
+	var containers []ContainerSummary
+	if err := json.Unmarshal(w.Body.Bytes(), &containers); err != nil {
+		t.Fatalf("decode containers response: %v", err)
+	}
+	if len(containers) != 3 {
+		t.Fatalf("expected 3 visible containers, got %d", len(containers))
+	}
+
+	previewByID := map[string][]PreviewURL{}
+	for _, item := range containers {
+		previewByID[item.ContainerID] = item.PreviewURLs
+	}
+	if len(previewByID["sandbox-container"]) != 1 || previewByID["sandbox-container"][0].URL != "/proxy/sandboxes/sandbox-1/3000/" {
+		t.Fatalf("unexpected sandbox preview urls: %+v", previewByID["sandbox-container"])
+	}
+	if len(previewByID["direct-container"]) != 1 || previewByID["direct-container"][0].URL != "/proxy/containers/ctr-123/80/" {
+		t.Fatalf("unexpected direct preview urls: %+v", previewByID["direct-container"])
+	}
+	if len(previewByID["compose-container"]) != 1 || previewByID["compose-container"][0].URL != "/proxy/compose/demo/web/8080/" {
+		t.Fatalf("unexpected compose preview urls: %+v", previewByID["compose-container"])
 	}
 }
 
@@ -1801,6 +1950,46 @@ func TestListSandboxesFiltersAdminsToOwnedSandboxes(t *testing.T) {
 	}
 	if !bytes.Contains(w.Body.Bytes(), []byte(`"sandbox-1"`)) {
 		t.Fatalf("expected admin-owned sandbox in response: %s", w.Body.String())
+	}
+}
+
+func TestListSandboxesIncludesServerGeneratedPreviewURLs(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return `{"ID":"sandbox-container","Image":"ubuntu:24.04","Names":"sandbox-one","Ports":"3000/tcp,0.0.0.0:8080->80/tcp","Status":"Up 5 minutes","Labels":"open-sandbox.sandbox_id=sandbox-1,open-sandbox.owner_id=member-1"}` + "\n", "", nil
+	}
+
+	sandboxStore := &mockSandboxStore{
+		listSandboxesFn: func(context.Context) ([]store.Sandbox, error) {
+			return []store.Sandbox{{ID: "sandbox-1", Name: "mine", ContainerID: "sandbox-container", OwnerID: "member-1", OwnerUsername: "alice", Status: "running"}}, nil
+		},
+	}
+
+	s := newTestServerWithStore(&mockDocker{}, sandboxStore)
+	req := httptest.NewRequest(http.MethodGet, "/api/sandboxes", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+
+	var sandboxes []SandboxResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &sandboxes); err != nil {
+		t.Fatalf("decode sandboxes response: %v", err)
+	}
+	if len(sandboxes) != 1 {
+		t.Fatalf("expected a single sandbox in response, got %d", len(sandboxes))
+	}
+	if len(sandboxes[0].PreviewURLs) != 2 {
+		t.Fatalf("expected preview urls for both private ports, got %+v", sandboxes[0].PreviewURLs)
+	}
+	got := []string{sandboxes[0].PreviewURLs[0].URL, sandboxes[0].PreviewURLs[1].URL}
+	if !(strings.Contains(strings.Join(got, ","), "/proxy/sandboxes/sandbox-1/80/") && strings.Contains(strings.Join(got, ","), "/proxy/sandboxes/sandbox-1/3000/")) {
+		t.Fatalf("unexpected sandbox preview urls: %+v", sandboxes[0].PreviewURLs)
 	}
 }
 

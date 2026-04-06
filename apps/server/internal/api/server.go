@@ -202,8 +202,32 @@ type ComposeResponse struct {
 }
 
 type ComposeStatusResponse struct {
-	Services any    `json:"services"`
-	Raw      string `json:"raw"`
+	Services []ComposeStatusService `json:"services"`
+	Raw      string                 `json:"raw"`
+}
+
+type ComposeStatusService struct {
+	Name    string `json:"name"`
+	Service string `json:"service"`
+	State   string `json:"state"`
+}
+
+type ComposeProjectPreviewResponse struct {
+	ProjectName string                          `json:"project_name"`
+	Services    []ComposeServicePreviewResponse `json:"services"`
+}
+
+type ComposeServicePreviewResponse struct {
+	ServiceName string                      `json:"service_name"`
+	Ports       []ComposePublishedPortEntry `json:"ports"`
+}
+
+type ComposePublishedPortEntry struct {
+	PrivatePort int    `json:"private_port"`
+	PublicPort  int    `json:"public_port"`
+	Type        string `json:"type"`
+	IP          string `json:"ip,omitempty"`
+	PreviewURL  string `json:"preview_url"`
 }
 
 type GitCloneRequest struct {
@@ -348,6 +372,8 @@ func (s *Server) registerRoutes() {
 		api.POST("/compose/up", s.composeUp)
 		api.POST("/compose/down", s.composeDown)
 		api.POST("/compose/status", s.composeStatus)
+		api.GET("/compose/projects", s.listComposeProjects)
+		api.GET("/compose/projects/:projectName", s.getComposeProject)
 
 		api.POST("/git/clone", s.gitClone)
 
@@ -805,13 +831,184 @@ func (s *Server) composeStatus(c *gin.Context) {
 		return
 	}
 
-	var parsed any
-	if err := json.Unmarshal([]byte(stdout), &parsed); err != nil {
-		c.JSON(http.StatusOK, ComposeStatusResponse{Raw: stdout, Services: []any{}})
+	services := parseComposeStatusServices(stdout)
+	c.JSON(http.StatusOK, ComposeStatusResponse{Raw: stdout, Services: services})
+}
+
+func (s *Server) listComposeProjects(c *gin.Context) {
+	identity, ok := authIdentityFromContext(c)
+	if !ok {
+		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
 		return
 	}
 
-	c.JSON(http.StatusOK, ComposeStatusResponse{Raw: stdout, Services: parsed})
+	ownedProjects, err := s.ownedComposeProjects(identity.UserID)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+
+	containers, err := s.visibleManagedContainers(c.Request.Context(), identity)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+
+	projects := make([]ComposeProjectPreviewResponse, 0, len(ownedProjects))
+	for projectName := range ownedProjects {
+		projects = append(projects, buildComposeProjectPreview(projectName, containers))
+	}
+	sort.Slice(projects, func(i, j int) bool {
+		return projects[i].ProjectName < projects[j].ProjectName
+	})
+
+	c.JSON(http.StatusOK, projects)
+}
+
+func (s *Server) getComposeProject(c *gin.Context) {
+	identity, ok := authIdentityFromContext(c)
+	if !ok {
+		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
+		return
+	}
+
+	projectName := sanitizeComposeProjectName(strings.TrimSpace(c.Param("projectName")))
+	if projectName == "" {
+		writeError(c, http.StatusBadRequest, errors.New("compose project name is required"))
+		return
+	}
+
+	project, err := s.existingComposeProject(projectName)
+	if err != nil {
+		writeError(c, http.StatusNotFound, errors.New("compose project not found"))
+		return
+	}
+	if _, err := s.authorizeComposeProjectAccess(identity, project); err != nil {
+		writeError(c, http.StatusNotFound, errors.New("compose project not found"))
+		return
+	}
+
+	containers, err := s.visibleManagedContainers(c.Request.Context(), identity)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, buildComposeProjectPreview(project.ProjectName, containers))
+}
+
+func (s *Server) visibleManagedContainers(ctx context.Context, identity AuthIdentity) ([]ContainerSummary, error) {
+	containers, err := s.runtime.ListWorkloads(ctx)
+	if err != nil {
+		return nil, err
+	}
+	managedComposeProjects, err := s.managedComposeProjects()
+	if err != nil {
+		return nil, err
+	}
+	containers = s.filterManagedRuntimeContainers(containers, managedComposeProjects)
+	ownedContainerIDs, err := s.ownedRuntimeContainerIDs(ctx, identity.UserID)
+	if err != nil {
+		return nil, err
+	}
+	ownedComposeProjects, err := s.ownedComposeProjects(identity.UserID)
+	if err != nil {
+		return nil, err
+	}
+
+	visible := make([]ContainerSummary, 0, len(containers))
+	for _, item := range containers {
+		if s.runtimeContainerVisibleToIdentity(item, identity, ownedContainerIDs, ownedComposeProjects) {
+			item.PreviewURLs = s.previewURLsForContainer(item)
+			visible = append(visible, item)
+		}
+	}
+
+	return visible, nil
+}
+
+func buildComposeProjectPreview(projectName string, containers []ContainerSummary) ComposeProjectPreviewResponse {
+	servicesByName := map[string]*ComposeServicePreviewResponse{}
+	for _, item := range containers {
+		if strings.TrimSpace(item.ProjectName) != projectName {
+			continue
+		}
+		serviceName := strings.TrimSpace(item.ServiceName)
+		if serviceName == "" {
+			continue
+		}
+
+		service := servicesByName[serviceName]
+		if service == nil {
+			service = &ComposeServicePreviewResponse{ServiceName: serviceName, Ports: make([]ComposePublishedPortEntry, 0, len(item.Ports))}
+			servicesByName[serviceName] = service
+		}
+
+		seen := make(map[string]struct{}, len(service.Ports))
+		for _, port := range service.Ports {
+			seen[fmt.Sprintf("%d/%d/%s", port.PrivatePort, port.PublicPort, port.Type)] = struct{}{}
+		}
+		for _, port := range item.Ports {
+			if port.Private <= 0 || port.Public <= 0 {
+				continue
+			}
+			key := fmt.Sprintf("%d/%d/%s", port.Private, port.Public, port.Type)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			service.Ports = append(service.Ports, ComposePublishedPortEntry{
+				PrivatePort: port.Private,
+				PublicPort:  port.Public,
+				Type:        port.Type,
+				IP:          port.IP,
+				PreviewURL:  fmt.Sprintf("/proxy/compose/%s/%s/%d/", url.PathEscape(projectName), url.PathEscape(serviceName), port.Private),
+			})
+		}
+	}
+
+	services := make([]ComposeServicePreviewResponse, 0, len(servicesByName))
+	for _, service := range servicesByName {
+		sort.Slice(service.Ports, func(i, j int) bool {
+			if service.Ports[i].PrivatePort != service.Ports[j].PrivatePort {
+				return service.Ports[i].PrivatePort < service.Ports[j].PrivatePort
+			}
+			if service.Ports[i].PublicPort != service.Ports[j].PublicPort {
+				return service.Ports[i].PublicPort < service.Ports[j].PublicPort
+			}
+			return service.Ports[i].Type < service.Ports[j].Type
+		})
+		services = append(services, *service)
+	}
+	sort.Slice(services, func(i, j int) bool {
+		return services[i].ServiceName < services[j].ServiceName
+	})
+
+	return ComposeProjectPreviewResponse{ProjectName: projectName, Services: services}
+}
+
+func parseComposeStatusServices(raw string) []ComposeStatusService {
+	var parsed []map[string]any
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return []ComposeStatusService{}
+	}
+
+	services := make([]ComposeStatusService, 0, len(parsed))
+	for _, item := range parsed {
+		service := ComposeStatusService{}
+		if value, ok := item["Name"].(string); ok {
+			service.Name = strings.TrimSpace(value)
+		}
+		if value, ok := item["Service"].(string); ok {
+			service.Service = strings.TrimSpace(value)
+		}
+		if value, ok := item["State"].(string); ok {
+			service.State = strings.TrimSpace(value)
+		}
+		services = append(services, service)
+	}
+
+	return services
 }
 
 // gitClone godoc

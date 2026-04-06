@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -44,6 +45,12 @@ type ContainerSummary struct {
 	ServiceName  string            `json:"service_name,omitempty"`
 	Resettable   bool              `json:"resettable"`
 	Ports        []PortSummary     `json:"ports,omitempty"`
+	PreviewURLs  []PreviewURL      `json:"preview_urls,omitempty"`
+}
+
+type PreviewURL struct {
+	PrivatePort int    `json:"private_port"`
+	URL         string `json:"url"`
 }
 
 type PortSummary struct {
@@ -64,6 +71,7 @@ type SandboxResponse struct {
 	Status        string        `json:"status"`
 	OwnerUsername string        `json:"owner_username,omitempty"`
 	Ports         []PortSummary `json:"ports,omitempty"`
+	PreviewURLs   []PreviewURL  `json:"preview_urls,omitempty"`
 	CreatedAt     int64         `json:"created_at"`
 	UpdatedAt     int64         `json:"updated_at"`
 }
@@ -147,6 +155,7 @@ func (s *Server) listContainers(c *gin.Context) {
 	visible := make([]ContainerSummary, 0, len(containers))
 	for _, item := range containers {
 		if s.runtimeContainerVisibleToIdentity(item, identity, ownedContainerIDs, ownedComposeProjects) {
+			item.PreviewURLs = s.previewURLsForContainer(item)
 			visible = append(visible, item)
 		}
 	}
@@ -552,6 +561,7 @@ func (s *Server) listSandboxes(c *gin.Context) {
 		}
 		if ports, ok := portsByContainer[sandbox.ContainerID]; ok {
 			response.Ports = ports
+			response.PreviewURLs = previewURLsForSandbox(sandbox.ID, ports)
 		}
 		out = append(out, response)
 	}
@@ -570,6 +580,7 @@ func (s *Server) getSandbox(c *gin.Context) {
 		if runtime, ok := runtimeByContainer[sandbox.ContainerID]; ok {
 			response.Status = runtime.Status
 			response.Ports = runtime.Ports
+			response.PreviewURLs = previewURLsForSandbox(sandbox.ID, runtime.Ports)
 		}
 	}
 
@@ -1308,9 +1319,96 @@ func sandboxToResponse(sandbox store.Sandbox) SandboxResponse {
 		Status:        sandbox.Status,
 		OwnerUsername: sandbox.OwnerUsername,
 		Ports:         nil,
+		PreviewURLs:   nil,
 		CreatedAt:     sandbox.CreatedAt,
 		UpdatedAt:     sandbox.UpdatedAt,
 	}
+}
+
+func (s *Server) previewURLsForContainer(item ContainerSummary) []PreviewURL {
+	if sandboxID := strings.TrimSpace(item.Labels[labelOpenSandboxSandboxID]); sandboxID != "" {
+		return previewURLsForSandbox(sandboxID, item.Ports)
+	}
+
+	if managedID := strings.TrimSpace(item.Labels[labelOpenSandboxManagedID]); managedID != "" {
+		return previewURLsForManagedContainer(managedID, item.Ports)
+	}
+
+	projectName := strings.TrimSpace(item.ProjectName)
+	if projectName == "" {
+		projectName = strings.TrimSpace(item.Labels["com.docker.compose.project"])
+	}
+	serviceName := strings.TrimSpace(item.ServiceName)
+	if serviceName == "" {
+		serviceName = strings.TrimSpace(item.Labels["com.docker.compose.service"])
+	}
+	if projectName == "" || serviceName == "" {
+		return nil
+	}
+
+	return previewURLsForComposeService(projectName, serviceName, item.Ports)
+}
+
+func previewURLsForSandbox(sandboxID string, ports []PortSummary) []PreviewURL {
+	trimmedID := strings.TrimSpace(sandboxID)
+	if trimmedID == "" {
+		return nil
+	}
+	return previewURLsForPorts(ports, func(privatePort int) string {
+		return fmt.Sprintf("/proxy/sandboxes/%s/%d/", url.PathEscape(trimmedID), privatePort)
+	}, false)
+}
+
+func previewURLsForManagedContainer(managedID string, ports []PortSummary) []PreviewURL {
+	trimmedID := strings.TrimSpace(managedID)
+	if trimmedID == "" {
+		return nil
+	}
+	return previewURLsForPorts(ports, func(privatePort int) string {
+		return fmt.Sprintf("/proxy/containers/%s/%d/", url.PathEscape(trimmedID), privatePort)
+	}, false)
+}
+
+func previewURLsForComposeService(projectName string, serviceName string, ports []PortSummary) []PreviewURL {
+	trimmedProject := strings.TrimSpace(projectName)
+	trimmedService := strings.TrimSpace(serviceName)
+	if trimmedProject == "" || trimmedService == "" {
+		return nil
+	}
+	return previewURLsForPorts(ports, func(privatePort int) string {
+		return fmt.Sprintf("/proxy/compose/%s/%s/%d/", url.PathEscape(trimmedProject), url.PathEscape(trimmedService), privatePort)
+	}, true)
+}
+
+func previewURLsForPorts(ports []PortSummary, buildURL func(privatePort int) string, requirePublished bool) []PreviewURL {
+	if len(ports) == 0 {
+		return nil
+	}
+
+	seenPrivatePorts := make(map[int]struct{}, len(ports))
+	previewURLs := make([]PreviewURL, 0, len(ports))
+	for _, port := range ports {
+		if port.Private <= 0 {
+			continue
+		}
+		if requirePublished && port.Public <= 0 {
+			continue
+		}
+		if _, exists := seenPrivatePorts[port.Private]; exists {
+			continue
+		}
+		seenPrivatePorts[port.Private] = struct{}{}
+		previewURLs = append(previewURLs, PreviewURL{PrivatePort: port.Private, URL: buildURL(port.Private)})
+	}
+
+	sort.Slice(previewURLs, func(i, j int) bool {
+		return previewURLs[i].PrivatePort < previewURLs[j].PrivatePort
+	})
+
+	if len(previewURLs) == 0 {
+		return nil
+	}
+	return previewURLs
 }
 
 func extractSingleFileFromTar(reader io.Reader) (string, string, error) {
