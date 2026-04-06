@@ -40,7 +40,7 @@
 	import { Effect } from "effect";
 	import { clientState, setAuthSession, setBaseUrl } from "$lib/stores.svelte";
 	import { toast } from "$lib/toast.svelte";
-	import { clearScheduledInterval, scheduleInterval, scheduleTimeout } from "$lib/client/browser";
+	import { scheduleTimeout } from "$lib/client/browser";
 
 	// ── Sidebar collapse ───────────────────────────────────────────────────────
 	// (managed in PageShell, but we need nothing here for +page.svelte)
@@ -516,7 +516,7 @@
 	}
 
 	function openContainer(id: string): void {
-		void goto(`/containers/${encodeURIComponent(id)}`);
+		void goto(`/services/${encodeURIComponent(id)}`);
 	}
 
 	function replaceActiveContainer(id: string): void {
@@ -529,21 +529,6 @@
 		if (clientState.isAuthenticated) void refreshData();
 	});
 
-	$effect(() => {
-		if (!clientState.isAuthenticated) {
-			return;
-		}
-		const interval = scheduleInterval(() => {
-			void refreshData({
-				includeImages: false,
-				showLoading: false,
-				notifyOnError: false,
-				pollingSafeRetry: true,
-				force: true
-			});
-		}, 5000);
-		return () => clearScheduledInterval(interval);
-	});
 </script>
 
 {#if !clientState.authResolved}

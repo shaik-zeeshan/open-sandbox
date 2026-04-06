@@ -16,7 +16,7 @@ services:
       - --providers.file.directory=/etc/traefik/dynamic
       - --providers.file.watch=true
     volumes:
-      - ${OPEN_SANDBOX_DATA_DIR:?set OPEN_SANDBOX_DATA_DIR in .env}/traefik/dynamic:/etc/traefik/dynamic:ro
+      - traefik-dynamic:/etc/traefik/dynamic:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -48,7 +48,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${OPEN_SANDBOX_DATA_DIR:?set OPEN_SANDBOX_DATA_DIR in .env}/db:/data
       - ${OPEN_SANDBOX_DATA_DIR:?set OPEN_SANDBOX_DATA_DIR in .env}/workspace:${OPEN_SANDBOX_DATA_DIR:?set OPEN_SANDBOX_DATA_DIR in .env}/workspace
-      - ${OPEN_SANDBOX_DATA_DIR:?set OPEN_SANDBOX_DATA_DIR in .env}/traefik/dynamic:/traefik/dynamic
+      - traefik-dynamic:/traefik/dynamic
     expose:
       - "8080"
 
@@ -63,3 +63,6 @@ services:
     pids_limit: 128
     expose:
       - "80"
+
+volumes:
+  traefik-dynamic:

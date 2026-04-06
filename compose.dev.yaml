@@ -12,7 +12,7 @@ services:
       - --providers.file.directory=/etc/traefik/dynamic
       - --providers.file.watch=true
     volumes:
-      - ${OPEN_SANDBOX_DATA_DIR:-/tmp/open-sandbox}/traefik/dynamic:/etc/traefik/dynamic:ro
+      - traefik-dynamic:/etc/traefik/dynamic:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -50,7 +50,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${OPEN_SANDBOX_DATA_DIR:-/tmp/open-sandbox}/db:/data
       - ${OPEN_SANDBOX_DATA_DIR:-/tmp/open-sandbox}/workspace:${OPEN_SANDBOX_DATA_DIR:-/tmp/open-sandbox}/workspace
-      - ${OPEN_SANDBOX_DATA_DIR:-/tmp/open-sandbox}/traefik/dynamic:/traefik/dynamic
+      - traefik-dynamic:/traefik/dynamic
       - go-mod-cache:/go/pkg/mod
       - go-build-cache:/go-cache
     expose:
@@ -76,3 +76,4 @@ volumes:
   bun-modules:
   go-mod-cache:
   go-build-cache:
+  traefik-dynamic:

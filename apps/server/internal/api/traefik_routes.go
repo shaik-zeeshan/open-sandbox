@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	traefikcfg "github.com/shaik-zeeshan/open-sandbox/internal/traefik"
@@ -46,23 +47,107 @@ func (s *Server) syncTraefikRoutes(ctx context.Context) {
 		return
 	}
 
-	routes, err := s.currentTraefikRoutes(ctx)
-	if err != nil {
-		s.logger.Warn("traefik_route_sync_failed", slog.String("reason", err.Error()))
-		return
-	}
+	syncCtx, cancel := traefikSyncContext(ctx)
+	defer cancel()
 
-	if err := s.traefikWriter.Reconcile(routes); err != nil {
-		s.logger.Warn("traefik_route_sync_failed", slog.String("reason", err.Error()))
-		return
-	}
-
-	s.logger.Info(
-		"traefik_route_sync_complete",
-		slog.Int("sandbox_count", len(routes.Sandboxes)),
-		slog.Int("container_count", len(routes.Containers)),
-		slog.Int("compose_project_count", len(routes.ComposeProjects)),
+	const maxAttempts = 3
+	var (
+		routes traefikcfg.WorkloadRoutes
+		err    error
 	)
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		routes, err = s.currentTraefikRoutes(syncCtx)
+		if err == nil {
+			err = s.traefikWriter.Reconcile(routes)
+		}
+		if err == nil {
+			routeSummary := summarizeTraefikRouteKeys(routes)
+			s.logger.Info(
+				"traefik_route_sync_complete",
+				slog.Int("sandbox_count", len(routes.Sandboxes)),
+				slog.Int("container_count", len(routes.Containers)),
+				slog.Int("compose_project_count", len(routes.ComposeProjects)),
+				slog.Any("sandbox_ids", routeSummary.Sandboxes),
+				slog.Any("container_ids", routeSummary.Containers),
+				slog.Any("compose_projects", routeSummary.ComposeProjects),
+				slog.Int("attempt", attempt),
+			)
+			return
+		}
+		if attempt == maxAttempts || syncCtx.Err() != nil {
+			break
+		}
+		if !sleepWithContext(syncCtx, 250*time.Millisecond) {
+			break
+		}
+	}
+
+	s.logger.Warn(
+		"traefik_route_sync_failed",
+		slog.String("reason", err.Error()),
+		slog.Int("attempts", maxAttempts),
+	)
+	return
+
+}
+
+type traefikRouteKeySummary struct {
+	Sandboxes       []string
+	Containers      []string
+	ComposeProjects []string
+}
+
+func summarizeTraefikRouteKeys(routes traefikcfg.WorkloadRoutes) traefikRouteKeySummary {
+	return traefikRouteKeySummary{
+		Sandboxes:       summarizeMapKeys(routes.Sandboxes, 10),
+		Containers:      summarizeMapKeys(routes.Containers, 10),
+		ComposeProjects: summarizeMapKeys(routes.ComposeProjects, 10),
+	}
+}
+
+func summarizeMapKeys[T any](entries map[string]T, limit int) []string {
+	if len(entries) == 0 {
+		return nil
+	}
+	keys := sortedRouteKeys(entries)
+	if limit <= 0 || len(keys) <= limit {
+		return keys
+	}
+	return keys[:limit]
+}
+
+func sortedRouteKeys[T any](entries map[string]T) []string {
+	keys := make([]string, 0, len(entries))
+	for key := range entries {
+		trimmed := strings.TrimSpace(key)
+		if trimmed == "" {
+			continue
+		}
+		keys = append(keys, trimmed)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func traefikSyncContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(context.WithoutCancel(parent), 10*time.Second)
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (s *Server) currentTraefikRoutes(ctx context.Context) (traefikcfg.WorkloadRoutes, error) {

@@ -85,6 +85,12 @@
 	const sandboxContainerIDs = $derived(new Set(sandboxes.map((sandbox: Sandbox) => sandbox.id)));
 	const runtimeContainers = $derived(containers.filter((container: ContainerSummary) => !sandboxContainerIDs.has(container.id)));
 
+	const composeLabelsForContainer = (container: ContainerSummary): { project: string; service: string } => {
+		const project = (container.project_name ?? container.labels?.["com.docker.compose.project"] ?? "").trim();
+		const service = (container.service_name ?? container.labels?.["com.docker.compose.service"] ?? "").trim();
+		return { project, service };
+	};
+
 	const toTitleCase = (value: string): string =>
 		value
 			.split(/[-_\s]+/)
@@ -137,6 +143,8 @@
 		const sandboxItems = sandboxes.map((sandbox: Sandbox) => {
 			const backingContainer = containers.find((c: ContainerSummary) => c.id === sandbox.id);
 			const statusFilter = normalizedStatus(sandbox.status);
+			const owner = sandbox.owner_username?.trim() ?? "";
+			const workspaceDir = sandbox.workspace_dir.trim().length > 0 ? sandbox.workspace_dir : "/";
 			return {
 			key: `sandbox:${sandbox.id}`,
 			kind: "sandbox" as const,
@@ -147,21 +155,23 @@
 			containerId: sandbox.container_id,
 			previewUrls: backingContainer?.preview_urls ?? sandbox.preview_urls ?? [],
 			createdAt: sandbox.created_at,
-			metaLabel: sandbox.owner_username ? "Owner" : "",
-			metaValue: sandbox.owner_username ?? "",
+			metaLabel: "Sandbox",
+			metaValue: owner.length > 0 ? `${owner} · ${workspaceDir}` : `Workspace ${workspaceDir}`,
 			canReset: true,
 			statusFilterValue: statusFilter.value,
 			statusFilterLabel: statusFilter.label,
-			searchText: [sandbox.name, sandbox.image, sandbox.owner_username ?? "", sandbox.id, sandbox.container_id].join(" ").toLowerCase()
+			searchText: [sandbox.name, sandbox.image, owner, workspaceDir, sandbox.id, sandbox.container_id].join(" ").toLowerCase()
 			};
 		});
 
 		const containerItems = runtimeContainers.map((container: ContainerSummary) => {
-			const composeProject = container.project_name ?? container.labels?.["com.docker.compose.project"] ?? "";
-			const composeService = container.service_name ?? container.labels?.["com.docker.compose.service"] ?? "";
+			const { project: composeProject, service: composeService } = composeLabelsForContainer(container);
 			const workloadKind = composeProject ? "compose" : "container";
 			const primaryName = container.names[0] ?? container.id.slice(0, 12);
-			const metaValue = composeProject ? `${composeProject}${composeService ? ` / ${composeService}` : ""}` : "Runtime container";
+			const composeServiceName = composeService || primaryName;
+			const metaValue = composeProject
+				? `${composeProject} / ${composeServiceName}`
+				: "Advanced / API-created";
 			const statusFilter = normalizedStatus(container.state || container.status);
 			return {
 				key: `${workloadKind}:${container.id}`,
@@ -174,7 +184,7 @@
 				containerId: container.container_id,
 				previewUrls: container.preview_urls ?? [],
 				createdAt: container.created ?? null,
-				metaLabel: composeProject ? "Compose" : "Type",
+				metaLabel: composeProject ? "Compose service" : "Standalone container",
 				metaValue,
 				canReset: container.resettable,
 				showActions: true,
@@ -209,8 +219,8 @@
 					containerId: "compose",
 					previewUrls,
 					createdAt: null,
-					metaLabel: "Compose",
-					metaValue: `${project.serviceCount} services`,
+					metaLabel: "Compose service",
+					metaValue: `${project.projectName} / ${project.serviceCount} services`,
 					canReset: false,
 					showActions: false,
 					statusFilterValue: statusFilter.value,
@@ -231,10 +241,7 @@
 	const filteredWorkloads = $derived.by(() => {
 		const query = workloadSearch.trim().toLowerCase();
 		return workloads.filter((item) => {
-			if (workloadKindFilter === "sandbox" && item.kind !== "sandbox" && item.kind !== "compose") {
-				return false;
-			}
-			if (workloadKindFilter !== "all" && workloadKindFilter !== "sandbox" && item.kind !== workloadKindFilter) {
+			if (workloadKindFilter !== "all" && item.kind !== workloadKindFilter) {
 				return false;
 			}
 			if (workloadStatusFilter !== "all" && item.statusFilterValue !== workloadStatusFilter) {
@@ -379,8 +386,8 @@
 					<select class="filter-select" bind:value={workloadKindFilter}>
 						<option value="all">All</option>
 						<option value="sandbox">Sandboxes</option>
-						<option value="container">Containers</option>
 						<option value="compose">Compose services</option>
+						<option value="container">Standalone containers</option>
 					</select>
 				</label>
 				<span class="filter-sep" aria-hidden="true"></span>

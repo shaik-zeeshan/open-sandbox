@@ -481,6 +481,42 @@ func TestListComposeProjectsReconcilesTraefikRouteFiles(t *testing.T) {
 	}
 }
 
+func TestSyncTraefikRoutesUsesContextWithoutCancel(t *testing.T) {
+	originalCommandRunner := commandRunner
+	defer func() { commandRunner = originalCommandRunner }()
+	commandRunner = func(_ context.Context, name string, args ...string) (string, string, error) {
+		if name == "docker" && len(args) >= 3 && args[0] == "ps" && args[1] == "-a" {
+			return `{"ID":"compose-web","Image":"nginx:latest","Names":"demo-web-1","Ports":"0.0.0.0:50080->80/tcp","Status":"Up 1 minute","Labels":"com.docker.compose.project=demo,com.docker.compose.service=web"}` + "\n", "", nil
+		}
+		return "", "", errors.New("unexpected command")
+	}
+
+	dynamicDir := filepath.Join(t.TempDir(), "traefik", "dynamic")
+	t.Setenv("SANDBOX_TRAEFIK_DYNAMIC_CONFIG_DIR", dynamicDir)
+	s := newTestServer(&mockDocker{})
+	s.workspaceRoot = t.TempDir()
+	projectDir := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", "demo")
+	if err := ensurePrivateDir(projectDir); err != nil {
+		t.Fatalf("create compose project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "docker-compose.yml"), []byte("services:\n  web:\n    image: nginx:latest\n"), 0o600); err != nil {
+		t.Fatalf("write compose file: %v", err)
+	}
+
+	routeFile := filepath.Join(dynamicDir, "compose-demo.yaml")
+	if err := os.Remove(routeFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("remove seeded compose route file: %v", err)
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.syncTraefikRoutes(canceled)
+
+	if _, err := os.Stat(routeFile); err != nil {
+		t.Fatalf("expected compose route file to be reconciled with canceled context, err=%v", err)
+	}
+}
+
 func TestWorkerRegisterAndHeartbeat(t *testing.T) {
 	t.Setenv("SANDBOX_WORKER_SHARED_SECRET", "worker-secret")
 	store := newSQLiteStoreForAPITest(t)
@@ -571,6 +607,87 @@ func TestListImagesEndpoint(t *testing.T) {
 
 	if len(body) != 1 || body[0].ID != "sha256:abc" {
 		t.Fatalf("unexpected response body: %s", w.Body.String())
+	}
+}
+
+func TestRemoveImageEndpoint(t *testing.T) {
+	var capturedID string
+	var capturedForce bool
+
+	m := &mockDocker{
+		imageRemoveFn: func(_ context.Context, imageID string, options image.RemoveOptions) ([]image.DeleteResponse, error) {
+			capturedID = imageID
+			capturedForce = options.Force
+			return []image.DeleteResponse{{Deleted: "sha256:abc"}}, nil
+		},
+	}
+
+	s := newTestServer(m)
+	req := httptest.NewRequest(http.MethodDelete, "/api/images/sha256:abc?force=true", nil)
+	setAuthHeader(t, req)
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if capturedID != "sha256:abc" {
+		t.Fatalf("expected image id sha256:abc, got %q", capturedID)
+	}
+	if !capturedForce {
+		t.Fatal("expected force=true to be passed to docker")
+	}
+}
+
+func TestRemoveImageEndpointReturnsNotFound(t *testing.T) {
+	m := &mockDocker{
+		imageRemoveFn: func(context.Context, string, image.RemoveOptions) ([]image.DeleteResponse, error) {
+			return nil, errdefs.NotFound(errors.New("no such image"))
+		},
+	}
+
+	s := newTestServer(m)
+	req := httptest.NewRequest(http.MethodDelete, "/api/images/sha256:missing", nil)
+	setAuthHeader(t, req)
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d (%s)", w.Code, w.Body.String())
+	}
+}
+
+func TestRemoveImageEndpointReturnsConflict(t *testing.T) {
+	m := &mockDocker{
+		imageRemoveFn: func(context.Context, string, image.RemoveOptions) ([]image.DeleteResponse, error) {
+			return nil, errdefs.Conflict(errors.New("image is being used by running container"))
+		},
+	}
+
+	s := newTestServer(m)
+	req := httptest.NewRequest(http.MethodDelete, "/api/images/sha256:abc", nil)
+	setAuthHeader(t, req)
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d (%s)", w.Code, w.Body.String())
+	}
+}
+
+func TestRemoveImageEndpointRejectsInvalidForceQuery(t *testing.T) {
+	s := newTestServer(&mockDocker{})
+	req := httptest.NewRequest(http.MethodDelete, "/api/images/sha256:abc?force=definitely", nil)
+	setAuthHeader(t, req)
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (%s)", w.Code, w.Body.String())
 	}
 }
 
@@ -974,6 +1091,9 @@ func TestComposeDownIncludesOptionalFlags(t *testing.T) {
 	expectedProjectDir := filepath.Join(workspaceRoot, ".open-sandbox", "compose", "sandbox")
 	if capturedDir != expectedProjectDir {
 		t.Fatalf("expected compose command dir %q, got %q", expectedProjectDir, capturedDir)
+	}
+	if _, err := os.Stat(expectedProjectDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected compose project artifacts to be removed, stat err=%v", err)
 	}
 }
 

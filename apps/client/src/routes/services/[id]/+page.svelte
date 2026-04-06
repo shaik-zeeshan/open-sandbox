@@ -2,7 +2,6 @@
 	import { goto } from "$app/navigation";
 	import { page } from "$app/stores";
 	import { authController, checkHealth, signOut } from "$lib/auth-controller.svelte";
-	import { clearScheduledInterval, scheduleInterval } from "$lib/client/browser";
 	import PageShell from "$lib/components/PageShell.svelte";
 	import SandboxWorkspace from "$lib/components/SandboxWorkspace.svelte";
 	import { clientState } from "$lib/stores.svelte";
@@ -27,6 +26,28 @@
 	let loading = $state(false);
 	let errorMessage = $state("");
 	let missingContainer = $state(false);
+	let expectedRuntimeLabel = $state<"compose service" | "container">("container");
+
+	const runtimeKind = $derived.by(() => {
+		if (runtimeContainer === null) {
+			return expectedRuntimeLabel;
+		}
+		const composeProject = (runtimeContainer.project_name ?? runtimeContainer.labels?.["com.docker.compose.project"] ?? "").trim();
+		const workloadKind = (runtimeContainer.workload_kind ?? "").trim().toLowerCase();
+		if (composeProject.length > 0 || workloadKind === "compose") {
+			return "compose service" as const;
+		}
+		return "container" as const;
+	});
+
+	const loadingTitle = $derived(runtimeKind === "compose service" ? "Loading compose service..." : "Loading container...");
+	const missingTitle = $derived(runtimeKind === "compose service" ? "Compose service not found" : "Container not found");
+	const missingSubtitle = $derived(
+		runtimeKind === "compose service"
+			? "This compose service may have been removed."
+			: "This container may have been removed."
+	);
+	const errorTitle = $derived(runtimeKind === "compose service" ? "Unable to load compose service" : "Unable to load container");
 
 	async function refreshData(options?: RefreshOptions): Promise<void> {
 		const showLoading = options?.showLoading ?? true;
@@ -45,6 +66,11 @@
 			]);
 			const foundContainer = containers.find((item) => item.id === containerId) ?? null;
 			runtimeContainer = foundContainer;
+			if (foundContainer !== null) {
+				const composeProject = (foundContainer.project_name ?? foundContainer.labels?.["com.docker.compose.project"] ?? "").trim();
+				const workloadKind = (foundContainer.workload_kind ?? "").trim().toLowerCase();
+				expectedRuntimeLabel = composeProject.length > 0 || workloadKind === "compose" ? "compose service" : "container";
+			}
 			sandbox = foundContainer ? (sandboxes.find((item) => item.id === foundContainer.id) ?? null) : null;
 			missingContainer = foundContainer === null;
 		} catch (error) {
@@ -65,20 +91,12 @@
 		runtimeContainer = null;
 		missingContainer = false;
 		errorMessage = "";
+		expectedRuntimeLabel = "container";
 		if (clientState.isAuthenticated) {
 			void refreshData();
 		}
 	});
 
-	$effect(() => {
-		if (!clientState.isAuthenticated) {
-			return;
-		}
-		const interval = scheduleInterval(() => {
-			void refreshData({ showLoading: false, notifyOnError: false });
-		}, 5000);
-		return () => clearScheduledInterval(interval);
-	});
 </script>
 
 {#if !clientState.authResolved}
@@ -99,17 +117,17 @@
 	>
 		{#if loading && runtimeContainer === null && !missingContainer && errorMessage.length === 0}
 			<div class="panel-card">
-				<p class="panel-title">Loading compose service...</p>
+				<p class="panel-title">{loadingTitle}</p>
 			</div>
 		{:else if missingContainer}
 			<div class="panel-card">
-				<p class="panel-title">Service not found</p>
-				<p class="panel-subtitle">This compose service may have been removed.</p>
+				<p class="panel-title">{missingTitle}</p>
+				<p class="panel-subtitle">{missingSubtitle}</p>
 				<button class="btn-ghost btn-sm" type="button" onclick={() => void goto("/")}>Back to workloads</button>
 			</div>
 		{:else if errorMessage.length > 0 && runtimeContainer === null}
 			<div class="panel-card">
-				<p class="panel-title">Unable to load service</p>
+				<p class="panel-title">{errorTitle}</p>
 				<p class="panel-subtitle">{errorMessage}</p>
 				<button class="btn-ghost btn-sm" type="button" onclick={() => void refreshData()}>Try again</button>
 			</div>
@@ -118,10 +136,11 @@
 				{sandbox}
 				container={runtimeContainer}
 				runtimeContainer={runtimeContainer}
+				showTerminal={false}
 				config={clientState.config}
 				onBack={() => void goto("/")}
 				onRefresh={() => refreshData({ showLoading: false, notifyOnError: true })}
-				onContainerReplaced={(id) => { void goto(`/containers/${encodeURIComponent(id)}`); }}
+				onContainerReplaced={(id) => { void goto(`/services/${encodeURIComponent(id)}`); }}
 				onDeleted={() => { void goto("/"); }}
 			/>
 		{/if}

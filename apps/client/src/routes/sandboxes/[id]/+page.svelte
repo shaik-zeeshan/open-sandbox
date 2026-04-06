@@ -2,7 +2,6 @@
 	import { goto } from "$app/navigation";
 	import { page } from "$app/stores";
 	import { authController, checkHealth, signOut } from "$lib/auth-controller.svelte";
-	import { clearScheduledInterval, scheduleInterval } from "$lib/client/browser";
 	import PageShell from "$lib/components/PageShell.svelte";
 	import SandboxWorkspace from "$lib/components/SandboxWorkspace.svelte";
 	import { clientState } from "$lib/stores.svelte";
@@ -63,15 +62,6 @@
 		}
 	});
 
-	$effect(() => {
-		if (!clientState.isAuthenticated) {
-			return;
-		}
-		const interval = scheduleInterval(() => {
-			void refreshData({ showLoading: false, notifyOnError: false });
-		}, 5000);
-		return () => clearScheduledInterval(interval);
-	});
 </script>
 
 {#if !clientState.authResolved}

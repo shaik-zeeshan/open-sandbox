@@ -497,14 +497,8 @@ func writeFileIfChanged(path string, content []byte) error {
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("read traefik config %q: %w", path, err)
 	}
-
-	tmpPath := path + ".tmp"
-	if writeErr := os.WriteFile(tmpPath, content, 0o644); writeErr != nil {
+	if writeErr := os.WriteFile(path, content, 0o644); writeErr != nil {
 		return fmt.Errorf("write traefik config %q: %w", path, writeErr)
-	}
-	if renameErr := os.Rename(tmpPath, path); renameErr != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("replace traefik config %q: %w", path, renameErr)
 	}
 	return nil
 }

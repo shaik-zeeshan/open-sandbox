@@ -632,14 +632,35 @@ func (s *Server) listImages(c *gin.Context) {
 // @Param id path string true "Image ID or tag"
 // @Param force query bool false "Force remove"
 // @Success 200 {object} RemoveImageResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 404 {object} ErrorResponse
+// @Failure 409 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
 // @Router /api/images/{id} [delete]
 func (s *Server) removeImage(c *gin.Context) {
-	force, _ := strconv.ParseBool(c.DefaultQuery("force", "false"))
+	force := false
+	forceQuery := strings.TrimSpace(c.Query("force"))
+	if forceQuery != "" {
+		parsed, err := strconv.ParseBool(forceQuery)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, fmt.Errorf("invalid force query value %q", forceQuery))
+			return
+		}
+		force = parsed
+	}
 
 	deleted, err := s.docker.ImageRemove(c.Request.Context(), c.Param("id"), image.RemoveOptions{Force: force, PruneChildren: true})
 	if err != nil {
-		writeError(c, http.StatusInternalServerError, err)
+		switch {
+		case errdefs.IsNotFound(err) || isMissingImageError(err):
+			writeError(c, http.StatusNotFound, err)
+		case errdefs.IsConflict(err):
+			writeError(c, http.StatusConflict, err)
+		case errdefs.IsInvalidParameter(err):
+			writeError(c, http.StatusBadRequest, err)
+		default:
+			writeError(c, http.StatusInternalServerError, err)
+		}
 		return
 	}
 
@@ -809,9 +830,32 @@ func (s *Server) composeDown(c *gin.Context) {
 		writeErrorWithDetails(c, http.StatusInternalServerError, "compose down failed", "command_failed", strings.TrimSpace(stderr))
 		return
 	}
+	if err := s.removeComposeProjectArtifacts(project); err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
 	s.syncTraefikRoutes(c.Request.Context())
 
 	c.JSON(http.StatusOK, ComposeResponse{Stdout: stdout, Stderr: stderr})
+}
+
+func (s *Server) removeComposeProjectArtifacts(project composeProjectContext) error {
+	composeRoot := filepath.Clean(filepath.Join(s.workspaceRoot, ".open-sandbox", "compose"))
+	projectDir := filepath.Clean(project.ProjectDir)
+	if projectDir == composeRoot {
+		return errors.New("refusing to remove compose root")
+	}
+	rel, err := filepath.Rel(composeRoot, projectDir)
+	if err != nil {
+		return fmt.Errorf("resolve compose project path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return errors.New("compose project path escapes managed root")
+	}
+	if err := os.RemoveAll(projectDir); err != nil {
+		return fmt.Errorf("remove compose project artifacts: %w", err)
+	}
+	return nil
 }
 
 // composeStatus godoc

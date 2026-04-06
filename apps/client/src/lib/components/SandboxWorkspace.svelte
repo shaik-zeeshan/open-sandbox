@@ -42,6 +42,7 @@
 		sandbox = null,
 		container,
 		runtimeContainer = null,
+		showTerminal = true,
 		config,
 		onBack,
 		onRefresh,
@@ -51,6 +52,7 @@
 		sandbox?: Sandbox | null;
 		container: ContainerSummary | null;
 		runtimeContainer?: ContainerSummary | null;
+		showTerminal?: boolean;
 		config: ApiConfig;
 		onBack: () => void;
 		onRefresh: () => Promise<void> | void;
@@ -330,7 +332,17 @@
 	};
 
 	const workloadKind = $derived(runtimeContainer ? "container" : "sandbox");
-	const workloadLabel = $derived(workloadKind === "sandbox" ? "sandbox" : "container");
+	const runtimeComposeProject = $derived((runtimeContainer?.project_name ?? runtimeContainer?.labels?.["com.docker.compose.project"] ?? "").trim());
+	const runtimeWorkloadKind = $derived((runtimeContainer?.workload_kind ?? "").trim().toLowerCase());
+	const workloadLabel = $derived.by(() => {
+		if (workloadKind === "sandbox") {
+			return "sandbox";
+		}
+		if (runtimeComposeProject.length > 0 || runtimeWorkloadKind === "compose") {
+			return "compose service";
+		}
+		return "container";
+	});
 	const activeContainer = $derived(runtimeContainer ?? container);
 	const targetId = $derived(workloadKind === "sandbox" ? (sandbox?.id ?? "") : (runtimeContainer?.id ?? ""));
 	const backingContainerId = $derived(runtimeContainer?.container_id ?? sandbox?.container_id ?? container?.container_id ?? "");
@@ -564,7 +576,7 @@
 					await loadPath(workspaceDirValue);
 				} else {
 					if (!canReset) {
-						throw new Error("Reset is only available for managed direct containers and compose workloads.");
+						throw new Error("Reset is only available for managed standalone containers and compose services.");
 					}
 					const result = await runApiEffect(resetContainer(config, targetId));
 					Effect.runSync(invalidateWorkloadCaches(config));
@@ -599,19 +611,25 @@
 		}
 	}
 
-	const tabs: Array<{ id: WorkspaceTab; label: string }> = [
+	const tabs = $derived.by<Array<{ id: WorkspaceTab; label: string }>>(() => [
 		{ id: "overview", label: "Overview" },
-		{ id: "terminal", label: "Terminal" },
-		{ id: "files",    label: "Files"    },
-		{ id: "logs",     label: "Logs"     }
-	];
+		...(showTerminal ? [{ id: "terminal" as const, label: "Terminal" }] : []),
+		{ id: "files", label: "Files" },
+		{ id: "logs", label: "Logs" }
+	]);
+
+	$effect(() => {
+		if (!showTerminal && activeTab === "terminal") {
+			activeTab = "overview";
+		}
+	});
 </script>
 
 <div class="workspace anim-fade-up">
 	<!-- ── Workspace header ───────────────────────────────────────────────────── -->
 	<header class="ws-header">
 		<div class="ws-header-left">
-			<button class="back-btn" type="button" onclick={onBack} aria-label="Back to sandbox list">
+			<button class="back-btn" type="button" onclick={onBack} aria-label={`Back to workloads list from this ${workloadLabel}`}>
 				<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 					<polyline points="15 18 9 12 15 6"/>
 				</svg>
@@ -695,7 +713,9 @@
 						<span class="meta-value mono">{backingContainerId.slice(0, 16)}</span>
 					</div>
 					<div class="meta-card">
-						<span class="meta-label">{workloadKind === "sandbox" ? "Workspace" : "Default path"}</span>
+						<span class="meta-label">
+							{workloadLabel === "sandbox" ? "Workspace" : workloadLabel === "compose service" ? "Compose service path" : "Container path"}
+						</span>
 						<span class="meta-value mono">{workspaceMetaValue}</span>
 					</div>
 					{#if workloadCreatedAt > 0}
@@ -718,26 +738,28 @@
 
 				<!-- Quick actions -->
 				<div class="quick-actions">
-					<button class="quick-btn" type="button" onclick={() => activeTab = "terminal"}>
-						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-							<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
-						</svg>
-						<span class="quick-btn-label">Open Terminal</span>
-						<span class="quick-btn-sub">Run commands in this {workloadLabel}</span>
-					</button>
+					{#if showTerminal}
+						<button class="quick-btn" type="button" onclick={() => activeTab = "terminal"}>
+							<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+								<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
+							</svg>
+							<span class="quick-btn-label">Open Terminal</span>
+							<span class="quick-btn-sub">Run commands in this {workloadLabel}</span>
+						</button>
+					{/if}
 					<button class="quick-btn" type="button" onclick={() => activeTab = "files"} disabled={!canBrowseFiles}>
 						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
 							<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/>
 						</svg>
 						<span class="quick-btn-label">Browse Files</span>
-						<span class="quick-btn-sub">Read, edit and upload files</span>
+						<span class="quick-btn-sub">Read, edit and upload files for this {workloadLabel}</span>
 					</button>
 					<button class="quick-btn" type="button" onclick={() => { activeTab = "logs"; void startLogs(); }}>
 						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
 							<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
 						</svg>
 						<span class="quick-btn-label">Stream Logs</span>
-						<span class="quick-btn-sub">Live container output</span>
+						<span class="quick-btn-sub">Live {workloadLabel} output</span>
 					</button>
 				</div>
 			</div>

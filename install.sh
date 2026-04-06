@@ -19,7 +19,7 @@ NETWORK_NAME="open-sandbox"
 SERVER_CONTAINER_NAME="open-sandbox-server"
 CLIENT_CONTAINER_NAME="open-sandbox-client"
 TRAEFIK_CONTAINER_NAME="open-sandbox-traefik"
-TRAEFIK_DYNAMIC_CONFIG_DIR="$DATA_DIR/traefik/dynamic"
+TRAEFIK_DYNAMIC_VOLUME="open-sandbox-traefik-dynamic"
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -65,6 +65,16 @@ ensure_network() {
   docker network create "$NETWORK_NAME" >/dev/null
 }
 
+ensure_volume() {
+  local volume_name="$1"
+
+  if docker volume inspect "$volume_name" >/dev/null 2>&1; then
+    return
+  fi
+
+  docker volume create "$volume_name" >/dev/null
+}
+
 wait_for_server_health() {
   local status
 
@@ -90,11 +100,10 @@ require_command openssl
 require_command curl
 require_command grep
 
-run_sudo mkdir -p "$DATA_DIR" "$DB_DIR" "$WORKSPACE_DIR" "$CONFIG_DIR" "$TRAEFIK_DYNAMIC_CONFIG_DIR"
-run_sudo chown root:root "$DATA_DIR" "$DB_DIR" "$WORKSPACE_DIR" "$TRAEFIK_DYNAMIC_CONFIG_DIR"
+run_sudo mkdir -p "$DATA_DIR" "$DB_DIR" "$WORKSPACE_DIR" "$CONFIG_DIR"
+run_sudo chown root:root "$DATA_DIR" "$DB_DIR" "$WORKSPACE_DIR"
 run_sudo chmod 755 "$DATA_DIR"
 run_sudo chmod 770 "$DB_DIR" "$WORKSPACE_DIR"
-run_sudo chmod 755 "$TRAEFIK_DYNAMIC_CONFIG_DIR"
 run_sudo chown "$INSTALL_USER:$INSTALL_GROUP" "$CONFIG_DIR"
 run_sudo chmod 700 "$CONFIG_DIR"
 
@@ -129,6 +138,7 @@ docker pull "$CLIENT_IMAGE"
 docker pull "$TRAEFIK_IMAGE"
 
 ensure_network
+ensure_volume "$TRAEFIK_DYNAMIC_VOLUME"
 remove_container_if_present "$TRAEFIK_CONTAINER_NAME"
 remove_container_if_present "$CLIENT_CONTAINER_NAME"
 remove_container_if_present "$SERVER_CONTAINER_NAME"
@@ -154,11 +164,11 @@ docker run -d \
   -e SANDBOX_RUNTIME_PIDS_LIMIT="$SANDBOX_RUNTIME_PIDS_LIMIT" \
   -e SANDBOX_MAINTENANCE_ARTIFACT_MAX_AGE="$SANDBOX_MAINTENANCE_ARTIFACT_MAX_AGE" \
   -e SANDBOX_MAINTENANCE_MISSING_SANDBOX_MAX_AGE="$SANDBOX_MAINTENANCE_MISSING_SANDBOX_MAX_AGE" \
-  -e SANDBOX_TRAEFIK_DYNAMIC_CONFIG_DIR=/data/traefik/dynamic \
+  -e SANDBOX_TRAEFIK_DYNAMIC_CONFIG_DIR=/traefik/dynamic \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v "$DB_DIR:/data" \
   -v "$WORKSPACE_DIR:$WORKSPACE_DIR" \
-  -v "$TRAEFIK_DYNAMIC_CONFIG_DIR:/data/traefik/dynamic" \
+  -v "$TRAEFIK_DYNAMIC_VOLUME:/traefik/dynamic" \
   "$SERVER_IMAGE" >/dev/null
 
 wait_for_server_health
@@ -181,7 +191,7 @@ docker run -d \
   --cpus 0.25 \
   --pids-limit 128 \
   -p "$OPEN_SANDBOX_HTTP_PORT:80" \
-  -v "$TRAEFIK_DYNAMIC_CONFIG_DIR:/etc/traefik/dynamic:ro" \
+  -v "$TRAEFIK_DYNAMIC_VOLUME:/etc/traefik/dynamic:ro" \
   "$TRAEFIK_IMAGE" \
   --entrypoints.web.address=:80 \
   --entrypoints.web.forwardedHeaders.insecure=false \
