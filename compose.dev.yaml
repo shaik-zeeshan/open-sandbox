@@ -7,6 +7,8 @@ services:
       client:
         condition: service_started
     command:
+      - --log.level=INFO
+      - --accesslog=true
       - --entrypoints.web.address=:80
       - --entrypoints.web.forwardedHeaders.insecure=false
       - --providers.file.directory=/etc/traefik/dynamic
