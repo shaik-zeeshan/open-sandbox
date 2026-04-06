@@ -3,9 +3,12 @@ import {
 	composeStatus,
 	composeUpStream,
 	formatApiFailure,
+	getComposeProject,
 	runApiEffect,
 	type ApiConfig,
+	type ComposeProjectPreview,
 	type ComposeRequest,
+	type ComposeStatusService,
 	type StreamEvent
 } from "$lib/api";
 import { invalidateWorkloadCaches } from "$lib/api-cache";
@@ -20,6 +23,7 @@ export interface ComposeRuntimeState {
 	setLogs: (value: string) => void;
 	appendLog: (value: string) => void;
 	setStatusServiceNames: (value: string[]) => void;
+	setComposeProjectPreview: (value: ComposeProjectPreview | null) => void;
 }
 
 interface RunComposeActionOptions {
@@ -42,25 +46,23 @@ const requireComposeRequest = (request: ComposeRequest): Effect.Effect<ComposeRe
 		return request;
 	});
 
-const extractServiceNamesFromStatus = (value: unknown): string[] => {
-	if (!Array.isArray(value)) {
-		return [];
-	}
+const extractServiceNamesFromStatus = (services: ComposeStatusService[]): string[] =>
+	Array.from(
+		new Set(
+			services
+				.flatMap((service) => [service.service, service.name])
+				.map((value) => value.trim())
+				.filter((value) => value.length > 0)
+		)
+	);
 
-	const names: string[] = [];
-	for (const item of value) {
-		if (typeof item !== "object" || item === null) {
-			continue;
-		}
-		const record = item as Record<string, unknown>;
-		const candidate = record["Service"] ?? record["service"] ?? record["Name"] ?? record["name"];
-		if (typeof candidate === "string" && candidate.trim().length > 0) {
-			names.push(candidate.trim());
-		}
-	}
-
-	return Array.from(new Set(names));
-};
+const loadComposeProjectPreview = (
+	config: ApiConfig,
+	projectName: string
+): Effect.Effect<ComposeProjectPreview | null, never> =>
+	Effect.promise(() => runApiEffect(getComposeProject(config, projectName))).pipe(
+		Effect.catchAll(() => Effect.succeed(null))
+	);
 
 const handleComposeStreamEvent = (
 	event: StreamEvent,
@@ -109,6 +111,18 @@ const runComposeUpEffect = (
 			return yield* Effect.fail(new Error(composeError));
 		}
 
+		const projectName = request.project_name?.trim() ?? "";
+		if (projectName.length > 0) {
+			const preview = yield* loadComposeProjectPreview(config, projectName);
+			yield* Effect.sync(() => {
+				runtime.setComposeProjectPreview(preview);
+			});
+		} else {
+			yield* Effect.sync(() => {
+				runtime.setComposeProjectPreview(null);
+			});
+		}
+
 		yield* invalidateWorkloadCaches(config);
 		yield* Effect.sync(() => {
 			runtime.setStep("Done");
@@ -126,8 +140,13 @@ const runComposeStatusEffect = (
 		yield* requireComposeRequest(request);
 
 		const result = yield* Effect.promise(() => runApiEffect(composeStatus(config, request)));
+		const projectName = request.project_name?.trim() ?? "";
+		const composeProjectPreview = projectName.length > 0
+			? yield* loadComposeProjectPreview(config, projectName)
+			: null;
 		yield* Effect.sync(() => {
 			runtime.setStatusServiceNames(extractServiceNamesFromStatus(result.services));
+			runtime.setComposeProjectPreview(composeProjectPreview);
 			runtime.appendLog(result.raw || JSON.stringify(result.services, null, 2));
 			toast.ok("Compose status loaded.");
 			runtime.setStep("Done");
@@ -151,6 +170,7 @@ const runComposeDownEffect = (
 		const result = yield* Effect.promise(() => runApiEffect(composeDown(config, downRequest)));
 		yield* invalidateWorkloadCaches(config);
 		yield* Effect.sync(() => {
+			runtime.setComposeProjectPreview(null);
 			if (result.stdout.trim().length > 0) {
 				runtime.appendLog(result.stdout);
 			}

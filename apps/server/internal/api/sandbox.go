@@ -44,6 +44,12 @@ type ContainerSummary struct {
 	ServiceName  string            `json:"service_name,omitempty"`
 	Resettable   bool              `json:"resettable"`
 	Ports        []PortSummary     `json:"ports,omitempty"`
+	PreviewURLs  []PreviewURL      `json:"preview_urls,omitempty"`
+}
+
+type PreviewURL struct {
+	PrivatePort int    `json:"private_port"`
+	URL         string `json:"url"`
 }
 
 type PortSummary struct {
@@ -64,6 +70,7 @@ type SandboxResponse struct {
 	Status        string        `json:"status"`
 	OwnerUsername string        `json:"owner_username,omitempty"`
 	Ports         []PortSummary `json:"ports,omitempty"`
+	PreviewURLs   []PreviewURL  `json:"preview_urls,omitempty"`
 	CreatedAt     int64         `json:"created_at"`
 	UpdatedAt     int64         `json:"updated_at"`
 }
@@ -121,11 +128,17 @@ func (s *Server) listContainers(c *gin.Context) {
 		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
 		return
 	}
+	s.syncTraefikRoutes(c.Request.Context())
 
 	containers, err := s.runtime.ListWorkloads(c.Request.Context())
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
+	}
+	if len(containers) > 0 {
+		s.reconcileContainerArtifacts(containerIndexByContainerID(containers))
+	} else {
+		s.reconcileContainerArtifacts(map[string]ContainerSummary{})
 	}
 	managedComposeProjects, err := s.managedComposeProjects()
 	if err != nil {
@@ -147,6 +160,7 @@ func (s *Server) listContainers(c *gin.Context) {
 	visible := make([]ContainerSummary, 0, len(containers))
 	for _, item := range containers {
 		if s.runtimeContainerVisibleToIdentity(item, identity, ownedContainerIDs, ownedComposeProjects) {
+			item.PreviewURLs = s.previewURLsForContainer(item)
 			visible = append(visible, item)
 		}
 	}
@@ -201,6 +215,7 @@ func (s *Server) resetContainer(c *gin.Context) {
 			writeErrorWithDetails(c, http.StatusInternalServerError, "compose reset failed", "command_failed", strings.TrimSpace(result.Stderr))
 			return
 		}
+		s.syncTraefikRoutes(c.Request.Context())
 
 		c.JSON(http.StatusOK, gin.H{"id": result.WorkloadID, "container_id": result.ContainerID, "reset": true, "stdout": result.Stdout, "stderr": result.Stderr})
 		return
@@ -252,6 +267,7 @@ func (s *Server) resetContainer(c *gin.Context) {
 			return
 		}
 	}
+	s.syncTraefikRoutes(c.Request.Context())
 
 	c.JSON(http.StatusOK, gin.H{"id": target.ID, "container_id": created.ID, "reset": true})
 }
@@ -295,6 +311,7 @@ func (s *Server) removeContainer(c *gin.Context) {
 	if s.sandboxStore != nil {
 		_ = s.sandboxStore.DeleteSandboxByContainerID(c.Request.Context(), target.ContainerID)
 	}
+	s.syncTraefikRoutes(c.Request.Context())
 
 	c.JSON(http.StatusOK, gin.H{"id": target.ID, "container_id": target.ContainerID, "removed": true})
 }
@@ -514,6 +531,7 @@ func (s *Server) createSandbox(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, fmt.Errorf("persist sandbox: %w", err))
 		return
 	}
+	s.syncTraefikRoutes(c.Request.Context())
 	s.logLifecycleSuccess("create_sandbox", slog.String("sandbox_id", sandboxID), slog.String("container_id", created.ID), slog.String("owner_id", identity.UserID))
 
 	c.JSON(http.StatusOK, sandboxToResponse(sandboxRecord))
@@ -536,22 +554,46 @@ func (s *Server) listSandboxes(c *gin.Context) {
 		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
 		return
 	}
+	s.syncTraefikRoutes(c.Request.Context())
 
-	stateByContainer, statusByContainer, portsByContainer := s.liveContainerState(c.Request.Context())
-	out := make([]SandboxResponse, 0, len(sandboxes))
+	runtimeByContainer, err := s.runtimeContainersByID(c.Request.Context())
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+
+	reconciledSandboxes := make([]store.Sandbox, 0, len(sandboxes))
 	for _, sandbox := range sandboxes {
+		if _, ok := runtimeByContainer[sandbox.ContainerID]; ok {
+			reconciledSandboxes = append(reconciledSandboxes, sandbox)
+			continue
+		}
+		if sandbox.OwnerID != identity.UserID {
+			continue
+		}
+		if err := s.sandboxStore.DeleteSandbox(c.Request.Context(), sandbox.ID); err != nil {
+			s.logLifecycleFailure("reconcile_missing_sandbox", err, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
+			reconciledSandboxes = append(reconciledSandboxes, sandbox)
+			continue
+		}
+		s.logLifecycleSuccess("reconcile_missing_sandbox", slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
+	}
+
+	out := make([]SandboxResponse, 0, len(sandboxes))
+	for _, sandbox := range reconciledSandboxes {
 		if sandbox.OwnerID != identity.UserID {
 			continue
 		}
 		response := sandboxToResponse(sandbox)
-		if liveState, ok := stateByContainer[sandbox.ContainerID]; ok {
-			response.Status = liveState
-			if liveStatus, statusOK := statusByContainer[sandbox.ContainerID]; statusOK && strings.TrimSpace(liveStatus) != "" {
+		if runtime, ok := runtimeByContainer[sandbox.ContainerID]; ok {
+			if liveState := strings.TrimSpace(runtime.State); liveState != "" {
+				response.Status = liveState
+			}
+			if liveStatus := strings.TrimSpace(runtime.Status); liveStatus != "" {
 				response.Status = liveStatus
 			}
-		}
-		if ports, ok := portsByContainer[sandbox.ContainerID]; ok {
-			response.Ports = ports
+			response.Ports = runtime.Ports
+			response.PreviewURLs = s.previewURLsForSandbox(sandbox.ID, runtime.Ports)
 		}
 		out = append(out, response)
 	}
@@ -570,6 +612,7 @@ func (s *Server) getSandbox(c *gin.Context) {
 		if runtime, ok := runtimeByContainer[sandbox.ContainerID]; ok {
 			response.Status = runtime.Status
 			response.Ports = runtime.Ports
+			response.PreviewURLs = s.previewURLsForSandbox(sandbox.ID, runtime.Ports)
 		}
 	}
 
@@ -718,9 +761,11 @@ func (s *Server) deleteSandbox(c *gin.Context) {
 	workerID := s.workerIDForSandbox(sandbox)
 	_ = s.runtime.StopWorkload(c.Request.Context(), workerID, sandbox.ContainerID, container.StopOptions{})
 	if err := s.runtime.RemoveWorkload(c.Request.Context(), workerID, sandbox.ContainerID, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil {
-		s.logLifecycleFailure("delete_sandbox", err, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
-		writeError(c, http.StatusInternalServerError, err)
-		return
+		if !isMissingWorkloadError(err) {
+			s.logLifecycleFailure("delete_sandbox", err, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
+			writeError(c, http.StatusInternalServerError, err)
+			return
+		}
 	}
 
 	if err := s.sandboxStore.DeleteSandbox(c.Request.Context(), sandbox.ID); err != nil {
@@ -728,6 +773,7 @@ func (s *Server) deleteSandbox(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
+	s.syncTraefikRoutes(c.Request.Context())
 
 	s.logLifecycleSuccess("delete_sandbox", slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 	c.JSON(http.StatusOK, gin.H{"id": sandbox.ID, "deleted": true})
@@ -1209,6 +1255,19 @@ func (s *Server) runtimeContainersByID(ctx context.Context) (map[string]Containe
 	return byID, nil
 }
 
+func containerIndexByContainerID(containers []ContainerSummary) map[string]ContainerSummary {
+	byID := make(map[string]ContainerSummary, len(containers))
+	for _, item := range containers {
+		byID[item.ContainerID] = item
+	}
+	return byID
+}
+
+func (s *Server) reconcileContainerArtifacts(runtimeContainers map[string]ContainerSummary) {
+	cutoff := time.Now().Add(time.Second)
+	_, _ = s.cleanupDirectContainerSpecs(runtimeContainers, cutoff, false)
+}
+
 func (s *Server) resolveSandboxWorkdir(ctx context.Context, imageRef string, requestedWorkdir string) (string, error) {
 	if workdir := strings.TrimSpace(requestedWorkdir); workdir != "" {
 		if workdir == "/" {
@@ -1308,9 +1367,96 @@ func sandboxToResponse(sandbox store.Sandbox) SandboxResponse {
 		Status:        sandbox.Status,
 		OwnerUsername: sandbox.OwnerUsername,
 		Ports:         nil,
+		PreviewURLs:   nil,
 		CreatedAt:     sandbox.CreatedAt,
 		UpdatedAt:     sandbox.UpdatedAt,
 	}
+}
+
+func (s *Server) previewURLsForContainer(item ContainerSummary) []PreviewURL {
+	if sandboxID := strings.TrimSpace(item.Labels[labelOpenSandboxSandboxID]); sandboxID != "" {
+		return s.previewURLsForSandbox(sandboxID, item.Ports)
+	}
+
+	if managedID := strings.TrimSpace(item.Labels[labelOpenSandboxManagedID]); managedID != "" {
+		return s.previewURLsForManagedContainer(managedID, item.Ports)
+	}
+
+	projectName := strings.TrimSpace(item.ProjectName)
+	if projectName == "" {
+		projectName = strings.TrimSpace(item.Labels["com.docker.compose.project"])
+	}
+	serviceName := strings.TrimSpace(item.ServiceName)
+	if serviceName == "" {
+		serviceName = strings.TrimSpace(item.Labels["com.docker.compose.service"])
+	}
+	if projectName == "" || serviceName == "" {
+		return nil
+	}
+
+	return s.previewURLsForComposeService(projectName, serviceName, item.Ports)
+}
+
+func (s *Server) previewURLsForSandbox(sandboxID string, ports []PortSummary) []PreviewURL {
+	trimmedID := strings.TrimSpace(sandboxID)
+	if trimmedID == "" {
+		return nil
+	}
+	return previewURLsForPorts(ports, func(privatePort int) string {
+		return s.previewLaunchURLForSandbox(trimmedID, privatePort)
+	}, true)
+}
+
+func (s *Server) previewURLsForManagedContainer(managedID string, ports []PortSummary) []PreviewURL {
+	trimmedID := strings.TrimSpace(managedID)
+	if trimmedID == "" {
+		return nil
+	}
+	return previewURLsForPorts(ports, func(privatePort int) string {
+		return s.previewLaunchURLForManagedContainer(trimmedID, privatePort)
+	}, true)
+}
+
+func (s *Server) previewURLsForComposeService(projectName string, serviceName string, ports []PortSummary) []PreviewURL {
+	trimmedProject := strings.TrimSpace(projectName)
+	trimmedService := strings.TrimSpace(serviceName)
+	if trimmedProject == "" || trimmedService == "" {
+		return nil
+	}
+	return previewURLsForPorts(ports, func(privatePort int) string {
+		return s.previewLaunchURLForComposeService(trimmedProject, trimmedService, privatePort)
+	}, true)
+}
+
+func previewURLsForPorts(ports []PortSummary, buildURL func(privatePort int) string, requirePublished bool) []PreviewURL {
+	if len(ports) == 0 {
+		return nil
+	}
+
+	seenPrivatePorts := make(map[int]struct{}, len(ports))
+	previewURLs := make([]PreviewURL, 0, len(ports))
+	for _, port := range ports {
+		if port.Private <= 0 {
+			continue
+		}
+		if requirePublished && port.Public <= 0 {
+			continue
+		}
+		if _, exists := seenPrivatePorts[port.Private]; exists {
+			continue
+		}
+		seenPrivatePorts[port.Private] = struct{}{}
+		previewURLs = append(previewURLs, PreviewURL{PrivatePort: port.Private, URL: buildURL(port.Private)})
+	}
+
+	sort.Slice(previewURLs, func(i, j int) bool {
+		return previewURLs[i].PrivatePort < previewURLs[j].PrivatePort
+	})
+
+	if len(previewURLs) == 0 {
+		return nil
+	}
+	return previewURLs
 }
 
 func extractSingleFileFromTar(reader io.Reader) (string, string, error) {

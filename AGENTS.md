@@ -24,7 +24,7 @@
 - `/health`, `/metrics`, and `/auth/*` are public; `/api/*` is behind auth middleware.
 - Client code is in Svelte 5 rune mode by default; follow existing `$state`, `$derived`, and `$effect` patterns.
 - `VITE_SANDBOX_BASE_URL` defaults to `http://localhost:8080`. In container/self-hosted builds it must stay `/`, which the client resolves from `window.location.origin`.
-- The client build is static (`@sveltejs/adapter-static` with `fallback: 'index.html'`) and is served by Nginx, which proxies `/api`, `/auth`, `/health`, `/metrics`, and `/swagger`.
+- The client build is static (`@sveltejs/adapter-static` with `fallback: 'index.html'`); Traefik is the edge proxy for `/api`, `/auth`, `/health`, `/metrics`, `/swagger`, and `/proxy/...`.
 - Compose deploys require `OPEN_SANDBOX_DATA_DIR` to be an absolute host path, and the workspace directory must be mounted at that same absolute path inside the server container.
 
 **Docker**

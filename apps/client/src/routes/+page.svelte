@@ -1,13 +1,16 @@
 <script lang="ts">
+	import { goto } from "$app/navigation";
 	import { authController, checkHealth, clearAuthNotice, signOut as signOutSession } from "$lib/auth-controller.svelte";
 	import PageShell from "$lib/components/PageShell.svelte";
 	import SandboxesPanel from "$lib/components/SandboxesPanel.svelte";
 	import SandboxWorkspace from "$lib/components/SandboxWorkspace.svelte";
 	import {
+		getCachedComposeProjects,
 		getCachedContainers,
 		getCachedImages,
 		getCachedSandboxes,
 		invalidateWorkloadCaches,
+		refreshCachedComposeProjects,
 		refreshCachedContainers,
 		refreshCachedImages,
 		refreshCachedSandboxes
@@ -29,6 +32,7 @@
 		stopContainer,
 		stopSandbox,
 		type ApiFailure,
+		type ComposeProjectPreview,
 		type ContainerSummary,
 		type ImageSummary,
 		type Sandbox
@@ -36,7 +40,7 @@
 	import { Effect } from "effect";
 	import { clientState, setAuthSession, setBaseUrl } from "$lib/stores.svelte";
 	import { toast } from "$lib/toast.svelte";
-	import { clearScheduledInterval, scheduleInterval, scheduleTimeout } from "$lib/client/browser";
+	import { scheduleTimeout } from "$lib/client/browser";
 
 	// ── Sidebar collapse ───────────────────────────────────────────────────────
 	// (managed in PageShell, but we need nothing here for +page.svelte)
@@ -54,6 +58,7 @@
 	// ── Data ───────────────────────────────────────────────────────────────────
 	let sandboxes = $state<Sandbox[]>([]);
 	let containers = $state<ContainerSummary[]>([]);
+	let composeProjects = $state<ComposeProjectPreview[]>([]);
 	let images = $state<ImageSummary[]>([]);
 	let dataLoading = $state(false);
 	type RefreshOptions = {
@@ -279,13 +284,18 @@
 			const imagesEffect = options.force
 				? refreshCachedImages(clientState.config)
 				: getCachedImages(clientState.config);
-			const [sb, ct, img] = yield* Effect.all([
+			const composeProjectsEffect = options.force
+				? refreshCachedComposeProjects(clientState.config)
+				: getCachedComposeProjects(clientState.config);
+			const [sb, ct, cp, img] = yield* Effect.all([
 				sandboxesEffect,
 				containersEffect,
+				composeProjectsEffect,
 				options.includeImages ? imagesEffect : Effect.succeed(images)
 			]);
 			sandboxes = sb;
 			containers = ct;
+			composeProjects = cp;
 			images = img;
 			const currentActive = activeWorkload;
 			if (currentActive?.kind === "sandbox" && !sb.some((s) => s.id === currentActive.id)) {
@@ -417,7 +427,7 @@
 			createPorts = "";
 			await runProgram(invalidateWorkloadCaches(clientState.config));
 			await refreshData();
-			activeWorkload = { kind: "sandbox", id: created.id };
+			await goto(`/sandboxes/${encodeURIComponent(created.id)}`);
 		} catch (err) {
 			toast.error(formatApiFailure(err));
 		} finally {
@@ -502,13 +512,11 @@
 	}
 
 	function openSandbox(id: string): void {
-		activeWorkload = { kind: "sandbox", id };
+		void goto(`/sandboxes/${encodeURIComponent(id)}`);
 	}
 
 	function openContainer(id: string): void {
-		activeWorkload = { kind: "container", id };
-		activeRuntimeContainerSnapshot = containers.find((c) => c.id === id) ?? null;
-		pendingContainerActivationId = null;
+		void goto(`/services/${encodeURIComponent(id)}`);
 	}
 
 	function replaceActiveContainer(id: string): void {
@@ -521,21 +529,6 @@
 		if (clientState.isAuthenticated) void refreshData();
 	});
 
-	$effect(() => {
-		if (!clientState.isAuthenticated) {
-			return;
-		}
-		const interval = scheduleInterval(() => {
-			void refreshData({
-				includeImages: false,
-				showLoading: false,
-				notifyOnError: false,
-				pollingSafeRetry: true,
-				force: true
-			});
-		}, 5000);
-		return () => clearScheduledInterval(interval);
-	});
 </script>
 
 {#if !clientState.authResolved}
@@ -578,7 +571,7 @@
 							bind:value={endpointValue}
 							autocapitalize="none"
 							spellcheck="false"
-							placeholder="http://localhost:8080"
+							placeholder="http://app.lvh.me:8080"
 							onkeydown={(event) => {
 								if (event.key === "Enter") {
 									event.preventDefault();
@@ -650,7 +643,9 @@
 			<SandboxesPanel
 				{sandboxes}
 				{containers}
+				{composeProjects}
 				{images}
+				config={clientState.config}
 				loading={dataLoading}
 				onOpen={(id) => openSandbox(id)}
 				onOpenContainer={(id) => openContainer(id)}

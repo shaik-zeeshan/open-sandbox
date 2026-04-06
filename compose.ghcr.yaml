@@ -1,4 +1,27 @@
 services:
+  traefik:
+    image: ${TRAEFIK_IMAGE:-traefik:v3.6}
+    depends_on:
+      server:
+        condition: service_healthy
+      client:
+        condition: service_started
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 128
+    command:
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.forwardedHeaders.insecure=false
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.watch=true
+    volumes:
+      - traefik-dynamic:/etc/traefik/dynamic:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${OPEN_SANDBOX_HTTP_PORT:-3000}:80"
+
   server:
     image: ghcr.io/shaik-zeeshan/open-sandbox-server:${IMAGE_TAG:-latest}
     restart: unless-stopped
@@ -15,6 +38,9 @@ services:
       SANDBOX_RUNTIME_PIDS_LIMIT: ${SANDBOX_RUNTIME_PIDS_LIMIT:-512}
       SANDBOX_MAINTENANCE_ARTIFACT_MAX_AGE: ${SANDBOX_MAINTENANCE_ARTIFACT_MAX_AGE:-168h}
       SANDBOX_MAINTENANCE_MISSING_SANDBOX_MAX_AGE: ${SANDBOX_MAINTENANCE_MISSING_SANDBOX_MAX_AGE:-24h}
+      SANDBOX_TRAEFIK_DYNAMIC_CONFIG_DIR: /traefik/dynamic
+      SANDBOX_PUBLIC_BASE_URL: ${SANDBOX_PUBLIC_BASE_URL:-http://app.lvh.me:${OPEN_SANDBOX_HTTP_PORT:-3000}}
+      SANDBOX_PREVIEW_BASE_DOMAIN: ${SANDBOX_PREVIEW_BASE_DOMAIN:-preview.lvh.me}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
       interval: 10s
@@ -24,6 +50,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${OPEN_SANDBOX_DATA_DIR:?set OPEN_SANDBOX_DATA_DIR in .env}/db:/data
       - ${OPEN_SANDBOX_DATA_DIR:?set OPEN_SANDBOX_DATA_DIR in .env}/workspace:${OPEN_SANDBOX_DATA_DIR:?set OPEN_SANDBOX_DATA_DIR in .env}/workspace
+      - traefik-dynamic:/traefik/dynamic
+    expose:
+      - "8080"
 
   client:
     image: ghcr.io/shaik-zeeshan/open-sandbox-client:${IMAGE_TAG:-latest}
@@ -34,5 +63,8 @@ services:
     mem_limit: 256m
     cpus: 0.5
     pids_limit: 128
-    ports:
-      - "${OPEN_SANDBOX_HTTP_PORT:-3000}:80"
+    expose:
+      - "80"
+
+volumes:
+  traefik-dynamic:

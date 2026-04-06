@@ -2,12 +2,14 @@
 	import SandboxCard from "./SandboxCard.svelte";
 	import Combobox from "./Combobox.svelte";
 	import PortsEditor from "./PortsEditor.svelte";
-	import type { ContainerSummary, ImageSummary, PortSummary, Sandbox } from "$lib/api";
+	import { resolveApiUrl, type ApiConfig, type ComposeProjectPreview, type ContainerSummary, type ImageSummary, type PreviewUrl, type Sandbox } from "$lib/api";
 
 	let {
 		sandboxes,
 		containers,
+		composeProjects,
 		images,
+		config,
 		loading,
 		onOpen,
 		onRestart,
@@ -36,7 +38,9 @@
 	} = $props<{
 		sandboxes: Sandbox[];
 		containers: ContainerSummary[];
+		composeProjects: ComposeProjectPreview[];
 		images: ImageSummary[];
+		config: ApiConfig;
 		loading: boolean;
 		onOpen: (id: string) => void;
 		onRestart: (id: string) => void;
@@ -78,10 +82,16 @@
 		).map((tag: string) => ({ value: tag, label: tag }))
 	);
 	let workloadSearch = $state("");
-	let workloadKindFilter = $state<"all" | "sandbox" | "container">("all");
+	let workloadKindFilter = $state<"all" | "sandbox" | "container" | "compose">("all");
 	let workloadStatusFilter = $state("all");
 	const sandboxContainerIDs = $derived(new Set(sandboxes.map((sandbox: Sandbox) => sandbox.id)));
 	const runtimeContainers = $derived(containers.filter((container: ContainerSummary) => !sandboxContainerIDs.has(container.id)));
+
+	const composeLabelsForContainer = (container: ContainerSummary): { project: string; service: string } => {
+		const project = (container.project_name ?? container.labels?.["com.docker.compose.project"] ?? "").trim();
+		const service = (container.service_name ?? container.labels?.["com.docker.compose.service"] ?? "").trim();
+		return { project, service };
+	};
 
 	const toTitleCase = (value: string): string =>
 		value
@@ -111,19 +121,29 @@
 		{ value: "unknown", label: "Unknown" }
 	] as const;
 
+	const normalizePreviewUrls = (entries: PreviewUrl[] | undefined): PreviewUrl[] =>
+		(entries ?? [])
+			.filter((entry) => entry.private_port > 0 && entry.url.trim().length > 0)
+			.map((entry) => ({
+				...entry,
+				url: resolveApiUrl(config, entry.url)
+			}));
+
 		type WorkloadCardItem = {
 			key: string;
-			kind: "sandbox" | "container";
+			kind: "sandbox" | "container" | "compose";
 			id: string;
+			composeProjectName?: string;
 		name: string;
 		image: string;
 		status: string;
 		containerId: string;
-		ports: PortSummary[];
+		previewUrls: PreviewUrl[];
 			createdAt: number | null;
 			metaLabel: string;
 			metaValue: string;
 			canReset: boolean;
+			showActions: boolean;
 			statusFilterValue: string;
 			statusFilterLabel: string;
 			searchText: string;
@@ -133,6 +153,8 @@
 		const sandboxItems = sandboxes.map((sandbox: Sandbox) => {
 			const backingContainer = containers.find((c: ContainerSummary) => c.id === sandbox.id);
 			const statusFilter = normalizedStatus(sandbox.status);
+			const owner = sandbox.owner_username?.trim() ?? "";
+			const workspaceDir = sandbox.workspace_dir.trim().length > 0 ? sandbox.workspace_dir : "/";
 			return {
 			key: `sandbox:${sandbox.id}`,
 			kind: "sandbox" as const,
@@ -141,43 +163,83 @@
 			image: sandbox.image,
 			status: sandbox.status,
 			containerId: sandbox.container_id,
-			ports: backingContainer?.ports ?? sandbox.ports ?? [],
+			previewUrls: normalizePreviewUrls(backingContainer?.preview_urls ?? sandbox.preview_urls ?? []),
 			createdAt: sandbox.created_at,
-			metaLabel: sandbox.owner_username ? "Owner" : "",
-			metaValue: sandbox.owner_username ?? "",
+			metaLabel: "Sandbox",
+			metaValue: owner.length > 0 ? `${owner} · ${workspaceDir}` : `Workspace ${workspaceDir}`,
 			canReset: true,
 			statusFilterValue: statusFilter.value,
 			statusFilterLabel: statusFilter.label,
-			searchText: [sandbox.name, sandbox.image, sandbox.owner_username ?? "", sandbox.id, sandbox.container_id].join(" ").toLowerCase()
+			searchText: [sandbox.name, sandbox.image, owner, workspaceDir, sandbox.id, sandbox.container_id].join(" ").toLowerCase()
 			};
 		});
 
 		const containerItems = runtimeContainers.map((container: ContainerSummary) => {
-			const composeProject = container.project_name ?? "";
-			const composeService = container.service_name ?? "";
+			const { project: composeProject, service: composeService } = composeLabelsForContainer(container);
+			const workloadKind = composeProject ? "compose" : "container";
 			const primaryName = container.names[0] ?? container.id.slice(0, 12);
-			const metaValue = composeProject ? `${composeProject}${composeService ? ` / ${composeService}` : ""}` : "Runtime container";
+			const composeServiceName = composeService || primaryName;
+			const metaValue = composeProject
+				? `${composeProject} / ${composeServiceName}`
+				: "Advanced / API-created";
 			const statusFilter = normalizedStatus(container.state || container.status);
 			return {
-				key: `container:${container.id}`,
-				kind: "container" as const,
+				key: `${workloadKind}:${container.id}`,
+				kind: workloadKind,
 				id: container.id,
+				composeProjectName: composeProject || undefined,
 				name: primaryName,
 				image: container.image,
 				status: container.status,
 				containerId: container.container_id,
-				ports: container.ports ?? [],
+				previewUrls: normalizePreviewUrls(container.preview_urls ?? []),
 				createdAt: container.created ?? null,
-				metaLabel: composeProject ? "Compose" : "Type",
+				metaLabel: composeProject ? "Compose service" : "Standalone container",
 				metaValue,
 				canReset: container.resettable,
+				showActions: true,
 				statusFilterValue: statusFilter.value,
 				statusFilterLabel: statusFilter.label,
 				searchText: [primaryName, container.image, metaValue, container.id, container.container_id, ...(container.names ?? [])].join(" ").toLowerCase()
 			};
 		});
 
-		return [...sandboxItems, ...containerItems].sort((a, b) => {
+		const composeProjectsInContainers = new Set(
+			containerItems
+				.filter((item: WorkloadCardItem) => item.kind === "compose" && (item.composeProjectName ?? "").length > 0)
+				.map((item: WorkloadCardItem) => item.composeProjectName as string)
+		);
+
+		const composeProjectItems = composeProjectsWithPorts
+			.filter((project) => !composeProjectsInContainers.has(project.projectName))
+			.map((project) => {
+				const previewUrls = project.ports.map((port) => ({
+					private_port: port.privatePort,
+					url: port.previewUrl
+				}));
+				const statusFilter = normalizedStatus(project.ports.length > 0 ? "running" : "idle");
+				return {
+					key: `compose-project:${project.projectName}`,
+					kind: "compose" as const,
+					id: `compose-project:${project.projectName}`,
+					composeProjectName: project.projectName,
+					name: project.projectName,
+					image: "docker compose",
+					status: project.ports.length > 0 ? "running" : "idle",
+					containerId: "compose",
+					previewUrls,
+					createdAt: null,
+					metaLabel: "Compose service",
+					metaValue: `${project.projectName} / ${project.serviceCount} services`,
+					canReset: false,
+					showActions: false,
+					statusFilterValue: statusFilter.value,
+					statusFilterLabel: statusFilter.label,
+					searchText: [project.projectName, "compose", `${project.serviceCount} services`].join(" ").toLowerCase()
+				};
+			});
+
+		return [...sandboxItems, ...containerItems, ...composeProjectItems].sort((a, b) => {
 			const createdDiff = (b.createdAt ?? 0) - (a.createdAt ?? 0);
 			if (createdDiff !== 0) {
 				return createdDiff;
@@ -204,6 +266,68 @@
 
 	const workloadCount = $derived(workloads.length);
 
+	type ComposeProjectCard = {
+		projectName: string;
+		serviceCount: number;
+		ports: Array<{ serviceName: string; privatePort: number; previewUrl: string }>;
+	};
+
+	const composeProjectsWithPorts = $derived.by<ComposeProjectCard[]>(() => {
+		const projects = new Map<string, ComposeProjectCard>();
+
+		for (const project of composeProjects) {
+			const projectName = project.project_name.trim();
+			if (projectName.length === 0) {
+				continue;
+			}
+			projects.set(projectName, {
+				projectName,
+				serviceCount: project.services.length,
+				ports: project.services.flatMap((service: ComposeProjectPreview["services"][number]) =>
+					service.ports
+						.filter((port: ComposeProjectPreview["services"][number]["ports"][number]) => port.private_port > 0 && port.preview_url.trim().length > 0)
+						.map((port: ComposeProjectPreview["services"][number]["ports"][number]) => ({
+							serviceName: service.service_name,
+							privatePort: port.private_port,
+							previewUrl: resolveApiUrl(config, port.preview_url)
+						}))
+				)
+			});
+		}
+
+		for (const container of runtimeContainers) {
+			const projectName = (container.project_name ?? container.labels?.["com.docker.compose.project"] ?? "").trim();
+			if (projectName.length === 0) {
+				continue;
+			}
+			const serviceName = (container.service_name ?? container.labels?.["com.docker.compose.service"] ?? "service").trim() || "service";
+			const existing: ComposeProjectCard = projects.get(projectName) ?? { projectName, serviceCount: 0, ports: [] };
+
+			const serviceNames = new Set(existing.ports.map((port) => port.serviceName));
+			serviceNames.add(serviceName);
+			existing.serviceCount = Math.max(existing.serviceCount, serviceNames.size);
+
+			for (const preview of container.preview_urls ?? []) {
+				if (preview.private_port <= 0 || preview.url.trim().length === 0) {
+					continue;
+				}
+				const absolutePreviewUrl = resolveApiUrl(config, preview.url);
+				if (existing.ports.some((item) => item.serviceName === serviceName && item.privatePort === preview.private_port && item.previewUrl === absolutePreviewUrl)) {
+					continue;
+				}
+				existing.ports.push({
+					serviceName,
+					privatePort: preview.private_port,
+					previewUrl: absolutePreviewUrl
+				});
+			}
+
+			projects.set(projectName, existing);
+		}
+
+		return Array.from(projects.values()).sort((a, b) => a.projectName.localeCompare(b.projectName));
+	});
+
 	// Pagination
 	const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
 	let pageSize = $state<10 | 25 | 50>(10);
@@ -221,6 +345,15 @@
 
 	const goTo = (page: number) => {
 		currentPage = Math.max(1, Math.min(page, totalPages));
+	};
+
+	const openComposePage = (projectName?: string): void => {
+		const target = projectName && projectName.length > 0
+			? `${composeHref}/${encodeURIComponent(projectName)}`
+			: composeHref;
+		if (typeof window !== "undefined") {
+			window.location.assign(target);
+		}
 	};
 
 	// Build visible page numbers: always show first, last, current ±1, with ellipsis
@@ -264,7 +397,8 @@
 					<select class="filter-select" bind:value={workloadKindFilter}>
 						<option value="all">All</option>
 						<option value="sandbox">Sandboxes</option>
-						<option value="container">Containers</option>
+						<option value="compose">Compose services</option>
+						<option value="container">Standalone containers</option>
 					</select>
 				</label>
 				<span class="filter-sep" aria-hidden="true"></span>
@@ -336,20 +470,41 @@
 							image={workload.image}
 							status={workload.status}
 							containerId={workload.containerId}
-							ports={workload.ports}
+							previewUrls={workload.previewUrls}
 							createdAt={workload.createdAt}
 							metaLabel={workload.metaLabel}
 							metaValue={workload.metaValue}
 							isSelected={false}
 							showReset={workload.canReset}
+							showActions={workload.showActions}
 							deleteLabel={workload.kind === "sandbox" ? "Delete" : "Remove"}
 							deleteTitle={workload.kind === "sandbox" ? "Delete sandbox" : "Remove container"}
 							animDelay={i * 0.035}
-							onOpen={() => workload.kind === "sandbox" ? onOpen(workload.id) : onOpenContainer(workload.id)}
-							onRestart={() => workload.kind === "sandbox" ? onRestart(workload.id) : onRestartContainer(workload.id)}
-							onReset={() => workload.kind === "sandbox" ? onReset(workload.id) : onResetContainer(workload.id)}
-							onStop={() => workload.kind === "sandbox" ? onStop(workload.id) : onStopContainer(workload.id)}
-							onDelete={() => workload.kind === "sandbox" ? onDelete(workload.id) : onRemoveContainer(workload.id)}
+							onOpen={() => workload.kind === "sandbox"
+								? onOpen(workload.id)
+								: workload.kind === "compose" && workload.id.startsWith("compose-project:")
+									? openComposePage(workload.composeProjectName)
+									: onOpenContainer(workload.id)}
+							onRestart={() => workload.kind === "sandbox"
+								? onRestart(workload.id)
+								: workload.kind === "compose" && workload.id.startsWith("compose-project:")
+									? openComposePage(workload.composeProjectName)
+									: onRestartContainer(workload.id)}
+							onReset={() => workload.kind === "sandbox"
+								? onReset(workload.id)
+								: workload.kind === "compose" && workload.id.startsWith("compose-project:")
+									? openComposePage(workload.composeProjectName)
+									: onResetContainer(workload.id)}
+							onStop={() => workload.kind === "sandbox"
+								? onStop(workload.id)
+								: workload.kind === "compose" && workload.id.startsWith("compose-project:")
+									? openComposePage(workload.composeProjectName)
+									: onStopContainer(workload.id)}
+							onDelete={() => workload.kind === "sandbox"
+								? onDelete(workload.id)
+								: workload.kind === "compose" && workload.id.startsWith("compose-project:")
+									? openComposePage(workload.composeProjectName)
+									: onRemoveContainer(workload.id)}
 						/>
 					{/each}
 				</tbody>

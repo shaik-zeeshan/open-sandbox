@@ -200,6 +200,17 @@ type cleanupResponse struct {
 	CheckedAt         int64          `json:"checked_at"`
 }
 
+type reconcileRequest struct {
+	DryRun bool `json:"dry_run"`
+}
+
+type reconcileResponse struct {
+	DryRun    bool           `json:"dry_run"`
+	Removed   map[string]int `json:"removed"`
+	Errors    []string       `json:"errors,omitempty"`
+	CheckedAt int64          `json:"checked_at"`
+}
+
 func (s *Server) runMaintenanceCleanup(c *gin.Context) {
 	identity, ok := requireAdmin(c)
 	if !ok {
@@ -255,6 +266,68 @@ func (s *Server) runMaintenanceCleanup(c *gin.Context) {
 
 	s.logger.Info(
 		"maintenance_cleanup_completed",
+		slog.String("user_id", identity.UserID),
+		slog.String("username", identity.Username),
+		slog.Bool("dry_run", req.DryRun),
+		slog.Any("removed", result.Removed),
+		slog.Int("error_count", len(result.Errors)),
+	)
+
+	c.JSON(http.StatusOK, result)
+}
+
+func (s *Server) runMaintenanceReconcile(c *gin.Context) {
+	identity, ok := requireAdmin(c)
+	if !ok {
+		return
+	}
+
+	var req reconcileRequest
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			writeError(c, http.StatusBadRequest, err)
+			return
+		}
+	}
+
+	result := reconcileResponse{
+		DryRun:    req.DryRun,
+		Removed:   map[string]int{},
+		CheckedAt: time.Now().Unix(),
+	}
+
+	runtimeContainers, err := s.runtimeContainersByID(c.Request.Context())
+	if err != nil {
+		s.metrics.recordCleanupRun("error")
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+
+	cutoff := time.Now().Add(time.Second)
+	if count, errors := s.cleanupDirectContainerSpecs(runtimeContainers, cutoff, req.DryRun); count > 0 || len(errors) > 0 {
+		result.Removed["direct_container_specs"] = count
+		result.Errors = append(result.Errors, errors...)
+	}
+	if count, errors := s.cleanupComposeProjects(runtimeContainers, cutoff, req.DryRun); count > 0 || len(errors) > 0 {
+		result.Removed["compose_projects"] = count
+		result.Errors = append(result.Errors, errors...)
+	}
+	if count, errors := s.cleanupMissingSandboxRecords(c.Request.Context(), runtimeContainers, cutoff.Unix(), req.DryRun); count > 0 || len(errors) > 0 {
+		result.Removed["missing_sandbox_records"] = count
+		result.Errors = append(result.Errors, errors...)
+	}
+	if !req.DryRun {
+		s.syncTraefikRoutes(c.Request.Context())
+	}
+
+	if len(result.Errors) > 0 {
+		s.metrics.recordCleanupRun("partial")
+	} else {
+		s.metrics.recordCleanupRun("success")
+	}
+
+	s.logger.Info(
+		"maintenance_reconcile_completed",
 		slog.String("user_id", identity.UserID),
 		slog.String("username", identity.Username),
 		slog.Bool("dry_run", req.DryRun),

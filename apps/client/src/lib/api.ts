@@ -89,8 +89,37 @@ export interface ComposeResponse {
 }
 
 export interface ComposeStatusResponse {
-	services: unknown;
+	services: ComposeStatusService[];
 	raw: string;
+}
+
+export interface ComposeStatusService {
+	name: string;
+	service: string;
+	state: string;
+}
+
+export interface PreviewUrl {
+	private_port: number;
+	url: string;
+}
+
+export interface ComposePublishedPortEntry {
+	private_port: number;
+	public_port: number;
+	type: string;
+	ip?: string;
+	preview_url: string;
+}
+
+export interface ComposeServicePreview {
+	service_name: string;
+	ports: ComposePublishedPortEntry[];
+}
+
+export interface ComposeProjectPreview {
+	project_name: string;
+	services: ComposeServicePreview[];
 }
 
 export interface GitCloneRequest {
@@ -152,6 +181,7 @@ export interface ContainerSummary {
 	service_name?: string;
 	resettable: boolean;
 	ports?: PortSummary[];
+	preview_urls?: PreviewUrl[];
 }
 
 export interface PortSummary {
@@ -186,6 +216,7 @@ export interface Sandbox {
 	status: string;
 	owner_username?: string;
 	ports?: PortSummary[];
+	preview_urls?: PreviewUrl[];
 	created_at: number;
 	updated_at: number;
 }
@@ -265,10 +296,39 @@ const ComposeResponseSchema = Schema.Struct({
 	stderr: Schema.String
 });
 
-const ComposeStatusResponseSchema = Schema.Struct({
-	services: Schema.Unknown,
+const ComposeStatusServiceSchema: Schema.Schema<ComposeStatusService> = Schema.Struct({
+	name: Schema.String,
+	service: Schema.String,
+	state: Schema.String
+}) as Schema.Schema<ComposeStatusService>;
+
+const ComposeStatusResponseSchema: Schema.Schema<ComposeStatusResponse> = Schema.Struct({
+	services: Schema.Array(ComposeStatusServiceSchema),
 	raw: Schema.String
-});
+}) as unknown as Schema.Schema<ComposeStatusResponse>;
+
+const PreviewUrlSchema: Schema.Schema<PreviewUrl> = Schema.Struct({
+	private_port: Schema.Number,
+	url: Schema.String
+}) as Schema.Schema<PreviewUrl>;
+
+const ComposePublishedPortEntrySchema: Schema.Schema<ComposePublishedPortEntry> = Schema.Struct({
+	private_port: Schema.Number,
+	public_port: Schema.Number,
+	type: Schema.String,
+	ip: Schema.optional(Schema.String),
+	preview_url: Schema.String
+}) as Schema.Schema<ComposePublishedPortEntry>;
+
+const ComposeServicePreviewSchema: Schema.Schema<ComposeServicePreview> = Schema.Struct({
+	service_name: Schema.String,
+	ports: Schema.Array(ComposePublishedPortEntrySchema)
+}) as unknown as Schema.Schema<ComposeServicePreview>;
+
+const ComposeProjectPreviewSchema: Schema.Schema<ComposeProjectPreview> = Schema.Struct({
+	project_name: Schema.String,
+	services: Schema.Array(ComposeServicePreviewSchema)
+}) as unknown as Schema.Schema<ComposeProjectPreview>;
 
 const CreateContainerResponseSchema: Schema.Schema<CreateContainerResponse> = Schema.Struct({
 	id: Schema.String,
@@ -302,6 +362,7 @@ const SandboxSchema: Schema.Schema<Sandbox> = Schema.Struct({
 	status: Schema.String,
 	owner_username: Schema.optional(Schema.String),
 	ports: Schema.optional(Schema.Array(PortSummarySchema)),
+	preview_urls: Schema.optional(Schema.Array(PreviewUrlSchema)),
 	created_at: Schema.Number,
 	updated_at: Schema.Number
 }) as Schema.Schema<Sandbox>;
@@ -809,6 +870,25 @@ export const composeStatus = (
 	request: ComposeRequest
 ): Effect.Effect<ComposeStatusResponse, ApiFailure, HttpClient.HttpClient> =>
 	postJson(config, "/api/compose/status", request, ComposeStatusResponseSchema);
+
+export const listComposeProjects = (
+	config: ApiConfig
+): Effect.Effect<ComposeProjectPreview[], ApiFailure, HttpClient.HttpClient> =>
+	requestJson(
+		config,
+		HttpClientRequest.get("/api/compose/projects"),
+		Schema.Array(ComposeProjectPreviewSchema) as unknown as Schema.Schema<ComposeProjectPreview[]>
+	);
+
+export const getComposeProject = (
+	config: ApiConfig,
+	projectName: string
+): Effect.Effect<ComposeProjectPreview, ApiFailure, HttpClient.HttpClient> =>
+	requestJson(
+		config,
+		HttpClientRequest.get(`/api/compose/projects/${encodeURIComponent(projectName)}`),
+		ComposeProjectPreviewSchema
+	);
 
 export type StreamEvent = {
 	event: string;

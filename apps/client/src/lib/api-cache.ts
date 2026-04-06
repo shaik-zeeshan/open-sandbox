@@ -1,10 +1,12 @@
 import {
 	listContainers,
+	listComposeProjects,
 	listImages,
 	listSandboxes,
 	listUsers,
 	runApiEffect,
 	type ApiConfig,
+	type ComposeProjectPreview,
 	type ContainerSummary,
 	type ImageSummary,
 	type Sandbox,
@@ -35,6 +37,7 @@ const refreshCache = <A>(cache: Cache.Cache<CacheKey, A, unknown>, key: CacheKey
 
 const sandboxesCache = createListCache((baseUrl) => runApiEffect(listSandboxes({ baseUrl })));
 const containersCache = createListCache((baseUrl) => runApiEffect(listContainers({ baseUrl })));
+const composeProjectsCache = createListCache((baseUrl) => runApiEffect(listComposeProjects({ baseUrl })));
 const imagesCache = createListCache((baseUrl) => runApiEffect(listImages({ baseUrl })));
 const usersCache = createListCache((baseUrl) => runApiEffect(listUsers({ baseUrl })));
 
@@ -56,6 +59,15 @@ export const refreshCachedContainers = (config: ApiConfig): Effect.Effect<Contai
 export const invalidateContainersCache = (config: ApiConfig): Effect.Effect<void> =>
 	containersCache.invalidate(cacheKey(config));
 
+export const getCachedComposeProjects = (config: ApiConfig): Effect.Effect<ComposeProjectPreview[], unknown> =>
+	readCache(composeProjectsCache, cacheKey(config));
+
+export const refreshCachedComposeProjects = (config: ApiConfig): Effect.Effect<ComposeProjectPreview[], unknown> =>
+	refreshCache(composeProjectsCache, cacheKey(config));
+
+export const invalidateComposeProjectsCache = (config: ApiConfig): Effect.Effect<void> =>
+	composeProjectsCache.invalidate(cacheKey(config));
+
 export const getCachedImages = (config: ApiConfig): Effect.Effect<ImageSummary[], unknown> =>
 	readCache(imagesCache, cacheKey(config));
 
@@ -75,7 +87,11 @@ export const invalidateUsersCache = (config: ApiConfig): Effect.Effect<void> =>
 	usersCache.invalidate(cacheKey(config));
 
 export const invalidateWorkloadCaches = (config: ApiConfig): Effect.Effect<void> =>
-	Effect.all([invalidateSandboxesCache(config), invalidateContainersCache(config)], { concurrency: "unbounded" }).pipe(
+	Effect.all([
+		invalidateSandboxesCache(config),
+		invalidateContainersCache(config),
+		invalidateComposeProjectsCache(config)
+	], { concurrency: "unbounded" }).pipe(
 		Effect.asVoid
 	);
 
@@ -84,6 +100,7 @@ export const invalidateAllApiCaches = (): Effect.Effect<void> =>
 		[
 			sandboxesCache.invalidateAll,
 			containersCache.invalidateAll,
+			composeProjectsCache.invalidateAll,
 			imagesCache.invalidateAll,
 			usersCache.invalidateAll
 		],

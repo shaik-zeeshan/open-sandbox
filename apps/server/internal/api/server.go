@@ -39,6 +39,7 @@ import (
 	"github.com/gorilla/websocket"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/shaik-zeeshan/open-sandbox/internal/store"
+	traefikcfg "github.com/shaik-zeeshan/open-sandbox/internal/traefik"
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
 )
@@ -99,18 +100,21 @@ type WorkerStore interface {
 }
 
 type Server struct {
-	docker          DockerAPI
-	runtime         workloadRuntime
-	auth            AuthConfig
-	router          *gin.Engine
-	sandboxStore    SandboxStore
-	userStore       UserStore
-	workerStore     WorkerStore
-	logger          *slog.Logger
-	metrics         *operationalMetrics
-	runtimeLimits   runtimeLimits
-	workspaceRoot   string
-	execWaitTimeout time.Duration
+	docker           DockerAPI
+	runtime          workloadRuntime
+	auth             AuthConfig
+	previewRouting   previewRoutingConfig
+	router           *gin.Engine
+	sandboxStore     SandboxStore
+	userStore        UserStore
+	workerStore      WorkerStore
+	logger           *slog.Logger
+	metrics          *operationalMetrics
+	runtimeLimits    runtimeLimits
+	workspaceRoot    string
+	traefikWriter    *traefikcfg.ConfigWriter
+	proxyAuthLimiter *proxyAuthRateLimiter
+	execWaitTimeout  time.Duration
 }
 
 var commandRunner = runCommand
@@ -202,8 +206,32 @@ type ComposeResponse struct {
 }
 
 type ComposeStatusResponse struct {
-	Services any    `json:"services"`
-	Raw      string `json:"raw"`
+	Services []ComposeStatusService `json:"services"`
+	Raw      string                 `json:"raw"`
+}
+
+type ComposeStatusService struct {
+	Name    string `json:"name"`
+	Service string `json:"service"`
+	State   string `json:"state"`
+}
+
+type ComposeProjectPreviewResponse struct {
+	ProjectName string                          `json:"project_name"`
+	Services    []ComposeServicePreviewResponse `json:"services"`
+}
+
+type ComposeServicePreviewResponse struct {
+	ServiceName string                      `json:"service_name"`
+	Ports       []ComposePublishedPortEntry `json:"ports"`
+}
+
+type ComposePublishedPortEntry struct {
+	PrivatePort int    `json:"private_port"`
+	PublicPort  int    `json:"public_port"`
+	Type        string `json:"type"`
+	IP          string `json:"ip,omitempty"`
+	PreviewURL  string `json:"preview_url"`
 }
 
 type GitCloneRequest struct {
@@ -291,21 +319,37 @@ func NewServerWithStore(dockerClient DockerAPI, authConfig AuthConfig, sandboxSt
 	}
 
 	s := &Server{
-		docker:          dockerClient,
-		auth:            authConfig,
-		router:          r,
-		sandboxStore:    sandboxStore,
-		userStore:       userStore,
-		workerStore:     workerStore,
-		logger:          logger,
-		metrics:         newOperationalMetrics(),
-		runtimeLimits:   loadRuntimeLimitsFromEnv(),
-		workspaceRoot:   workspaceRoot,
-		execWaitTimeout: loadExecWaitTimeout(),
+		docker:           dockerClient,
+		auth:             authConfig,
+		previewRouting:   loadPreviewRoutingConfig(),
+		router:           r,
+		sandboxStore:     sandboxStore,
+		userStore:        userStore,
+		workerStore:      workerStore,
+		logger:           logger,
+		metrics:          newOperationalMetrics(),
+		runtimeLimits:    loadRuntimeLimitsFromEnv(),
+		workspaceRoot:    workspaceRoot,
+		traefikWriter:    nil,
+		proxyAuthLimiter: newProxyAuthRateLimiter(loadProxyAuthRateLimitConfig()),
+		execWaitTimeout:  loadExecWaitTimeout(),
+	}
+	if traefikDir := strings.TrimSpace(os.Getenv("SANDBOX_TRAEFIK_DYNAMIC_CONFIG_DIR")); traefikDir != "" {
+		writer, writerErr := traefikcfg.NewConfigWriter(traefikDir, traefikcfg.ConfigWriterOptions{
+			AppHost:             s.previewRouting.AppHost,
+			PreviewBaseDomain:   s.previewRouting.PreviewBaseDomain,
+			PreviewCallbackPath: s.previewRouting.CallbackPath,
+		})
+		if writerErr != nil {
+			logger.Warn("traefik_route_writer_disabled", slog.String("reason", writerErr.Error()))
+		} else {
+			s.traefikWriter = writer
+		}
 	}
 	s.runtime = newDelegatingRuntime(workerStore, localRuntimeWorkerID, newDockerRuntime(localRuntimeWorkerID, dockerClient, func() string { return s.workspaceRoot }))
 	s.ensureLocalWorkerRegistration(context.Background())
 	s.registerRoutes()
+	s.syncTraefikRoutes(context.Background())
 	return s
 }
 
@@ -321,6 +365,9 @@ func (s *Server) registerRoutes() {
 	s.router.POST("/auth/login", s.login)
 	s.router.POST("/auth/refresh", s.refresh)
 	s.router.GET("/auth/session", s.session)
+	s.router.GET(s.previewRouting.LaunchPathPrefix+"/*target", s.previewLaunch)
+	s.router.GET(s.previewRouting.CallbackPath, s.previewAuthCallback)
+	s.router.GET("/auth/proxy/authorize", s.proxyAuthorize)
 	s.router.POST("/auth/logout", s.logout)
 	workerControl := s.router.Group("/control")
 	workerControl.Use(s.workerAuthMiddleware())
@@ -348,6 +395,8 @@ func (s *Server) registerRoutes() {
 		api.POST("/compose/up", s.composeUp)
 		api.POST("/compose/down", s.composeDown)
 		api.POST("/compose/status", s.composeStatus)
+		api.GET("/compose/projects", s.listComposeProjects)
+		api.GET("/compose/projects/:projectName", s.getComposeProject)
 
 		api.POST("/git/clone", s.gitClone)
 
@@ -377,7 +426,9 @@ func (s *Server) registerRoutes() {
 		api.PUT("/sandboxes/:id/files", s.writeSandboxFile)
 
 		api.GET("/admin/workers", s.listWorkers)
+		api.GET("/admin/traefik/routes", s.getTraefikRouteState)
 		api.POST("/admin/maintenance/cleanup", s.runMaintenanceCleanup)
+		api.POST("/admin/maintenance/reconcile", s.runMaintenanceReconcile)
 	}
 
 	secured.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
@@ -589,14 +640,35 @@ func (s *Server) listImages(c *gin.Context) {
 // @Param id path string true "Image ID or tag"
 // @Param force query bool false "Force remove"
 // @Success 200 {object} RemoveImageResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 404 {object} ErrorResponse
+// @Failure 409 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
 // @Router /api/images/{id} [delete]
 func (s *Server) removeImage(c *gin.Context) {
-	force, _ := strconv.ParseBool(c.DefaultQuery("force", "false"))
+	force := false
+	forceQuery := strings.TrimSpace(c.Query("force"))
+	if forceQuery != "" {
+		parsed, err := strconv.ParseBool(forceQuery)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, fmt.Errorf("invalid force query value %q", forceQuery))
+			return
+		}
+		force = parsed
+	}
 
 	deleted, err := s.docker.ImageRemove(c.Request.Context(), c.Param("id"), image.RemoveOptions{Force: force, PruneChildren: true})
 	if err != nil {
-		writeError(c, http.StatusInternalServerError, err)
+		switch {
+		case errdefs.IsNotFound(err) || isMissingImageError(err):
+			writeError(c, http.StatusNotFound, err)
+		case errdefs.IsConflict(err):
+			writeError(c, http.StatusConflict, err)
+		case errdefs.IsInvalidParameter(err):
+			writeError(c, http.StatusBadRequest, err)
+		default:
+			writeError(c, http.StatusInternalServerError, err)
+		}
 		return
 	}
 
@@ -711,6 +783,7 @@ func (s *Server) composeUp(c *gin.Context) {
 		flusher.Flush()
 		return
 	}
+	s.syncTraefikRoutes(c.Request.Context())
 
 	emitSSE(c, mu, "done", "compose up completed")
 	flusher.Flush()
@@ -741,7 +814,8 @@ func (s *Server) composeDown(c *gin.Context) {
 	}
 
 	existingProject := s.composeProjectContextForName(composeProjectName(req.ProjectName, req.Content))
-	if _, err := s.authorizeComposeProjectAccess(identity, existingProject); err != nil {
+	shouldWriteOwner, err := s.authorizeComposeProjectAccess(identity, existingProject)
+	if err != nil {
 		writeError(c, http.StatusNotFound, err)
 		return
 	}
@@ -751,6 +825,12 @@ func (s *Server) composeDown(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, err)
 		return
 	}
+	if shouldWriteOwner {
+		if err := s.writeComposeProjectOwnerMetadata(project.ProjectDir, identity); err != nil {
+			writeError(c, http.StatusInternalServerError, err)
+			return
+		}
+	}
 
 	args := buildComposeArgs(project, req, "down")
 	stdout, stderr, err := commandRunnerInDir(c.Request.Context(), project.ProjectDir, "docker", args...)
@@ -758,8 +838,32 @@ func (s *Server) composeDown(c *gin.Context) {
 		writeErrorWithDetails(c, http.StatusInternalServerError, "compose down failed", "command_failed", strings.TrimSpace(stderr))
 		return
 	}
+	if err := s.removeComposeProjectArtifacts(project); err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+	s.syncTraefikRoutes(c.Request.Context())
 
 	c.JSON(http.StatusOK, ComposeResponse{Stdout: stdout, Stderr: stderr})
+}
+
+func (s *Server) removeComposeProjectArtifacts(project composeProjectContext) error {
+	composeRoot := filepath.Clean(filepath.Join(s.workspaceRoot, ".open-sandbox", "compose"))
+	projectDir := filepath.Clean(project.ProjectDir)
+	if projectDir == composeRoot {
+		return errors.New("refusing to remove compose root")
+	}
+	rel, err := filepath.Rel(composeRoot, projectDir)
+	if err != nil {
+		return fmt.Errorf("resolve compose project path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return errors.New("compose project path escapes managed root")
+	}
+	if err := os.RemoveAll(projectDir); err != nil {
+		return fmt.Errorf("remove compose project artifacts: %w", err)
+	}
+	return nil
 }
 
 // composeStatus godoc
@@ -787,7 +891,8 @@ func (s *Server) composeStatus(c *gin.Context) {
 	}
 
 	existingProject := s.composeProjectContextForName(composeProjectName(req.ProjectName, req.Content))
-	if _, err := s.authorizeComposeProjectAccess(identity, existingProject); err != nil {
+	shouldWriteOwner, err := s.authorizeComposeProjectAccess(identity, existingProject)
+	if err != nil {
 		writeError(c, http.StatusNotFound, err)
 		return
 	}
@@ -797,6 +902,12 @@ func (s *Server) composeStatus(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, err)
 		return
 	}
+	if shouldWriteOwner {
+		if err := s.writeComposeProjectOwnerMetadata(project.ProjectDir, identity); err != nil {
+			writeError(c, http.StatusInternalServerError, err)
+			return
+		}
+	}
 
 	args := buildComposeArgs(project, req, "ps", "--format", "json")
 	stdout, stderr, err := commandRunnerInDir(c.Request.Context(), project.ProjectDir, "docker", args...)
@@ -805,13 +916,204 @@ func (s *Server) composeStatus(c *gin.Context) {
 		return
 	}
 
-	var parsed any
-	if err := json.Unmarshal([]byte(stdout), &parsed); err != nil {
-		c.JSON(http.StatusOK, ComposeStatusResponse{Raw: stdout, Services: []any{}})
+	services := parseComposeStatusServices(stdout)
+	c.JSON(http.StatusOK, ComposeStatusResponse{Raw: stdout, Services: services})
+}
+
+func (s *Server) listComposeProjects(c *gin.Context) {
+	identity, ok := authIdentityFromContext(c)
+	if !ok {
+		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
+		return
+	}
+	s.syncTraefikRoutes(c.Request.Context())
+
+	containers, err := s.visibleManagedContainers(c.Request.Context(), identity)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
 
-	c.JSON(http.StatusOK, ComposeStatusResponse{Raw: stdout, Services: parsed})
+	projectNames := make(map[string]struct{})
+	for _, item := range containers {
+		projectName := strings.TrimSpace(item.ProjectName)
+		if projectName == "" {
+			projectName = strings.TrimSpace(item.Labels["com.docker.compose.project"])
+		}
+		if projectName == "" {
+			continue
+		}
+		projectNames[projectName] = struct{}{}
+	}
+
+	projects := make([]ComposeProjectPreviewResponse, 0, len(projectNames))
+	for projectName := range projectNames {
+		projects = append(projects, s.buildComposeProjectPreview(projectName, containers))
+	}
+	sort.Slice(projects, func(i, j int) bool {
+		return projects[i].ProjectName < projects[j].ProjectName
+	})
+
+	c.JSON(http.StatusOK, projects)
+}
+
+func (s *Server) getComposeProject(c *gin.Context) {
+	identity, ok := authIdentityFromContext(c)
+	if !ok {
+		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
+		return
+	}
+	s.syncTraefikRoutes(c.Request.Context())
+
+	projectName := sanitizeComposeProjectName(strings.TrimSpace(c.Param("projectName")))
+	if projectName == "" {
+		writeError(c, http.StatusBadRequest, errors.New("compose project name is required"))
+		return
+	}
+
+	project, err := s.existingComposeProject(projectName)
+	if err != nil {
+		writeError(c, http.StatusNotFound, errors.New("compose project not found"))
+		return
+	}
+	if _, err := s.authorizeComposeProjectAccess(identity, project); err != nil {
+		writeError(c, http.StatusNotFound, errors.New("compose project not found"))
+		return
+	}
+
+	containers, err := s.visibleManagedContainers(c.Request.Context(), identity)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+	preview := s.buildComposeProjectPreview(project.ProjectName, containers)
+	if len(preview.Services) == 0 {
+		writeError(c, http.StatusNotFound, errors.New("compose project not found"))
+		return
+	}
+
+	c.JSON(http.StatusOK, preview)
+}
+
+func (s *Server) visibleManagedContainers(ctx context.Context, identity AuthIdentity) ([]ContainerSummary, error) {
+	containers, err := s.runtime.ListWorkloads(ctx)
+	if err != nil {
+		return nil, err
+	}
+	managedComposeProjects, err := s.managedComposeProjects()
+	if err != nil {
+		return nil, err
+	}
+	containers = s.filterManagedRuntimeContainers(containers, managedComposeProjects)
+	ownedContainerIDs, err := s.ownedRuntimeContainerIDs(ctx, identity.UserID)
+	if err != nil {
+		return nil, err
+	}
+	ownedComposeProjects, err := s.ownedComposeProjects(identity.UserID)
+	if err != nil {
+		return nil, err
+	}
+
+	visible := make([]ContainerSummary, 0, len(containers))
+	for _, item := range containers {
+		if s.runtimeContainerVisibleToIdentity(item, identity, ownedContainerIDs, ownedComposeProjects) {
+			item.PreviewURLs = s.previewURLsForContainer(item)
+			visible = append(visible, item)
+		}
+	}
+
+	return visible, nil
+}
+
+func (s *Server) buildComposeProjectPreview(projectName string, containers []ContainerSummary) ComposeProjectPreviewResponse {
+	servicesByName := map[string]*ComposeServicePreviewResponse{}
+	for _, item := range containers {
+		itemProjectName := strings.TrimSpace(item.ProjectName)
+		if itemProjectName == "" {
+			itemProjectName = strings.TrimSpace(item.Labels["com.docker.compose.project"])
+		}
+		if itemProjectName != projectName {
+			continue
+		}
+		serviceName := strings.TrimSpace(item.ServiceName)
+		if serviceName == "" {
+			serviceName = strings.TrimSpace(item.Labels["com.docker.compose.service"])
+		}
+		if serviceName == "" {
+			continue
+		}
+
+		service := servicesByName[serviceName]
+		if service == nil {
+			service = &ComposeServicePreviewResponse{ServiceName: serviceName, Ports: make([]ComposePublishedPortEntry, 0, len(item.Ports))}
+			servicesByName[serviceName] = service
+		}
+
+		seen := make(map[string]struct{}, len(service.Ports))
+		for _, port := range service.Ports {
+			seen[fmt.Sprintf("%d/%d/%s", port.PrivatePort, port.PublicPort, port.Type)] = struct{}{}
+		}
+		for _, port := range item.Ports {
+			if port.Private <= 0 || port.Public <= 0 {
+				continue
+			}
+			key := fmt.Sprintf("%d/%d/%s", port.Private, port.Public, port.Type)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			service.Ports = append(service.Ports, ComposePublishedPortEntry{
+				PrivatePort: port.Private,
+				PublicPort:  port.Public,
+				Type:        port.Type,
+				IP:          port.IP,
+				PreviewURL:  s.previewLaunchURLForComposeService(projectName, serviceName, port.Private),
+			})
+		}
+	}
+
+	services := make([]ComposeServicePreviewResponse, 0, len(servicesByName))
+	for _, service := range servicesByName {
+		sort.Slice(service.Ports, func(i, j int) bool {
+			if service.Ports[i].PrivatePort != service.Ports[j].PrivatePort {
+				return service.Ports[i].PrivatePort < service.Ports[j].PrivatePort
+			}
+			if service.Ports[i].PublicPort != service.Ports[j].PublicPort {
+				return service.Ports[i].PublicPort < service.Ports[j].PublicPort
+			}
+			return service.Ports[i].Type < service.Ports[j].Type
+		})
+		services = append(services, *service)
+	}
+	sort.Slice(services, func(i, j int) bool {
+		return services[i].ServiceName < services[j].ServiceName
+	})
+
+	return ComposeProjectPreviewResponse{ProjectName: projectName, Services: services}
+}
+
+func parseComposeStatusServices(raw string) []ComposeStatusService {
+	var parsed []map[string]any
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return []ComposeStatusService{}
+	}
+
+	services := make([]ComposeStatusService, 0, len(parsed))
+	for _, item := range parsed {
+		service := ComposeStatusService{}
+		if value, ok := item["Name"].(string); ok {
+			service.Name = strings.TrimSpace(value)
+		}
+		if value, ok := item["Service"].(string); ok {
+			service.Service = strings.TrimSpace(value)
+		}
+		if value, ok := item["State"].(string); ok {
+			service.State = strings.TrimSpace(value)
+		}
+		services = append(services, service)
+	}
+
+	return services
 }
 
 // gitClone godoc
@@ -901,6 +1203,7 @@ func (s *Server) createContainer(c *gin.Context) {
 		}
 		started = true
 	}
+	s.syncTraefikRoutes(c.Request.Context())
 	s.logLifecycleSuccess("create_container", slog.String("container_id", created.ID), slog.String("managed_id", managedID), slog.Bool("started", started))
 
 	c.JSON(http.StatusOK, CreateContainerResponse{ID: managedID, ContainerID: created.ID, Warnings: created.Warnings, Started: started})
@@ -913,6 +1216,15 @@ func isMissingImageError(err error) bool {
 
 	errText := strings.ToLower(err.Error())
 	return strings.Contains(errText, "no such image") || strings.Contains(errText, "not found")
+}
+
+func isMissingWorkloadError(err error) bool {
+	if errdefs.IsNotFound(err) {
+		return true
+	}
+
+	errText := strings.ToLower(err.Error())
+	return strings.Contains(errText, "no such container") || strings.Contains(errText, "container not found")
 }
 
 // execInContainer godoc
@@ -1378,7 +1690,7 @@ func (s *Server) authorizeComposeProjectAccess(identity AuthIdentity, project co
 	}
 	if _, err := os.Stat(project.ComposeFile); err == nil {
 		if identity.IsAdmin() {
-			return false, nil
+			return true, nil
 		}
 		return false, errors.New("compose project not found")
 	} else if !errors.Is(err, os.ErrNotExist) {

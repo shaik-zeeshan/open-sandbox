@@ -34,10 +34,23 @@ Optional:
 - `SANDBOX_RUNTIME_PIDS_LIMIT`: default PID limit for created sandboxes and managed containers, for example `512`
 - `SANDBOX_MAINTENANCE_ARTIFACT_MAX_AGE`: retention window for stale direct-container specs and compose project directories, default `168h`
 - `SANDBOX_MAINTENANCE_MISSING_SANDBOX_MAX_AGE`: retention window for sandbox records whose container is already gone, default `24h`
+- `SANDBOX_PROXY_AUTH_RATE_LIMIT_RPS`: per-user ForwardAuth request rate limit for `/auth/proxy/authorize`, default `120`
+- `SANDBOX_PROXY_AUTH_RATE_LIMIT_BURST`: per-user ForwardAuth burst allowance, default `240`
+- `SANDBOX_PROXY_AUTH_RATE_LIMIT_IDLE_TTL`: cleanup TTL for idle per-user rate limiter entries, default `10m`
+- `SANDBOX_PUBLIC_BASE_URL`: public app URL used to build preview launcher links, default `http://app.lvh.me:3000`
+- `SANDBOX_PREVIEW_BASE_DOMAIN`: wildcard preview domain, default `preview.lvh.me`
+- `SANDBOX_PREVIEW_SESSION_TTL`: signed preview session lifetime, default `10m`
 
 `/health` is intentionally public.
 
-`/metrics` is also public so it can be scraped through the same reverse proxy path on a single server.
+`/metrics` is also public so it can be scraped through the same Traefik entrypoint on a single server.
+
+Traefik is the only public proxy in packaged deployments. The server remains the API/auth/control plane and publishes dynamic Traefik config for host-based preview routes.
+
+Preview caveats:
+- previews are launched via `/auth/preview/launch/...` and redirected to `*.preview.lvh.me`
+- preview routes are created only for published ports
+- compose services with internal-only ports are intentionally not previewable
 
 When the database has no users yet, create the initial admin account through `/auth/bootstrap` or the UI login screen. Additional users are managed through `/api/users` by an admin session.
 

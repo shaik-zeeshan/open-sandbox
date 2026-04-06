@@ -2,10 +2,13 @@
 
 Monorepo for the open-sandbox API and dashboard.
 
+Traefik is the only public proxy in self-hosted deployments. The client container serves only static assets, while the server remains the API/auth/control plane.
+
 ## Repo layout
 
 - `apps/server`: Go API service for sandbox/container management
 - `apps/client`: Svelte dashboard UI
+- `compose.dev.yaml`: Docker Compose hot-reload development stack
 - `compose.yaml`: local build-based Docker deployment
 - `compose.ghcr.yaml`: image-based Docker deployment from GHCR
 - `install.sh`: standalone installer for GHCR images (`docker run` based)
@@ -19,6 +22,8 @@ Monorepo for the open-sandbox API and dashboard.
 ## Local development
 
 The server auto-loads `apps/server/.env` via `godotenv` if present.
+
+See `make help` for a full command list (workspace + compose shortcuts).
 
 ```bash
 bun install
@@ -42,6 +47,29 @@ Notes:
 
 On first launch, create the initial admin account from the login screen.
 
+### Docker Compose hot reload (DX)
+
+Use `compose.dev.yaml` when you want both apps running in containers with live reload while editing source files on the host.
+
+```bash
+docker compose -f compose.dev.yaml up
+```
+
+Or via Make:
+
+```bash
+make compose-dev-up
+```
+
+Default URL:
+- UI + API + auth launcher routes: `http://app.lvh.me:3000`
+
+Notes:
+- server hot reload runs with `go tool air -c .air.toml`
+- client hot reload runs with Vite on port `80` inside the container, proxied by Traefik
+- code is bind-mounted from the repo (`./:/workspace`) so edits are reflected immediately
+- development data defaults to `/tmp/open-sandbox` unless `OPEN_SANDBOX_DATA_DIR` is set
+
 ## Common commands
 
 ```bash
@@ -53,6 +81,7 @@ bun run build:client
 Equivalent Make targets:
 
 ```bash
+make help
 make test-server
 make check-client
 make build-client
@@ -70,13 +99,26 @@ docker compose up -d
 ```
 
 Default URL:
-- UI + API proxy + Swagger: `http://localhost:3000`
+- UI + API + auth launcher routes: `http://app.lvh.me:3000`
 
-The stack runs two containers:
-- `server`: Go API service
-- `client`: Nginx serving the dashboard and proxying backend routes
+The stack runs three containers:
+- `traefik`: public edge proxy (the only published port)
+- `server`: Go API/auth/control-plane service
+- `client`: static dashboard content
 
 The API talks to the host Docker daemon through `/var/run/docker.sock`.
+
+### Preview routing model
+
+Preview URLs are launcher routes on the main host and redirect to dedicated preview subdomains:
+- sandboxes: `/auth/preview/launch/sandboxes/<sandbox-id>/<private-port>`
+- managed containers: `/auth/preview/launch/containers/<managed-id>/<private-port>`
+- compose services: `/auth/preview/launch/compose/<project>/<service>/<private-port>`
+
+Important behavior:
+- compose previews are available only for ports published to the host (`HOST:CONTAINER`)
+- container ports that are only internal (for example `3000/tcp` with no host publish) are not previewable
+- previews are served from dedicated hosts (`*.preview.lvh.me` by default), so apps run at `/` without path-prefix rewrites
 
 ### Compose environment variables
 
@@ -89,6 +131,12 @@ Top-level values (from `.env`):
 - `SANDBOX_RUNTIME_PIDS_LIMIT` (optional, default `512`)
 - `SANDBOX_MAINTENANCE_ARTIFACT_MAX_AGE` (optional, default `168h`)
 - `SANDBOX_MAINTENANCE_MISSING_SANDBOX_MAX_AGE` (optional, default `24h`)
+- `SANDBOX_PROXY_AUTH_RATE_LIMIT_RPS` (optional, default `120`)
+- `SANDBOX_PROXY_AUTH_RATE_LIMIT_BURST` (optional, default `240`)
+- `SANDBOX_PROXY_AUTH_RATE_LIMIT_IDLE_TTL` (optional, default `10m`)
+- `SANDBOX_PUBLIC_BASE_URL` (optional, default `http://app.lvh.me:${OPEN_SANDBOX_HTTP_PORT}`)
+- `SANDBOX_PREVIEW_BASE_DOMAIN` (optional, default `preview.lvh.me`)
+- `SANDBOX_PREVIEW_SESSION_TTL` (optional, default `10m`)
 
 Backend values inside the server container:
 - `SANDBOX_DB_PATH=/data/open-sandbox.db`
@@ -110,6 +158,7 @@ Common tags:
 - `v*` git tags
 
 Use `compose.ghcr.yaml` when you want to pull images instead of building locally.
+It uses the same routing topology (`traefik` edge + static `client` + `server` control plane).
 
 ## Install from GHCR
 
@@ -143,7 +192,7 @@ IMAGE_TAG=v1.2.3 ./install.sh
 - generates `SANDBOX_JWT_SECRET` with `openssl` if missing
 - prepares `/var/lib/open-sandbox/db` and `/var/lib/open-sandbox/workspace`
 - sets required directory permissions
-- pulls GHCR images and starts containers with `docker run`
+- pulls GHCR images and starts `traefik`, `server`, and `client` with `docker run`
 
 Because it writes under `/var/lib/open-sandbox`, it may prompt for `sudo`.
 
@@ -154,7 +203,7 @@ Persistent data under `${OPEN_SANDBOX_DATA_DIR}`:
 - `${OPEN_SANDBOX_DATA_DIR}/workspace`: managed compose projects and workspace state
 
 After first start:
-- open `http://localhost:${OPEN_SANDBOX_HTTP_PORT:-3000}`
+- open `http://app.lvh.me:${OPEN_SANDBOX_HTTP_PORT:-3000}`
 - create the initial admin account from the login screen
 - health endpoint: `/health`
 - Swagger: `/swagger/index.html`

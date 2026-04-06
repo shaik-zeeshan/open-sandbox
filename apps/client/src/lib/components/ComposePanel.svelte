@@ -1,13 +1,24 @@
 <script lang="ts">
 	import { untrack } from "svelte";
 	import CodeEditor from "./CodeEditor.svelte";
-	import { type ApiConfig, type ComposeRequest } from "$lib/api";
+	import {
+		formatApiFailure,
+		getComposeProject,
+		resolveApiUrl,
+		runApiEffect,
+		type ApiConfig,
+		type ComposeProjectPreview,
+		type ComposeRequest
+	} from "$lib/api";
 	import { runComposeAction, type ComposeAction } from "$lib/compose-panel-runtime";
+	import { toast } from "$lib/toast.svelte";
 
 	let {
-		config
+		config,
+		initialProjectName = ""
 	} = $props<{
 		config: ApiConfig;
+		initialProjectName?: string;
 	}>();
 
 	let projectName = $state("");
@@ -16,9 +27,11 @@
 	let removeVolumes = $state(false);
 	let removeOrphans = $state(true);
 	let loading = $state(false);
+	let previewRefreshLoading = $state(false);
 	let step = $state("Idle");
 	let logs = $state("");
 	let statusServiceNames = $state<string[]>([]);
+	let composeProjectPreview = $state<ComposeProjectPreview | null>(null);
 	let logsViewport = $state<HTMLPreElement | null>(null);
 
 	const stripAnsi = (value: string): string => value.replace(/\x1b\[[0-9;]*[mGKHF]/g, "");
@@ -62,6 +75,17 @@
 	const availableServices = $derived.by(() =>
 		Array.from(new Set([...inferredServices, ...statusServiceNames]))
 	);
+	const previewServices = $derived.by(() =>
+		(composeProjectPreview?.services ?? []).map((service) => ({
+			...service,
+			ports: service.ports
+				.filter((port) => port.preview_url.trim().length > 0)
+				.map((port) => ({
+					...port,
+					preview_url: resolveApiUrl(config, port.preview_url)
+				}))
+		}))
+	);
 
 	$effect(() => {
 		const availableSet = new Set(availableServices);
@@ -74,6 +98,10 @@
 			return;
 		}
 		selectedServices = nextSelected;
+	});
+
+	$effect(() => {
+		projectName = initialProjectName;
 	});
 
 	$effect(() => {
@@ -127,9 +155,30 @@
 				appendLog,
 				setStatusServiceNames: (value) => {
 					statusServiceNames = value;
+				},
+				setComposeProjectPreview: (value) => {
+					composeProjectPreview = value;
 				}
 			}
 		});
+	}
+
+	async function refreshProjectPreviews(): Promise<void> {
+		const normalizedProject = projectName.trim();
+		if (normalizedProject.length === 0) {
+			toast.error("Enter a project name to refresh service previews.");
+			return;
+		}
+
+		previewRefreshLoading = true;
+		try {
+			composeProjectPreview = await runApiEffect(getComposeProject(config, normalizedProject));
+			toast.ok("Service previews refreshed.");
+		} catch (error) {
+			toast.error(formatApiFailure(error));
+		} finally {
+			previewRefreshLoading = false;
+		}
 	}
 </script>
 
@@ -209,6 +258,44 @@
 					<span class="pipeline-step">{loading ? `${step}...` : step}</span>
 				</div>
 				<pre bind:this={logsViewport} class="pipeline-log">{stripAnsi(logs) || "Waiting for output..."}</pre>
+			</div>
+
+			<div class="pipeline-panel">
+				<div class="pipeline-header">
+					<span class="pipeline-title">Service previews</span>
+					<div class="preview-header-actions">
+						{#if composeProjectPreview}
+							<span class="pipeline-step">{composeProjectPreview.project_name}</span>
+						{/if}
+						<button class="btn-ghost btn-xs" type="button" onclick={() => void refreshProjectPreviews()} disabled={loading || previewRefreshLoading}>
+							{previewRefreshLoading ? "Refreshing..." : "Refresh previews"}
+						</button>
+					</div>
+				</div>
+				{#if previewServices.length === 0}
+					<p class="field-help compose-preview-empty">No published preview ports yet. Run up or status after exposing service ports.</p>
+				{:else}
+					<div class="compose-preview-grid">
+						{#each previewServices as service}
+							<section class="preview-service">
+								<div class="preview-service-header">
+									<span class="preview-service-name">{service.service_name}</span>
+								</div>
+								{#if service.ports.length === 0}
+									<span class="field-help">No published ports</span>
+								{:else}
+									<div class="port-chips">
+										{#each service.ports as port}
+											<a class="port-chip" href={port.preview_url} target="_blank" rel="noreferrer" title={port.preview_url}>
+												:{port.private_port} -> {port.public_port} ({port.type})
+											</a>
+										{/each}
+									</div>
+								{/if}
+							</section>
+						{/each}
+					</div>
+				{/if}
 			</div>
 		</div>
 	</section>
@@ -363,6 +450,12 @@
 		color: var(--text-secondary);
 	}
 
+	.preview-header-actions {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+
 	.pipeline-log {
 		margin: 0;
 		padding: 0.65rem;
@@ -375,5 +468,63 @@
 		color: var(--text-secondary);
 		background: #050505;
 		white-space: pre-wrap;
+	}
+
+	.compose-preview-empty {
+		padding: 0.65rem;
+	}
+
+	.compose-preview-grid {
+		display: grid;
+		gap: 0.5rem;
+		padding: 0.65rem;
+	}
+
+	.preview-service {
+		display: flex;
+		flex-direction: column;
+		gap: 0.4rem;
+		padding: 0.55rem;
+		border: 1px solid var(--border-mid);
+		border-radius: var(--radius-md);
+		background: var(--bg-surface);
+	}
+
+	.preview-service-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+	}
+
+	.preview-service-name {
+		font-family: var(--font-mono);
+		font-size: 0.64rem;
+		color: var(--text-primary);
+	}
+
+	.port-chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.4rem;
+	}
+
+	.port-chip {
+		display: inline-flex;
+		align-items: center;
+		padding: 0.2rem 0.42rem;
+		border: 1px solid var(--border-mid);
+		border-radius: var(--radius-sm);
+		font-family: var(--font-mono);
+		font-size: 0.6rem;
+		color: var(--text-secondary);
+		text-decoration: none;
+		transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+	}
+
+	.port-chip:hover {
+		border-color: var(--border-strong);
+		color: var(--text-primary);
+		background: var(--bg-raised);
 	}
 </style>

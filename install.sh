@@ -12,11 +12,14 @@ IMAGE_TAG="${IMAGE_TAG:-latest}"
 OPEN_SANDBOX_HTTP_PORT="${OPEN_SANDBOX_HTTP_PORT:-3000}"
 SERVER_IMAGE="ghcr.io/shaik-zeeshan/open-sandbox-server:${IMAGE_TAG}"
 CLIENT_IMAGE="ghcr.io/shaik-zeeshan/open-sandbox-client:${IMAGE_TAG}"
+TRAEFIK_IMAGE="${TRAEFIK_IMAGE:-traefik:v3.6}"
 INSTALL_USER="${SUDO_USER:-${USER:-$(id -un)}}"
 INSTALL_GROUP="$(id -gn "$INSTALL_USER")"
 NETWORK_NAME="open-sandbox"
 SERVER_CONTAINER_NAME="open-sandbox-server"
 CLIENT_CONTAINER_NAME="open-sandbox-client"
+TRAEFIK_CONTAINER_NAME="open-sandbox-traefik"
+TRAEFIK_DYNAMIC_VOLUME="open-sandbox-traefik-dynamic"
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -60,6 +63,16 @@ ensure_network() {
   fi
 
   docker network create "$NETWORK_NAME" >/dev/null
+}
+
+ensure_volume() {
+  local volume_name="$1"
+
+  if docker volume inspect "$volume_name" >/dev/null 2>&1; then
+    return
+  fi
+
+  docker volume create "$volume_name" >/dev/null
 }
 
 wait_for_server_health() {
@@ -122,8 +135,11 @@ SANDBOX_MAINTENANCE_MISSING_SANDBOX_MAX_AGE=${SANDBOX_MAINTENANCE_MISSING_SANDBO
 
 docker pull "$SERVER_IMAGE"
 docker pull "$CLIENT_IMAGE"
+docker pull "$TRAEFIK_IMAGE"
 
 ensure_network
+ensure_volume "$TRAEFIK_DYNAMIC_VOLUME"
+remove_container_if_present "$TRAEFIK_CONTAINER_NAME"
 remove_container_if_present "$CLIENT_CONTAINER_NAME"
 remove_container_if_present "$SERVER_CONTAINER_NAME"
 
@@ -148,9 +164,11 @@ docker run -d \
   -e SANDBOX_RUNTIME_PIDS_LIMIT="$SANDBOX_RUNTIME_PIDS_LIMIT" \
   -e SANDBOX_MAINTENANCE_ARTIFACT_MAX_AGE="$SANDBOX_MAINTENANCE_ARTIFACT_MAX_AGE" \
   -e SANDBOX_MAINTENANCE_MISSING_SANDBOX_MAX_AGE="$SANDBOX_MAINTENANCE_MISSING_SANDBOX_MAX_AGE" \
+  -e SANDBOX_TRAEFIK_DYNAMIC_CONFIG_DIR=/traefik/dynamic \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v "$DB_DIR:/data" \
   -v "$WORKSPACE_DIR:$WORKSPACE_DIR" \
+  -v "$TRAEFIK_DYNAMIC_VOLUME:/traefik/dynamic" \
   "$SERVER_IMAGE" >/dev/null
 
 wait_for_server_health
@@ -162,14 +180,29 @@ docker run -d \
   --memory 256m \
   --cpus 0.5 \
   --pids-limit 128 \
-  -p "$OPEN_SANDBOX_HTTP_PORT:80" \
   "$CLIENT_IMAGE" >/dev/null
+
+docker run -d \
+  --name "$TRAEFIK_CONTAINER_NAME" \
+  --restart unless-stopped \
+  --network "$NETWORK_NAME" \
+  --add-host host.docker.internal:host-gateway \
+  --memory 128m \
+  --cpus 0.25 \
+  --pids-limit 128 \
+  -p "$OPEN_SANDBOX_HTTP_PORT:80" \
+  -v "$TRAEFIK_DYNAMIC_VOLUME:/etc/traefik/dynamic:ro" \
+  "$TRAEFIK_IMAGE" \
+  --entrypoints.web.address=:80 \
+  --entrypoints.web.forwardedHeaders.insecure=false \
+  --providers.file.directory=/etc/traefik/dynamic \
+  --providers.file.watch=true >/dev/null
 
 for ((i = 0; i < 30; i += 1)); do
   if curl -fsS "http://127.0.0.1:${OPEN_SANDBOX_HTTP_PORT}/health" >/dev/null 2>&1; then
     printf 'open-sandbox is ready at http://localhost:%s\n' "$OPEN_SANDBOX_HTTP_PORT"
     printf 'Config: %s\n' "$CONFIG_DIR"
-    printf 'Images: %s and %s\n' "$CLIENT_IMAGE" "$SERVER_IMAGE"
+    printf 'Images: %s, %s, and %s\n' "$CLIENT_IMAGE" "$SERVER_IMAGE" "$TRAEFIK_IMAGE"
     exit 0
   fi
 
@@ -177,5 +210,5 @@ for ((i = 0; i < 30; i += 1)); do
 done
 
 printf 'The stack started but the health check did not pass in time.\n' >&2
-printf 'Inspect it with: docker ps --filter name=%s --filter name=%s\n' "$SERVER_CONTAINER_NAME" "$CLIENT_CONTAINER_NAME" >&2
+printf 'Inspect it with: docker ps --filter name=%s --filter name=%s --filter name=%s\n' "$SERVER_CONTAINER_NAME" "$CLIENT_CONTAINER_NAME" "$TRAEFIK_CONTAINER_NAME" >&2
 exit 1

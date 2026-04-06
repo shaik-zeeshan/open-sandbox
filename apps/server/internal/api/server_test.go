@@ -24,6 +24,7 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
 	"github.com/gin-gonic/gin"
@@ -334,6 +335,188 @@ func TestListWorkersIncludesLocalWorker(t *testing.T) {
 	}
 }
 
+func TestGetTraefikRouteStateIncludesManagedWorkloads(t *testing.T) {
+	originalCommandRunner := commandRunner
+	defer func() { commandRunner = originalCommandRunner }()
+
+	commandRunner = func(_ context.Context, name string, args ...string) (string, string, error) {
+		if name == "docker" && len(args) >= 3 && args[0] == "ps" && args[1] == "-a" {
+			return strings.Join([]string{
+				`{"ID":"sandbox-container","Image":"node:20","Names":"sandbox-one","Ports":"0.0.0.0:43000->3000/tcp","Status":"Up 1 minute","Labels":"open-sandbox.managed=true,open-sandbox.sandbox_id=sandbox-1,open-sandbox.owner_id=admin-user"}`,
+				`{"ID":"direct-container","Image":"nginx:latest","Names":"direct-one","Ports":"0.0.0.0:48080->8080/tcp","Status":"Up 1 minute","Labels":"open-sandbox.managed=true,open-sandbox.kind=direct,open-sandbox.managed_id=ctr-1,open-sandbox.owner_id=admin-user"}`,
+				`{"ID":"compose-web","Image":"nginx:latest","Names":"demo-web-1","Ports":"0.0.0.0:50080->80/tcp","Status":"Up 1 minute","Labels":"open-sandbox.managed=true,open-sandbox.owner_id=admin-user,com.docker.compose.project=demo,com.docker.compose.service=web"}`,
+			}, "\n"), "", nil
+		}
+		return "", "", errors.New("unexpected command")
+	}
+
+	t.Setenv("SANDBOX_TRAEFIK_DYNAMIC_CONFIG_DIR", filepath.Join(t.TempDir(), "traefik", "dynamic"))
+	store := newSQLiteStoreForAPITest(t)
+	s := newTestServerWithStore(&mockDocker{}, store)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/traefik/routes", nil)
+	setAuthHeader(t, req)
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var payload traefikRouteStateResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !payload.Enabled {
+		t.Fatalf("expected enabled=true, got false")
+	}
+	if payload.DynamicConfigDir == "" {
+		t.Fatal("expected dynamic config dir in response")
+	}
+	if len(payload.Sandboxes) != 1 || payload.Sandboxes[0].File != "sandbox-sandbox-1.yaml" {
+		t.Fatalf("unexpected sandbox route state: %+v", payload.Sandboxes)
+	}
+	if len(payload.Containers) != 1 || payload.Containers[0].File != "container-ctr-1.yaml" {
+		t.Fatalf("unexpected container route state: %+v", payload.Containers)
+	}
+	if len(payload.ComposeProjects) != 1 || payload.ComposeProjects[0].File != "compose-demo.yaml" {
+		t.Fatalf("unexpected compose route state: %+v", payload.ComposeProjects)
+	}
+}
+
+func TestGetTraefikRouteStateRequiresAdmin(t *testing.T) {
+	s := newTestServer(&mockDocker{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/traefik/routes", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "member", Role: roleMember}))
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestListSandboxesReconcilesTraefikRouteFiles(t *testing.T) {
+	originalCommandRunner := commandRunner
+	defer func() { commandRunner = originalCommandRunner }()
+	commandRunner = func(_ context.Context, name string, args ...string) (string, string, error) {
+		if name == "docker" && len(args) >= 3 && args[0] == "ps" && args[1] == "-a" {
+			return `{"ID":"sandbox-container","Image":"nginx:latest","Names":"sandbox-one","Ports":"0.0.0.0:43000->80/tcp","Status":"Up 1 minute","Labels":"open-sandbox.managed=true,open-sandbox.sandbox_id=sandbox-1,open-sandbox.owner_id=member-1"}` + "\n", "", nil
+		}
+		return "", "", errors.New("unexpected command")
+	}
+
+	dynamicDir := filepath.Join(t.TempDir(), "traefik", "dynamic")
+	t.Setenv("SANDBOX_TRAEFIK_DYNAMIC_CONFIG_DIR", dynamicDir)
+	sandboxStore := &mockSandboxStore{
+		listSandboxesFn: func(context.Context) ([]store.Sandbox, error) {
+			return []store.Sandbox{{ID: "sandbox-1", ContainerID: "sandbox-container", OwnerID: "member-1", OwnerUsername: "alice", Status: "running"}}, nil
+		},
+	}
+
+	s := newTestServerWithStore(&mockDocker{}, sandboxStore)
+	routeFile := filepath.Join(dynamicDir, "sandbox-sandbox-1.yaml")
+	if err := os.Remove(routeFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("remove seeded route file: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sandboxes", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(routeFile); err != nil {
+		t.Fatalf("expected sandbox route file to be reconciled during list, err=%v", err)
+	}
+}
+
+func TestListComposeProjectsReconcilesTraefikRouteFiles(t *testing.T) {
+	originalCommandRunner := commandRunner
+	defer func() { commandRunner = originalCommandRunner }()
+	commandRunner = func(_ context.Context, name string, args ...string) (string, string, error) {
+		if name == "docker" && len(args) >= 3 && args[0] == "ps" && args[1] == "-a" {
+			return `{"ID":"compose-web","Image":"nginx:latest","Names":"demo-web-1","Ports":"0.0.0.0:50080->80/tcp","Status":"Up 1 minute","Labels":"com.docker.compose.project=demo,com.docker.compose.service=web"}` + "\n", "", nil
+		}
+		return "", "", errors.New("unexpected command")
+	}
+
+	dynamicDir := filepath.Join(t.TempDir(), "traefik", "dynamic")
+	t.Setenv("SANDBOX_TRAEFIK_DYNAMIC_CONFIG_DIR", dynamicDir)
+	s := newTestServer(&mockDocker{})
+	s.workspaceRoot = t.TempDir()
+	projectDir := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", "demo")
+	if err := ensurePrivateDir(projectDir); err != nil {
+		t.Fatalf("create compose project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "docker-compose.yml"), []byte("services:\n  web:\n    image: nginx:latest\n"), 0o600); err != nil {
+		t.Fatalf("write compose file: %v", err)
+	}
+	if err := s.writeComposeProjectOwnerMetadata(projectDir, AuthIdentity{UserID: "member-1", Username: "alice"}); err != nil {
+		t.Fatalf("write compose owner metadata: %v", err)
+	}
+
+	routeFile := filepath.Join(dynamicDir, "compose-demo.yaml")
+	if err := os.Remove(routeFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("remove seeded compose route file: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/compose/projects", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(routeFile); err != nil {
+		t.Fatalf("expected compose route file to be reconciled during list, err=%v", err)
+	}
+}
+
+func TestSyncTraefikRoutesUsesContextWithoutCancel(t *testing.T) {
+	originalCommandRunner := commandRunner
+	defer func() { commandRunner = originalCommandRunner }()
+	commandRunner = func(_ context.Context, name string, args ...string) (string, string, error) {
+		if name == "docker" && len(args) >= 3 && args[0] == "ps" && args[1] == "-a" {
+			return `{"ID":"compose-web","Image":"nginx:latest","Names":"demo-web-1","Ports":"0.0.0.0:50080->80/tcp","Status":"Up 1 minute","Labels":"com.docker.compose.project=demo,com.docker.compose.service=web"}` + "\n", "", nil
+		}
+		return "", "", errors.New("unexpected command")
+	}
+
+	dynamicDir := filepath.Join(t.TempDir(), "traefik", "dynamic")
+	t.Setenv("SANDBOX_TRAEFIK_DYNAMIC_CONFIG_DIR", dynamicDir)
+	s := newTestServer(&mockDocker{})
+	s.workspaceRoot = t.TempDir()
+	projectDir := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", "demo")
+	if err := ensurePrivateDir(projectDir); err != nil {
+		t.Fatalf("create compose project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "docker-compose.yml"), []byte("services:\n  web:\n    image: nginx:latest\n"), 0o600); err != nil {
+		t.Fatalf("write compose file: %v", err)
+	}
+
+	routeFile := filepath.Join(dynamicDir, "compose-demo.yaml")
+	if err := os.Remove(routeFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("remove seeded compose route file: %v", err)
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.syncTraefikRoutes(canceled)
+
+	if _, err := os.Stat(routeFile); err != nil {
+		t.Fatalf("expected compose route file to be reconciled with canceled context, err=%v", err)
+	}
+}
+
 func TestWorkerRegisterAndHeartbeat(t *testing.T) {
 	t.Setenv("SANDBOX_WORKER_SHARED_SECRET", "worker-secret")
 	store := newSQLiteStoreForAPITest(t)
@@ -424,6 +607,87 @@ func TestListImagesEndpoint(t *testing.T) {
 
 	if len(body) != 1 || body[0].ID != "sha256:abc" {
 		t.Fatalf("unexpected response body: %s", w.Body.String())
+	}
+}
+
+func TestRemoveImageEndpoint(t *testing.T) {
+	var capturedID string
+	var capturedForce bool
+
+	m := &mockDocker{
+		imageRemoveFn: func(_ context.Context, imageID string, options image.RemoveOptions) ([]image.DeleteResponse, error) {
+			capturedID = imageID
+			capturedForce = options.Force
+			return []image.DeleteResponse{{Deleted: "sha256:abc"}}, nil
+		},
+	}
+
+	s := newTestServer(m)
+	req := httptest.NewRequest(http.MethodDelete, "/api/images/sha256:abc?force=true", nil)
+	setAuthHeader(t, req)
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if capturedID != "sha256:abc" {
+		t.Fatalf("expected image id sha256:abc, got %q", capturedID)
+	}
+	if !capturedForce {
+		t.Fatal("expected force=true to be passed to docker")
+	}
+}
+
+func TestRemoveImageEndpointReturnsNotFound(t *testing.T) {
+	m := &mockDocker{
+		imageRemoveFn: func(context.Context, string, image.RemoveOptions) ([]image.DeleteResponse, error) {
+			return nil, errdefs.NotFound(errors.New("no such image"))
+		},
+	}
+
+	s := newTestServer(m)
+	req := httptest.NewRequest(http.MethodDelete, "/api/images/sha256:missing", nil)
+	setAuthHeader(t, req)
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d (%s)", w.Code, w.Body.String())
+	}
+}
+
+func TestRemoveImageEndpointReturnsConflict(t *testing.T) {
+	m := &mockDocker{
+		imageRemoveFn: func(context.Context, string, image.RemoveOptions) ([]image.DeleteResponse, error) {
+			return nil, errdefs.Conflict(errors.New("image is being used by running container"))
+		},
+	}
+
+	s := newTestServer(m)
+	req := httptest.NewRequest(http.MethodDelete, "/api/images/sha256:abc", nil)
+	setAuthHeader(t, req)
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d (%s)", w.Code, w.Body.String())
+	}
+}
+
+func TestRemoveImageEndpointRejectsInvalidForceQuery(t *testing.T) {
+	s := newTestServer(&mockDocker{})
+	req := httptest.NewRequest(http.MethodDelete, "/api/images/sha256:abc?force=definitely", nil)
+	setAuthHeader(t, req)
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (%s)", w.Code, w.Body.String())
 	}
 }
 
@@ -659,6 +923,98 @@ func TestComposeStatusRequiresContent(t *testing.T) {
 	}
 }
 
+func TestComposeProjectPreviewEndpointsIncludePublishedPortsOnly(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return strings.Join([]string{
+			`{"ID":"demo-web-1","Image":"nginx:latest","Names":"demo-web-1","Ports":"0.0.0.0:8080->80/tcp,3000/tcp","Status":"Up 1 minute","Labels":"com.docker.compose.project=demo,com.docker.compose.service=web"}`,
+			`{"ID":"demo-db-1","Image":"postgres:16","Names":"demo-db-1","Ports":"5432/tcp","Status":"Up 1 minute","Labels":"com.docker.compose.project=demo,com.docker.compose.service=db"}`,
+			`{"ID":"hidden-web-1","Image":"nginx:latest","Names":"hidden-web-1","Ports":"0.0.0.0:9000->80/tcp","Status":"Up 1 minute","Labels":"com.docker.compose.project=hidden,com.docker.compose.service=web"}`,
+		}, "\n"), "", nil
+	}
+
+	s := newTestServer(&mockDocker{})
+	s.workspaceRoot = t.TempDir()
+	demoProjectDir := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", "demo")
+	if err := ensurePrivateDir(demoProjectDir); err != nil {
+		t.Fatalf("expected demo compose project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(demoProjectDir, "docker-compose.yml"), []byte("services:\n  web:\n    image: nginx:latest\n"), 0o600); err != nil {
+		t.Fatalf("expected demo compose file: %v", err)
+	}
+	if err := s.writeComposeProjectOwnerMetadata(demoProjectDir, AuthIdentity{UserID: "member-1", Username: "alice"}); err != nil {
+		t.Fatalf("expected demo owner metadata: %v", err)
+	}
+
+	hiddenProjectDir := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", "hidden")
+	if err := ensurePrivateDir(hiddenProjectDir); err != nil {
+		t.Fatalf("expected hidden compose project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hiddenProjectDir, "docker-compose.yml"), []byte("services:\n  web:\n    image: nginx:latest\n"), 0o600); err != nil {
+		t.Fatalf("expected hidden compose file: %v", err)
+	}
+	if err := s.writeComposeProjectOwnerMetadata(hiddenProjectDir, AuthIdentity{UserID: "member-2", Username: "bob"}); err != nil {
+		t.Fatalf("expected hidden owner metadata: %v", err)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/compose/projects", nil)
+	listReq.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	listW := httptest.NewRecorder()
+	s.Router().ServeHTTP(listW, listReq)
+
+	if listW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", listW.Code, listW.Body.String())
+	}
+
+	var projects []ComposeProjectPreviewResponse
+	if err := json.Unmarshal(listW.Body.Bytes(), &projects); err != nil {
+		t.Fatalf("decode compose projects response: %v", err)
+	}
+	if len(projects) != 1 || projects[0].ProjectName != "demo" {
+		t.Fatalf("expected only demo project, got %+v", projects)
+	}
+	if len(projects[0].Services) != 2 {
+		t.Fatalf("expected 2 demo services, got %+v", projects[0].Services)
+	}
+	for _, service := range projects[0].Services {
+		switch service.ServiceName {
+		case "web":
+			if len(service.Ports) != 1 {
+				t.Fatalf("expected web to expose only published ports, got %+v", service.Ports)
+			}
+			if service.Ports[0].PrivatePort != 80 || service.Ports[0].PublicPort != 8080 {
+				t.Fatalf("unexpected web published port mapping: %+v", service.Ports[0])
+			}
+			if service.Ports[0].PreviewURL != "/auth/preview/launch/compose/demo/web/80" {
+				t.Fatalf("unexpected web preview url: %q", service.Ports[0].PreviewURL)
+			}
+		case "db":
+			if len(service.Ports) != 0 {
+				t.Fatalf("expected db to have no preview ports for internal-only port, got %+v", service.Ports)
+			}
+		default:
+			t.Fatalf("unexpected service in compose project response: %+v", service)
+		}
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/compose/projects/demo", nil)
+	getReq.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	getW := httptest.NewRecorder()
+	s.Router().ServeHTTP(getW, getReq)
+
+	if getW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", getW.Code, getW.Body.String())
+	}
+	var project ComposeProjectPreviewResponse
+	if err := json.Unmarshal(getW.Body.Bytes(), &project); err != nil {
+		t.Fatalf("decode compose project response: %v", err)
+	}
+	if project.ProjectName != "demo" {
+		t.Fatalf("expected demo project response, got %+v", project)
+	}
+}
+
 func TestComposeUpReservesOwnerBeforeCommandSucceeds(t *testing.T) {
 	dockerBinDir := t.TempDir()
 	dockerScript := filepath.Join(dockerBinDir, "docker")
@@ -735,6 +1091,9 @@ func TestComposeDownIncludesOptionalFlags(t *testing.T) {
 	expectedProjectDir := filepath.Join(workspaceRoot, ".open-sandbox", "compose", "sandbox")
 	if capturedDir != expectedProjectDir {
 		t.Fatalf("expected compose command dir %q, got %q", expectedProjectDir, capturedDir)
+	}
+	if _, err := os.Stat(expectedProjectDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected compose project artifacts to be removed, stat err=%v", err)
 	}
 }
 
@@ -1018,6 +1377,63 @@ func TestListContainersEndpoint(t *testing.T) {
 
 	if !bytes.Contains(w.Body.Bytes(), []byte("sandbox-one")) {
 		t.Fatalf("expected container response body: %s", w.Body.String())
+	}
+}
+
+func TestListContainersIncludesServerGeneratedPreviewURLs(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return strings.Join([]string{
+			`{"ID":"sandbox-container","Image":"ubuntu:24.04","Names":"sandbox-one","Ports":"3000/tcp,0.0.0.0:8080->80/tcp","Status":"Up 5 minutes","Labels":"open-sandbox.sandbox_id=sandbox-1,open-sandbox.owner_id=member-1"}`,
+			`{"ID":"direct-container","Image":"nginx:latest","Names":"direct-one","Ports":"0.0.0.0:8080->80/tcp,3000/tcp","Status":"Up 5 minutes","Labels":"open-sandbox.kind=direct,open-sandbox.managed_id=ctr-123,open-sandbox.owner_id=member-1"}`,
+			`{"ID":"compose-container","Image":"nginx:latest","Names":"demo-web-1","Ports":"0.0.0.0:9000->8080/tcp,8081/tcp","Status":"Up 5 minutes","Labels":"com.docker.compose.project=demo,com.docker.compose.service=web"}`,
+		}, "\n"), "", nil
+	}
+
+	s := newTestServer(&mockDocker{})
+	s.workspaceRoot = t.TempDir()
+	projectDir := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", "demo")
+	if err := ensurePrivateDir(projectDir); err != nil {
+		t.Fatalf("expected compose project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "docker-compose.yml"), []byte("services:\n  web:\n    image: nginx:latest\n"), 0o600); err != nil {
+		t.Fatalf("expected compose file: %v", err)
+	}
+	if err := s.writeComposeProjectOwnerMetadata(projectDir, AuthIdentity{UserID: "member-1", Username: "alice"}); err != nil {
+		t.Fatalf("expected compose owner metadata: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/containers", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+
+	var containers []ContainerSummary
+	if err := json.Unmarshal(w.Body.Bytes(), &containers); err != nil {
+		t.Fatalf("decode containers response: %v", err)
+	}
+	if len(containers) != 3 {
+		t.Fatalf("expected 3 visible containers, got %d", len(containers))
+	}
+
+	previewByID := map[string][]PreviewURL{}
+	for _, item := range containers {
+		previewByID[item.ContainerID] = item.PreviewURLs
+	}
+	if len(previewByID["sandbox-container"]) != 1 || previewByID["sandbox-container"][0].URL != "/auth/preview/launch/sandboxes/sandbox-1/80" {
+		t.Fatalf("unexpected sandbox preview urls: %+v", previewByID["sandbox-container"])
+	}
+	if len(previewByID["direct-container"]) != 1 || previewByID["direct-container"][0].URL != "/auth/preview/launch/containers/ctr-123/80" {
+		t.Fatalf("unexpected direct preview urls: %+v", previewByID["direct-container"])
+	}
+	if len(previewByID["compose-container"]) != 1 || previewByID["compose-container"][0].URL != "/auth/preview/launch/compose/demo/web/8080" {
+		t.Fatalf("unexpected compose preview urls: %+v", previewByID["compose-container"])
 	}
 }
 
@@ -1804,6 +2220,158 @@ func TestListSandboxesFiltersAdminsToOwnedSandboxes(t *testing.T) {
 	}
 }
 
+func TestListSandboxesIncludesServerGeneratedPreviewURLs(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return `{"ID":"sandbox-container","Image":"ubuntu:24.04","Names":"sandbox-one","Ports":"3000/tcp,0.0.0.0:8080->80/tcp","Status":"Up 5 minutes","Labels":"open-sandbox.sandbox_id=sandbox-1,open-sandbox.owner_id=member-1"}` + "\n", "", nil
+	}
+
+	sandboxStore := &mockSandboxStore{
+		listSandboxesFn: func(context.Context) ([]store.Sandbox, error) {
+			return []store.Sandbox{{ID: "sandbox-1", Name: "mine", ContainerID: "sandbox-container", OwnerID: "member-1", OwnerUsername: "alice", Status: "running"}}, nil
+		},
+	}
+
+	s := newTestServerWithStore(&mockDocker{}, sandboxStore)
+	req := httptest.NewRequest(http.MethodGet, "/api/sandboxes", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+
+	var sandboxes []SandboxResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &sandboxes); err != nil {
+		t.Fatalf("decode sandboxes response: %v", err)
+	}
+	if len(sandboxes) != 1 {
+		t.Fatalf("expected a single sandbox in response, got %d", len(sandboxes))
+	}
+	if len(sandboxes[0].PreviewURLs) != 1 || sandboxes[0].PreviewURLs[0].URL != "/auth/preview/launch/sandboxes/sandbox-1/80" {
+		t.Fatalf("unexpected sandbox preview urls: %+v", sandboxes[0].PreviewURLs)
+	}
+}
+
+func TestListSandboxesDeletesOwnedRecordsForMissingContainers(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return `{"ID":"present-container","Image":"ubuntu:24.04","Names":"sandbox-one","Ports":"0.0.0.0:8080->80/tcp","Status":"Up 5 minutes","Labels":"open-sandbox.sandbox_id=sandbox-1,open-sandbox.owner_id=member-1"}` + "\n", "", nil
+	}
+
+	deleted := make([]string, 0, 1)
+	sandboxStore := &mockSandboxStore{
+		listSandboxesFn: func(context.Context) ([]store.Sandbox, error) {
+			return []store.Sandbox{
+				{ID: "sandbox-1", Name: "present", ContainerID: "present-container", OwnerID: "member-1", OwnerUsername: "alice", Status: "running"},
+				{ID: "sandbox-2", Name: "missing", ContainerID: "missing-container", OwnerID: "member-1", OwnerUsername: "alice", Status: "running"},
+			}, nil
+		},
+		deleteSandboxFn: func(_ context.Context, sandboxID string) error {
+			deleted = append(deleted, sandboxID)
+			return nil
+		},
+	}
+
+	s := newTestServerWithStore(&mockDocker{}, sandboxStore)
+	req := httptest.NewRequest(http.MethodGet, "/api/sandboxes", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if len(deleted) != 1 || deleted[0] != "sandbox-2" {
+		t.Fatalf("expected missing sandbox record to be removed, got %+v", deleted)
+	}
+	if bytes.Contains(w.Body.Bytes(), []byte(`"sandbox-2"`)) {
+		t.Fatalf("expected missing sandbox to be removed from response: %s", w.Body.String())
+	}
+}
+
+func TestListContainersReconcilesStaleDirectContainerSpecs(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return "", "", nil
+	}
+
+	s := newTestServer(&mockDocker{})
+	s.workspaceRoot = t.TempDir()
+	if err := ensurePrivateDir(filepath.Join(s.workspaceRoot, ".open-sandbox", "containers")); err != nil {
+		t.Fatalf("prepare direct container spec root: %v", err)
+	}
+	staleSpecPath := filepath.Join(s.workspaceRoot, ".open-sandbox", "containers", "ctr-stale.json")
+	if err := os.WriteFile(staleSpecPath, []byte(`{"image":"alpine:3.20"}`), 0o600); err != nil {
+		t.Fatalf("write stale direct container spec: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/containers", nil)
+	setAuthHeader(t, req)
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(staleSpecPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected stale direct container spec to be removed, got err=%v", err)
+	}
+}
+
+func TestComposeProjectEndpointsHideProjectsWithoutLiveServices(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return "", "", nil
+	}
+
+	s := newTestServer(&mockDocker{})
+	s.workspaceRoot = t.TempDir()
+	projectDir := filepath.Join(s.workspaceRoot, ".open-sandbox", "compose", "demo")
+	if err := ensurePrivateDir(projectDir); err != nil {
+		t.Fatalf("prepare compose project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "docker-compose.yml"), []byte("services:\n  web:\n    image: nginx:latest\n"), 0o600); err != nil {
+		t.Fatalf("write compose file: %v", err)
+	}
+	if err := s.writeComposeProjectOwnerMetadata(projectDir, AuthIdentity{UserID: "member-1", Username: "alice"}); err != nil {
+		t.Fatalf("write compose owner metadata: %v", err)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/compose/projects", nil)
+	listReq.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	listW := httptest.NewRecorder()
+	s.Router().ServeHTTP(listW, listReq)
+
+	if listW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", listW.Code, listW.Body.String())
+	}
+	var projects []ComposeProjectPreviewResponse
+	if err := json.Unmarshal(listW.Body.Bytes(), &projects); err != nil {
+		t.Fatalf("decode compose projects response: %v", err)
+	}
+	if len(projects) != 0 {
+		t.Fatalf("expected no compose projects without live services, got %+v", projects)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/compose/projects/demo", nil)
+	getReq.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	getW := httptest.NewRecorder()
+	s.Router().ServeHTTP(getW, getReq)
+
+	if getW.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for compose project without live services, got %d (%s)", getW.Code, getW.Body.String())
+	}
+}
+
 func TestSandboxAccessRejectsOtherUsers(t *testing.T) {
 	sandboxStore := &mockSandboxStore{
 		getSandboxFn: func(context.Context, string) (store.Sandbox, error) {
@@ -1820,6 +2388,39 @@ func TestSandboxAccessRejectsOtherUsers(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestDeleteSandboxRemovesRecordWhenContainerAlreadyMissing(t *testing.T) {
+	deletedSandboxID := ""
+	m := &mockDocker{
+		containerRemoveFn: func(_ context.Context, _ string, _ container.RemoveOptions) error {
+			return errdefs.NotFound(errors.New("no such container"))
+		},
+	}
+
+	sandboxStore := &mockSandboxStore{
+		getSandboxFn: func(context.Context, string) (store.Sandbox, error) {
+			return store.Sandbox{ID: "sandbox-1", ContainerID: "sandbox-container", OwnerID: "member-1", OwnerUsername: "alice"}, nil
+		},
+		deleteSandboxFn: func(_ context.Context, sandboxID string) error {
+			deletedSandboxID = sandboxID
+			return nil
+		},
+	}
+
+	s := newTestServerWithStore(m, sandboxStore)
+	req := httptest.NewRequest(http.MethodDelete, "/api/sandboxes/sandbox-1", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if deletedSandboxID != "sandbox-1" {
+		t.Fatalf("expected sandbox record to be deleted, got %q", deletedSandboxID)
 	}
 }
 
@@ -2199,6 +2800,122 @@ func TestMaintenanceCleanupRemovesStaleArtifacts(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), `"direct_container_specs":1`) || !strings.Contains(w.Body.String(), `"compose_projects":1`) {
 		t.Fatalf("expected cleanup response counts, got %s", w.Body.String())
+	}
+}
+
+func TestMaintenanceReconcileRemovesMissingArtifactsImmediately(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	composeDir := filepath.Join(workspaceRoot, ".open-sandbox", "compose", "missing-project")
+	if err := os.MkdirAll(composeDir, 0o700); err != nil {
+		t.Fatalf("create compose dir: %v", err)
+	}
+	specDir := filepath.Join(workspaceRoot, ".open-sandbox", "containers")
+	if err := os.MkdirAll(specDir, 0o700); err != nil {
+		t.Fatalf("create direct spec dir: %v", err)
+	}
+	specPath := filepath.Join(specDir, "ctr-missing.json")
+	if err := os.WriteFile(specPath, []byte(`{"image":"alpine:3.20"}`), 0o600); err != nil {
+		t.Fatalf("write direct spec: %v", err)
+	}
+
+	deletedSandboxID := ""
+	sandboxStore := &mockSandboxStore{
+		listSandboxesFn: func(context.Context) ([]store.Sandbox, error) {
+			return []store.Sandbox{{ID: "sandbox-missing", ContainerID: "gone-container", UpdatedAt: time.Now().Unix()}}, nil
+		},
+		deleteSandboxFn: func(_ context.Context, sandboxID string) error {
+			deletedSandboxID = sandboxID
+			return nil
+		},
+	}
+
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return "", "", nil
+	}
+
+	s := newTestServerWithStore(&mockDocker{containerListFn: func(context.Context, container.ListOptions) ([]container.Summary, error) {
+		return nil, nil
+	}}, sandboxStore)
+	s.workspaceRoot = workspaceRoot
+
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/maintenance/reconcile", bytes.NewBufferString(`{"dry_run":false}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if deletedSandboxID != "sandbox-missing" {
+		t.Fatalf("expected missing sandbox record to be deleted, got %q", deletedSandboxID)
+	}
+	if _, err := os.Stat(specPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected direct spec to be removed, got err=%v", err)
+	}
+	if _, err := os.Stat(composeDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected compose project dir to be removed, got err=%v", err)
+	}
+}
+
+func TestMaintenanceReconcileDryRunDoesNotRemoveArtifacts(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	composeDir := filepath.Join(workspaceRoot, ".open-sandbox", "compose", "dryrun-project")
+	if err := os.MkdirAll(composeDir, 0o700); err != nil {
+		t.Fatalf("create compose dir: %v", err)
+	}
+	specDir := filepath.Join(workspaceRoot, ".open-sandbox", "containers")
+	if err := os.MkdirAll(specDir, 0o700); err != nil {
+		t.Fatalf("create direct spec dir: %v", err)
+	}
+	specPath := filepath.Join(specDir, "ctr-dryrun.json")
+	if err := os.WriteFile(specPath, []byte(`{"image":"alpine:3.20"}`), 0o600); err != nil {
+		t.Fatalf("write direct spec: %v", err)
+	}
+
+	deleteCalls := 0
+	sandboxStore := &mockSandboxStore{
+		listSandboxesFn: func(context.Context) ([]store.Sandbox, error) {
+			return []store.Sandbox{{ID: "sandbox-dryrun", ContainerID: "gone-container", UpdatedAt: time.Now().Unix()}}, nil
+		},
+		deleteSandboxFn: func(_ context.Context, _ string) error {
+			deleteCalls++
+			return nil
+		},
+	}
+
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return "", "", nil
+	}
+
+	s := newTestServerWithStore(&mockDocker{containerListFn: func(context.Context, container.ListOptions) ([]container.Summary, error) {
+		return nil, nil
+	}}, sandboxStore)
+	s.workspaceRoot = workspaceRoot
+
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/maintenance/reconcile", bytes.NewBufferString(`{"dry_run":true}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if deleteCalls != 0 {
+		t.Fatalf("expected dry-run to avoid deleting sandbox records, calls=%d", deleteCalls)
+	}
+	if _, err := os.Stat(specPath); err != nil {
+		t.Fatalf("expected direct spec to remain during dry-run, err=%v", err)
+	}
+	if _, err := os.Stat(composeDir); err != nil {
+		t.Fatalf("expected compose project dir to remain during dry-run, err=%v", err)
 	}
 }
 
