@@ -1,12 +1,12 @@
 <script lang="ts">
-	import type { PortSummary } from "$lib/api";
+	import type { PreviewUrl } from "$lib/api";
 
 	let {
 		name,
 		image,
 		status,
 		containerId,
-		ports = [],
+		previewUrls = [],
 		createdAt = null,
 		metaLabel = "",
 		metaValue = "",
@@ -25,7 +25,7 @@
 		image: string;
 		status: string;
 		containerId: string;
-		ports?: PortSummary[];
+		previewUrls?: PreviewUrl[];
 		createdAt?: number | null;
 		metaLabel?: string;
 		metaValue?: string;
@@ -54,15 +54,25 @@
 		return { label: "idle", cls: "idle" };
 	};
 
-	const previewLinks = (ports?: PortSummary[]): string[] =>
-		(ports ?? [])
-			.filter(p => typeof p.public === "number" && p.public > 0 && p.type === "tcp")
-			.map(p => `http://localhost:${p.public}`);
+	type PreviewLink = {
+		url: string;
+		privatePort: number;
+	};
+
+	const previewLinks = (entries?: PreviewUrl[]): PreviewLink[] =>
+		Array.from(
+			new Map(
+				(entries ?? [])
+					.filter((entry) => entry.private_port > 0 && entry.url.trim().startsWith("/"))
+					.sort((a, b) => a.private_port - b.private_port)
+					.map((entry) => [entry.url, { url: entry.url, privatePort: entry.private_port }])
+			).values()
+		);
 
 	const st = $derived(statusInfo(status));
 	const isRunning = $derived(st.cls === "ok");
 
-	const previewPorts = $derived(previewLinks(ports));
+	const previewPorts = $derived(previewLinks(previewUrls));
 
 	// ── Dropdown menu state ────────────────────────────────────────────────────
 	let menuOpen = $state(false);
@@ -170,14 +180,14 @@
 	<!-- Ports — NOT clickable (links inside) -->
 	<td class="cell cell-ports">
 		<div class="chips-row">
-			{#each previewPorts as port}
+			{#each previewPorts as preview}
 				<a
 					class="port-chip"
-					href={port}
+					href={preview.url}
 					target="_blank"
 					rel="noreferrer"
-					title={port}
-				>{port.replace("http://localhost:", ":")}</a>
+					title={preview.url}
+				>:{preview.privatePort}</a>
 			{/each}
 			{#if previewPorts.length === 0}
 				<span class="nil">—</span>

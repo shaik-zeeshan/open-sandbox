@@ -2,7 +2,7 @@
 	import SandboxCard from "./SandboxCard.svelte";
 	import Combobox from "./Combobox.svelte";
 	import PortsEditor from "./PortsEditor.svelte";
-	import type { ContainerSummary, ImageSummary, PortSummary, Sandbox } from "$lib/api";
+	import type { ContainerSummary, ImageSummary, PreviewUrl, Sandbox } from "$lib/api";
 
 	let {
 		sandboxes,
@@ -119,7 +119,7 @@
 		image: string;
 		status: string;
 		containerId: string;
-		ports: PortSummary[];
+		previewUrls: PreviewUrl[];
 			createdAt: number | null;
 			metaLabel: string;
 			metaValue: string;
@@ -141,7 +141,7 @@
 			image: sandbox.image,
 			status: sandbox.status,
 			containerId: sandbox.container_id,
-			ports: backingContainer?.ports ?? sandbox.ports ?? [],
+			previewUrls: backingContainer?.preview_urls ?? sandbox.preview_urls ?? [],
 			createdAt: sandbox.created_at,
 			metaLabel: sandbox.owner_username ? "Owner" : "",
 			metaValue: sandbox.owner_username ?? "",
@@ -166,7 +166,7 @@
 				image: container.image,
 				status: container.status,
 				containerId: container.container_id,
-				ports: container.ports ?? [],
+				previewUrls: container.preview_urls ?? [],
 				createdAt: container.created ?? null,
 				metaLabel: composeProject ? "Compose" : "Type",
 				metaValue,
@@ -336,7 +336,7 @@
 							image={workload.image}
 							status={workload.status}
 							containerId={workload.containerId}
-							ports={workload.ports}
+							previewUrls={workload.previewUrls}
 							createdAt={workload.createdAt}
 							metaLabel={workload.metaLabel}
 							metaValue={workload.metaValue}

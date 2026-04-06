@@ -31,7 +31,7 @@
 		type ApiConfig,
 		type ContainerSummary,
 		type FileReadResponse,
-		type PortSummary,
+		type PreviewUrl,
 		type Sandbox
 	} from "$lib/api";
 	import { Context, Effect, Fiber, Layer, type Scope } from "effect";
@@ -293,10 +293,34 @@
 
 	const directoryEntries = $derived(filePayload?.kind === "directory" ? filePayload.entries ?? [] : []);
 
-	const previewLinks = (ports?: PortSummary[]): string[] =>
-		(ports ?? [])
-			.filter((p) => typeof p.public === "number" && p.public > 0 && p.type === "tcp")
-			.map((p) => `http://localhost:${p.public}`);
+	type PreviewLink = {
+		url: string;
+		privatePort: number;
+	};
+
+	const previewLinks = (entries?: PreviewUrl[]): PreviewLink[] =>
+		Array.from(
+			new Map(
+				(entries ?? [])
+					.filter((entry) => entry.private_port > 0 && entry.url.trim().startsWith("/"))
+					.sort((a, b) => a.private_port - b.private_port)
+					.map((entry) => [entry.url, { url: entry.url, privatePort: entry.private_port }])
+			).values()
+		);
+
+	const mergedPreviewUrls = (primary?: PreviewUrl[], secondary?: PreviewUrl[]): PreviewUrl[] => {
+		const seen = new Set<string>();
+		const merged: PreviewUrl[] = [];
+		for (const entry of [...(primary ?? []), ...(secondary ?? [])]) {
+			const key = `${entry.private_port}:${entry.url}`;
+			if (seen.has(key)) {
+				continue;
+			}
+			seen.add(key);
+			merged.push(entry);
+		}
+		return merged;
+	};
 
 	const statusInfo = (status: string): { label: string; cls: "ok" | "error" | "idle" } => {
 		const n = status.toLowerCase();
@@ -319,7 +343,7 @@
 	const workloadStatus = $derived(activeContainer?.status ?? sandbox?.status ?? "");
 	const workloadCreatedAt = $derived(sandbox?.created_at ?? 0);
 	const st = $derived(statusInfo(workloadStatus));
-	const ports = $derived(previewLinks(activeContainer?.ports));
+	const previews = $derived(previewLinks(mergedPreviewUrls(activeContainer?.preview_urls, sandbox?.preview_urls)));
 	const canReset = $derived.by(() => {
 		if (workloadKind === "sandbox") {
 			return true;
@@ -600,15 +624,15 @@
 		</div>
 
 		<div class="ws-header-right">
-			{#if ports.length > 0}
+			{#if previews.length > 0}
 				<div class="port-links">
-					{#each ports as port}
-						<a class="port-link" href={port} target="_blank" rel="noreferrer">
+					{#each previews as preview}
+						<a class="port-link" href={preview.url} target="_blank" rel="noreferrer" title={preview.url}>
 							<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 								<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
 								<polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
 							</svg>
-							:{port.split(":").pop()}
+							:{preview.privatePort}
 						</a>
 					{/each}
 				</div>
@@ -680,12 +704,12 @@
 							<span class="meta-value">{formatDate(workloadCreatedAt)}</span>
 						</div>
 					{/if}
-					{#if ports.length > 0}
+					{#if previews.length > 0}
 						<div class="meta-card meta-card--wide">
 							<span class="meta-label">Exposed ports</span>
 							<div class="port-chips">
-								{#each ports as port}
-									<a class="port-chip" href={port} target="_blank" rel="noreferrer">{port}</a>
+								{#each previews as preview}
+									<a class="port-chip" href={preview.url} target="_blank" rel="noreferrer" title={preview.url}>:{preview.privatePort}</a>
 								{/each}
 							</div>
 						</div>
