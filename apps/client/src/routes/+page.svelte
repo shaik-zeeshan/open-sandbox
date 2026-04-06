@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { goto } from "$app/navigation";
 	import { authController, checkHealth, clearAuthNotice, signOut as signOutSession } from "$lib/auth-controller.svelte";
 	import PageShell from "$lib/components/PageShell.svelte";
 	import SandboxesPanel from "$lib/components/SandboxesPanel.svelte";
@@ -426,7 +427,7 @@
 			createPorts = "";
 			await runProgram(invalidateWorkloadCaches(clientState.config));
 			await refreshData();
-			activeWorkload = { kind: "sandbox", id: created.id };
+			await goto(`/sandboxes/${encodeURIComponent(created.id)}`);
 		} catch (err) {
 			toast.error(formatApiFailure(err));
 		} finally {
@@ -511,13 +512,11 @@
 	}
 
 	function openSandbox(id: string): void {
-		activeWorkload = { kind: "sandbox", id };
+		void goto(`/sandboxes/${encodeURIComponent(id)}`);
 	}
 
 	function openContainer(id: string): void {
-		activeWorkload = { kind: "container", id };
-		activeRuntimeContainerSnapshot = containers.find((c) => c.id === id) ?? null;
-		pendingContainerActivationId = null;
+		void goto(`/containers/${encodeURIComponent(id)}`);
 	}
 
 	function replaceActiveContainer(id: string): void {

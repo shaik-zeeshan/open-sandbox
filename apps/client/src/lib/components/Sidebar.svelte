@@ -79,7 +79,9 @@
 	].filter(item => !item.adminOnly || showAdminNav));
 
 	const isActive = (href: string): boolean => {
-		if (href === "/") return currentPath === "/";
+		if (href === "/") {
+			return currentPath === "/" || currentPath.startsWith("/sandboxes/") || currentPath.startsWith("/containers/");
+		}
 		return currentPath.startsWith(href);
 	};
 </script>

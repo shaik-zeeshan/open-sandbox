@@ -13,9 +13,11 @@
 	import { toast } from "$lib/toast.svelte";
 
 	let {
-		config
+		config,
+		initialProjectName = ""
 	} = $props<{
 		config: ApiConfig;
+		initialProjectName?: string;
 	}>();
 
 	let projectName = $state("");
@@ -90,6 +92,10 @@
 			return;
 		}
 		selectedServices = nextSelected;
+	});
+
+	$effect(() => {
+		projectName = initialProjectName;
 	});
 
 	$effect(() => {

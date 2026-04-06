@@ -331,7 +331,7 @@
 
 	const openComposePage = (projectName?: string): void => {
 		const target = projectName && projectName.length > 0
-			? `${composeHref}?project=${encodeURIComponent(projectName)}`
+			? `${composeHref}/${encodeURIComponent(projectName)}`
 			: composeHref;
 		if (typeof window !== "undefined") {
 			window.location.assign(target);
