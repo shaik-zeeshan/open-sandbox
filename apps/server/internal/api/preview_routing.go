@@ -1,6 +1,7 @@
 package api
 
 import (
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -46,11 +47,6 @@ func loadPreviewRoutingConfig() previewRoutingConfig {
 		parsedPublicBase, _ = url.Parse(publicBase)
 	}
 
-	previewBaseDomain := strings.TrimSpace(strings.ToLower(os.Getenv("SANDBOX_PREVIEW_BASE_DOMAIN")))
-	if previewBaseDomain == "" {
-		previewBaseDomain = defaultPreviewBaseDomain
-	}
-
 	launchPathPrefix := ensureLeadingSlash(strings.TrimSpace(os.Getenv("SANDBOX_PREVIEW_LAUNCH_PATH_PREFIX")))
 	if launchPathPrefix == "/" {
 		launchPathPrefix = defaultPreviewLaunchPath
@@ -80,6 +76,14 @@ func loadPreviewRoutingConfig() previewRoutingConfig {
 		if scheme := strings.TrimSpace(parsedPublicBase.Scheme); scheme != "" {
 			publicBaseScheme = scheme
 		}
+	}
+
+	previewBaseDomain := strings.TrimSpace(strings.ToLower(os.Getenv("SANDBOX_PREVIEW_BASE_DOMAIN")))
+	if previewBaseDomain == "" {
+		previewBaseDomain = derivePreviewBaseDomain(appHost)
+	}
+	if previewBaseDomain == "" {
+		previewBaseDomain = defaultPreviewBaseDomain
 	}
 
 	return previewRoutingConfig{
@@ -160,4 +164,30 @@ func ensureTrailingSlash(value string) string {
 		return trimmed
 	}
 	return trimmed + "/"
+}
+
+func derivePreviewBaseDomain(publicHost string) string {
+	host := strings.TrimSuffix(strings.TrimSpace(strings.ToLower(publicHost)), ".")
+	if host == "" {
+		return ""
+	}
+	if net.ParseIP(host) != nil {
+		return ""
+	}
+	if host == "localhost" {
+		return ""
+	}
+
+	parts := strings.Split(host, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	if parts[0] == "preview" {
+		return host
+	}
+	if len(parts) == 2 {
+		return "preview." + host
+	}
+
+	return "preview." + strings.Join(parts[1:], ".")
 }

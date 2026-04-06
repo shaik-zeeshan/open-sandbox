@@ -38,7 +38,7 @@ Optional:
 - `SANDBOX_PROXY_AUTH_RATE_LIMIT_BURST`: per-user ForwardAuth burst allowance, default `240`
 - `SANDBOX_PROXY_AUTH_RATE_LIMIT_IDLE_TTL`: cleanup TTL for idle per-user rate limiter entries, default `10m`
 - `SANDBOX_PUBLIC_BASE_URL`: public app URL used to build preview launcher links, default `http://app.lvh.me:3000`
-- `SANDBOX_PREVIEW_BASE_DOMAIN`: wildcard preview domain, default `preview.lvh.me`
+- `SANDBOX_PREVIEW_BASE_DOMAIN`: wildcard preview domain; when unset it is auto-derived from `SANDBOX_PUBLIC_BASE_URL` host as `preview.<base-domain>` (fallback `preview.lvh.me`)
 - `SANDBOX_PREVIEW_SESSION_TTL`: signed preview session lifetime, default `10m`
 
 `/health` is intentionally public.

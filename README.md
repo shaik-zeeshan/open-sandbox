@@ -136,7 +136,7 @@ Top-level values (from `.env`):
 - `SANDBOX_PROXY_AUTH_RATE_LIMIT_IDLE_TTL` (optional, default `10m`)
 - `SANDBOX_PUBLIC_BASE_URL` (optional, default `http://app.lvh.me:${OPEN_SANDBOX_HTTP_PORT}`)
   - set this to your external app URL when you expose a non-default host/port (for preview callback links)
-- `SANDBOX_PREVIEW_BASE_DOMAIN` (optional, default `preview.lvh.me`)
+- `SANDBOX_PREVIEW_BASE_DOMAIN` (optional, default auto-derived from `SANDBOX_PUBLIC_BASE_URL` host as `preview.<base-domain>`, fallback `preview.lvh.me`)
 - `SANDBOX_PREVIEW_SESSION_TTL` (optional, default `10m`)
 
 Backend values inside the server container:
