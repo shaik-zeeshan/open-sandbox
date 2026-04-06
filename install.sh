@@ -19,7 +19,7 @@ NETWORK_NAME="open-sandbox"
 SERVER_CONTAINER_NAME="open-sandbox-server"
 CLIENT_CONTAINER_NAME="open-sandbox-client"
 TRAEFIK_CONTAINER_NAME="open-sandbox-traefik"
-TRAEFIK_DYNAMIC_CONFIG="$CONFIG_DIR/traefik.dynamic.yml"
+TRAEFIK_DYNAMIC_CONFIG_DIR="$DATA_DIR/traefik/dynamic"
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -90,39 +90,11 @@ require_command openssl
 require_command curl
 require_command grep
 
-write_traefik_dynamic_config() {
-  cat >"$TRAEFIK_DYNAMIC_CONFIG" <<EOF
-http:
-  routers:
-    server:
-      entryPoints:
-        - web
-      rule: "PathPrefix(\`/api\`) || PathPrefix(\`/auth\`) || PathPrefix(\`/health\`) || PathPrefix(\`/metrics\`) || PathPrefix(\`/swagger\`)"
-      service: server
-      priority: 100
-    client:
-      entryPoints:
-        - web
-      rule: "PathPrefix(\`/\`)"
-      service: client
-      priority: 1
-
-  services:
-    server:
-      loadBalancer:
-        servers:
-          - url: "http://server:8080"
-    client:
-      loadBalancer:
-        servers:
-          - url: "http://client:80"
-EOF
-}
-
-run_sudo mkdir -p "$DATA_DIR" "$DB_DIR" "$WORKSPACE_DIR" "$CONFIG_DIR"
-run_sudo chown root:root "$DATA_DIR" "$DB_DIR" "$WORKSPACE_DIR"
+run_sudo mkdir -p "$DATA_DIR" "$DB_DIR" "$WORKSPACE_DIR" "$CONFIG_DIR" "$TRAEFIK_DYNAMIC_CONFIG_DIR"
+run_sudo chown root:root "$DATA_DIR" "$DB_DIR" "$WORKSPACE_DIR" "$TRAEFIK_DYNAMIC_CONFIG_DIR"
 run_sudo chmod 755 "$DATA_DIR"
 run_sudo chmod 770 "$DB_DIR" "$WORKSPACE_DIR"
+run_sudo chmod 755 "$TRAEFIK_DYNAMIC_CONFIG_DIR"
 run_sudo chown "$INSTALL_USER:$INSTALL_GROUP" "$CONFIG_DIR"
 run_sudo chmod 700 "$CONFIG_DIR"
 
@@ -151,9 +123,6 @@ SANDBOX_RUNTIME_CPU_LIMIT=${SANDBOX_RUNTIME_CPU_LIMIT:-2}
 SANDBOX_RUNTIME_PIDS_LIMIT=${SANDBOX_RUNTIME_PIDS_LIMIT:-512}
 SANDBOX_MAINTENANCE_ARTIFACT_MAX_AGE=${SANDBOX_MAINTENANCE_ARTIFACT_MAX_AGE:-168h}
 SANDBOX_MAINTENANCE_MISSING_SANDBOX_MAX_AGE=${SANDBOX_MAINTENANCE_MISSING_SANDBOX_MAX_AGE:-24h}
-
-write_traefik_dynamic_config
-chmod 600 "$TRAEFIK_DYNAMIC_CONFIG"
 
 docker pull "$SERVER_IMAGE"
 docker pull "$CLIENT_IMAGE"
@@ -185,9 +154,11 @@ docker run -d \
   -e SANDBOX_RUNTIME_PIDS_LIMIT="$SANDBOX_RUNTIME_PIDS_LIMIT" \
   -e SANDBOX_MAINTENANCE_ARTIFACT_MAX_AGE="$SANDBOX_MAINTENANCE_ARTIFACT_MAX_AGE" \
   -e SANDBOX_MAINTENANCE_MISSING_SANDBOX_MAX_AGE="$SANDBOX_MAINTENANCE_MISSING_SANDBOX_MAX_AGE" \
+  -e SANDBOX_TRAEFIK_DYNAMIC_CONFIG_DIR=/data/traefik/dynamic \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v "$DB_DIR:/data" \
   -v "$WORKSPACE_DIR:$WORKSPACE_DIR" \
+  -v "$TRAEFIK_DYNAMIC_CONFIG_DIR:/data/traefik/dynamic" \
   "$SERVER_IMAGE" >/dev/null
 
 wait_for_server_health
@@ -205,14 +176,15 @@ docker run -d \
   --name "$TRAEFIK_CONTAINER_NAME" \
   --restart unless-stopped \
   --network "$NETWORK_NAME" \
+  --add-host host.docker.internal:host-gateway \
   --memory 128m \
   --cpus 0.25 \
   --pids-limit 128 \
   -p "$OPEN_SANDBOX_HTTP_PORT:80" \
-  -v "$TRAEFIK_DYNAMIC_CONFIG:/etc/traefik/dynamic.yml:ro" \
+  -v "$TRAEFIK_DYNAMIC_CONFIG_DIR:/etc/traefik/dynamic:ro" \
   "$TRAEFIK_IMAGE" \
   --entrypoints.web.address=:80 \
-  --providers.file.filename=/etc/traefik/dynamic.yml \
+  --providers.file.directory=/etc/traefik/dynamic \
   --providers.file.watch=true >/dev/null
 
 for ((i = 0; i < 30; i += 1)); do

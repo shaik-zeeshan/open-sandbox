@@ -334,6 +334,70 @@ func TestListWorkersIncludesLocalWorker(t *testing.T) {
 	}
 }
 
+func TestGetTraefikRouteStateIncludesManagedWorkloads(t *testing.T) {
+	originalCommandRunner := commandRunner
+	defer func() { commandRunner = originalCommandRunner }()
+
+	commandRunner = func(_ context.Context, name string, args ...string) (string, string, error) {
+		if name == "docker" && len(args) >= 3 && args[0] == "ps" && args[1] == "-a" {
+			return strings.Join([]string{
+				`{"ID":"sandbox-container","Image":"node:20","Names":"sandbox-one","Ports":"0.0.0.0:43000->3000/tcp","Status":"Up 1 minute","Labels":"open-sandbox.managed=true,open-sandbox.sandbox_id=sandbox-1,open-sandbox.owner_id=admin-user"}`,
+				`{"ID":"direct-container","Image":"nginx:latest","Names":"direct-one","Ports":"0.0.0.0:48080->8080/tcp","Status":"Up 1 minute","Labels":"open-sandbox.managed=true,open-sandbox.kind=direct,open-sandbox.managed_id=ctr-1,open-sandbox.owner_id=admin-user"}`,
+				`{"ID":"compose-web","Image":"nginx:latest","Names":"demo-web-1","Ports":"0.0.0.0:50080->80/tcp","Status":"Up 1 minute","Labels":"open-sandbox.managed=true,open-sandbox.owner_id=admin-user,com.docker.compose.project=demo,com.docker.compose.service=web"}`,
+			}, "\n"), "", nil
+		}
+		return "", "", errors.New("unexpected command")
+	}
+
+	t.Setenv("SANDBOX_TRAEFIK_DYNAMIC_CONFIG_DIR", filepath.Join(t.TempDir(), "traefik", "dynamic"))
+	store := newSQLiteStoreForAPITest(t)
+	s := newTestServerWithStore(&mockDocker{}, store)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/traefik/routes", nil)
+	setAuthHeader(t, req)
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var payload traefikRouteStateResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !payload.Enabled {
+		t.Fatalf("expected enabled=true, got false")
+	}
+	if payload.DynamicConfigDir == "" {
+		t.Fatal("expected dynamic config dir in response")
+	}
+	if len(payload.Sandboxes) != 1 || payload.Sandboxes[0].File != "sandbox-sandbox-1.yaml" {
+		t.Fatalf("unexpected sandbox route state: %+v", payload.Sandboxes)
+	}
+	if len(payload.Containers) != 1 || payload.Containers[0].File != "container-ctr-1.yaml" {
+		t.Fatalf("unexpected container route state: %+v", payload.Containers)
+	}
+	if len(payload.ComposeProjects) != 1 || payload.ComposeProjects[0].File != "compose-demo.yaml" {
+		t.Fatalf("unexpected compose route state: %+v", payload.ComposeProjects)
+	}
+}
+
+func TestGetTraefikRouteStateRequiresAdmin(t *testing.T) {
+	s := newTestServer(&mockDocker{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/traefik/routes", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "member", Role: roleMember}))
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestWorkerRegisterAndHeartbeat(t *testing.T) {
 	t.Setenv("SANDBOX_WORKER_SHARED_SECRET", "worker-secret")
 	store := newSQLiteStoreForAPITest(t)

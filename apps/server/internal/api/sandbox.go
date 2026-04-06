@@ -210,6 +210,7 @@ func (s *Server) resetContainer(c *gin.Context) {
 			writeErrorWithDetails(c, http.StatusInternalServerError, "compose reset failed", "command_failed", strings.TrimSpace(result.Stderr))
 			return
 		}
+		s.syncTraefikRoutes(c.Request.Context())
 
 		c.JSON(http.StatusOK, gin.H{"id": result.WorkloadID, "container_id": result.ContainerID, "reset": true, "stdout": result.Stdout, "stderr": result.Stderr})
 		return
@@ -261,6 +262,7 @@ func (s *Server) resetContainer(c *gin.Context) {
 			return
 		}
 	}
+	s.syncTraefikRoutes(c.Request.Context())
 
 	c.JSON(http.StatusOK, gin.H{"id": target.ID, "container_id": created.ID, "reset": true})
 }
@@ -304,6 +306,7 @@ func (s *Server) removeContainer(c *gin.Context) {
 	if s.sandboxStore != nil {
 		_ = s.sandboxStore.DeleteSandboxByContainerID(c.Request.Context(), target.ContainerID)
 	}
+	s.syncTraefikRoutes(c.Request.Context())
 
 	c.JSON(http.StatusOK, gin.H{"id": target.ID, "container_id": target.ContainerID, "removed": true})
 }
@@ -523,6 +526,7 @@ func (s *Server) createSandbox(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, fmt.Errorf("persist sandbox: %w", err))
 		return
 	}
+	s.syncTraefikRoutes(c.Request.Context())
 	s.logLifecycleSuccess("create_sandbox", slog.String("sandbox_id", sandboxID), slog.String("container_id", created.ID), slog.String("owner_id", identity.UserID))
 
 	c.JSON(http.StatusOK, sandboxToResponse(sandboxRecord))
@@ -739,6 +743,7 @@ func (s *Server) deleteSandbox(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
+	s.syncTraefikRoutes(c.Request.Context())
 
 	s.logLifecycleSuccess("delete_sandbox", slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))
 	c.JSON(http.StatusOK, gin.H{"id": sandbox.ID, "deleted": true})

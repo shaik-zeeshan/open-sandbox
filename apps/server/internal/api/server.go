@@ -39,6 +39,7 @@ import (
 	"github.com/gorilla/websocket"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/shaik-zeeshan/open-sandbox/internal/store"
+	traefikcfg "github.com/shaik-zeeshan/open-sandbox/internal/traefik"
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
 )
@@ -110,6 +111,7 @@ type Server struct {
 	metrics         *operationalMetrics
 	runtimeLimits   runtimeLimits
 	workspaceRoot   string
+	traefikWriter   *traefikcfg.ConfigWriter
 	execWaitTimeout time.Duration
 }
 
@@ -325,11 +327,21 @@ func NewServerWithStore(dockerClient DockerAPI, authConfig AuthConfig, sandboxSt
 		metrics:         newOperationalMetrics(),
 		runtimeLimits:   loadRuntimeLimitsFromEnv(),
 		workspaceRoot:   workspaceRoot,
+		traefikWriter:   nil,
 		execWaitTimeout: loadExecWaitTimeout(),
+	}
+	if traefikDir := strings.TrimSpace(os.Getenv("SANDBOX_TRAEFIK_DYNAMIC_CONFIG_DIR")); traefikDir != "" {
+		writer, writerErr := traefikcfg.NewConfigWriter(traefikDir)
+		if writerErr != nil {
+			logger.Warn("traefik_route_writer_disabled", slog.String("reason", writerErr.Error()))
+		} else {
+			s.traefikWriter = writer
+		}
 	}
 	s.runtime = newDelegatingRuntime(workerStore, localRuntimeWorkerID, newDockerRuntime(localRuntimeWorkerID, dockerClient, func() string { return s.workspaceRoot }))
 	s.ensureLocalWorkerRegistration(context.Background())
 	s.registerRoutes()
+	s.syncTraefikRoutes(context.Background())
 	return s
 }
 
@@ -403,6 +415,7 @@ func (s *Server) registerRoutes() {
 		api.PUT("/sandboxes/:id/files", s.writeSandboxFile)
 
 		api.GET("/admin/workers", s.listWorkers)
+		api.GET("/admin/traefik/routes", s.getTraefikRouteState)
 		api.POST("/admin/maintenance/cleanup", s.runMaintenanceCleanup)
 	}
 
@@ -737,6 +750,7 @@ func (s *Server) composeUp(c *gin.Context) {
 		flusher.Flush()
 		return
 	}
+	s.syncTraefikRoutes(c.Request.Context())
 
 	emitSSE(c, mu, "done", "compose up completed")
 	flusher.Flush()
@@ -784,6 +798,7 @@ func (s *Server) composeDown(c *gin.Context) {
 		writeErrorWithDetails(c, http.StatusInternalServerError, "compose down failed", "command_failed", strings.TrimSpace(stderr))
 		return
 	}
+	s.syncTraefikRoutes(c.Request.Context())
 
 	c.JSON(http.StatusOK, ComposeResponse{Stdout: stdout, Stderr: stderr})
 }
@@ -1098,6 +1113,7 @@ func (s *Server) createContainer(c *gin.Context) {
 		}
 		started = true
 	}
+	s.syncTraefikRoutes(c.Request.Context())
 	s.logLifecycleSuccess("create_container", slog.String("container_id", created.ID), slog.String("managed_id", managedID), slog.Bool("started", started))
 
 	c.JSON(http.StatusOK, CreateContainerResponse{ID: managedID, ContainerID: created.ID, Warnings: created.Warnings, Started: started})
