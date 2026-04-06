@@ -160,6 +160,22 @@ func TestBootstrapAllowsSameHostOriginBehindProxy(t *testing.T) {
 	}
 }
 
+func TestBootstrapAllowsConfiguredDevOrigin(t *testing.T) {
+	t.Setenv("SANDBOX_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
+	s := newAuthServer(t, AuthConfig{JWTSecret: []byte("jwt-secret"), Issuer: "open-sandbox"})
+	req := httptest.NewRequest(http.MethodPost, "/auth/bootstrap", bytes.NewBufferString(`{"username":"admin","password":"local-dev-password"}`))
+	req.Host = "localhost:8080"
+	req.Header.Set("Origin", "http://localhost:5173")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+}
+
 func TestAuthMiddlewareRejectsExpiredToken(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()

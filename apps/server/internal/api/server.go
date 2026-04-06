@@ -271,8 +271,7 @@ func NewServerWithStore(dockerClient DockerAPI, authConfig AuthConfig, sandboxSt
 	r.Use(requestLoggerMiddleware(logger))
 	origins := loadAllowedOrigins()
 	r.Use(cors.New(cors.Config{
-		AllowOriginFunc:            buildAllowOriginFunc(origins),
-		AllowOriginWithContextFunc: buildAllowOriginWithContextFunc(),
+		AllowOriginWithContextFunc: buildAllowOriginWithContextFunc(origins),
 		AllowMethods:               []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowHeaders:               []string{"Authorization", "Content-Type", "Accept", "X-Request-ID", "Traceparent", "Tracestate", "Baggage", "B3", "X-B3-TraceId", "X-B3-SpanId", "X-B3-ParentSpanId", "X-B3-Sampled", "X-B3-Flags", "Sentry-Trace"},
 		ExposeHeaders:              []string{"X-Request-ID"},
@@ -1932,9 +1931,10 @@ func buildAllowOriginFunc(allowedOrigins []string) func(string) bool {
 	}
 }
 
-func buildAllowOriginWithContextFunc() func(*gin.Context, string) bool {
+func buildAllowOriginWithContextFunc(allowedOrigins []string) func(*gin.Context, string) bool {
+	allowOrigin := buildAllowOriginFunc(allowedOrigins)
 	return func(c *gin.Context, origin string) bool {
-		return requestOriginMatchesForwardedHost(c.Request, origin)
+		return allowOrigin(origin) || requestOriginMatchesForwardedHost(c.Request, origin)
 	}
 }
 
