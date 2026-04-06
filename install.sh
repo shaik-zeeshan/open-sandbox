@@ -184,6 +184,7 @@ docker run -d \
   -v "$TRAEFIK_DYNAMIC_CONFIG_DIR:/etc/traefik/dynamic:ro" \
   "$TRAEFIK_IMAGE" \
   --entrypoints.web.address=:80 \
+  --entrypoints.web.forwardedHeaders.insecure=false \
   --providers.file.directory=/etc/traefik/dynamic \
   --providers.file.watch=true >/dev/null
 

@@ -50,6 +50,8 @@ services:
       - ${OPEN_SANDBOX_DATA_DIR:?set OPEN_SANDBOX_DATA_DIR in .env}/db:/data
       - ${OPEN_SANDBOX_DATA_DIR:?set OPEN_SANDBOX_DATA_DIR in .env}/workspace:${OPEN_SANDBOX_DATA_DIR:?set OPEN_SANDBOX_DATA_DIR in .env}/workspace
       - ${OPEN_SANDBOX_DATA_DIR:?set OPEN_SANDBOX_DATA_DIR in .env}/traefik/dynamic:/data/traefik/dynamic
+    expose:
+      - "8080"
 
   client:
     build:
@@ -64,3 +66,5 @@ services:
     mem_limit: 256m
     cpus: 0.5
     pids_limit: 128
+    expose:
+      - "80"

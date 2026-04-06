@@ -40,7 +40,14 @@ Optional:
 
 `/health` is intentionally public.
 
-`/metrics` is also public so it can be scraped through the same reverse proxy path on a single server.
+`/metrics` is also public so it can be scraped through the same Traefik entrypoint on a single server.
+
+Traefik is the only public proxy in packaged deployments. The server remains the API/auth/control plane and publishes dynamic Traefik config for preview routes under `/proxy/...`.
+
+Preview caveats:
+- previews are path-based (`/proxy/sandboxes/...`, `/proxy/containers/...`, `/proxy/compose/...`)
+- preview routes are created only for published ports
+- compose services with internal-only ports are intentionally not previewable
 
 When the database has no users yet, create the initial admin account through `/auth/bootstrap` or the UI login screen. Additional users are managed through `/api/users` by an admin session.
 

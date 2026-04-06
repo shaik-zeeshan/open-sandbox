@@ -16,10 +16,10 @@ VITE_SANDBOX_BASE_URL=http://localhost:8080
 
 ## Production build
 
-The production build uses `@sveltejs/adapter-static` and emits a static site that can be served by Nginx or another reverse proxy.
+The production build uses `@sveltejs/adapter-static` and emits a static site.
 
 ```sh
 bun run build:client
 ```
 
-For the bundled self-hosted stack, the client is served by Nginx and proxies `/api`, `/auth`, `/health`, and `/swagger` to the backend so the browser can use a same-origin base URL.
+In the bundled self-hosted stack, this container serves static assets only. Traefik is the public edge proxy and routes `/api`, `/auth`, `/health`, `/metrics`, `/swagger`, and `/proxy/...` to the correct backend service.

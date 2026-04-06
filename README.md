@@ -2,6 +2,8 @@
 
 Monorepo for the open-sandbox API and dashboard.
 
+Traefik is the only public proxy in self-hosted deployments. The client container serves only static assets, while the server remains the API/auth/control plane.
+
 ## Repo layout
 
 - `apps/server`: Go API service for sandbox/container management
@@ -70,13 +72,26 @@ docker compose up -d
 ```
 
 Default URL:
-- UI + API proxy + Swagger: `http://localhost:3000`
+- UI + API + auth + preview routes: `http://localhost:3000`
 
-The stack runs two containers:
-- `server`: Go API service
-- `client`: Nginx serving the dashboard and proxying backend routes
+The stack runs three containers:
+- `traefik`: public edge proxy (the only published port)
+- `server`: Go API/auth/control-plane service
+- `client`: static dashboard content
 
 The API talks to the host Docker daemon through `/var/run/docker.sock`.
+
+### Preview routing model
+
+Preview URLs are path-based and served through Traefik:
+- sandboxes: `/proxy/sandboxes/<sandbox-id>/<private-port>/`
+- managed containers: `/proxy/containers/<managed-id>/<private-port>/`
+- compose services: `/proxy/compose/<project>/<service>/<private-port>/`
+
+Important behavior:
+- compose previews are available only for ports published to the host (`HOST:CONTAINER`)
+- container ports that are only internal (for example `3000/tcp` with no host publish) are not previewable
+- because previews are path-based, apps that assume they are mounted at `/` may need their own base-path configuration
 
 ### Compose environment variables
 
@@ -113,6 +128,7 @@ Common tags:
 - `v*` git tags
 
 Use `compose.ghcr.yaml` when you want to pull images instead of building locally.
+It uses the same routing topology (`traefik` edge + static `client` + `server` control plane).
 
 ## Install from GHCR
 
@@ -146,7 +162,7 @@ IMAGE_TAG=v1.2.3 ./install.sh
 - generates `SANDBOX_JWT_SECRET` with `openssl` if missing
 - prepares `/var/lib/open-sandbox/db` and `/var/lib/open-sandbox/workspace`
 - sets required directory permissions
-- pulls GHCR images and starts containers with `docker run`
+- pulls GHCR images and starts `traefik`, `server`, and `client` with `docker run`
 
 Because it writes under `/var/lib/open-sandbox`, it may prompt for `sudo`.
 
