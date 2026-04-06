@@ -115,7 +115,7 @@ The repo also includes `compose.ghcr.yaml` for image-based deploys that pull fro
 
 ## Install from GHCR
 
-Use the local installer to pull the published images and start the stack:
+Use the installer to pull the published images and start the stack:
 
 ```bash
 ./install.sh
@@ -128,12 +128,13 @@ IMAGE_TAG=v1.2.3 ./install.sh
 ```
 
 What `install.sh` does:
-- creates or updates the repo `.env`
+- works as a standalone script and does not require the repo checkout after you have the script file
+- creates or updates `/var/lib/open-sandbox/config/open-sandbox.env`
 - generates `SANDBOX_JWT_SECRET` with `openssl` if needed
 - sets `OPEN_SANDBOX_DATA_DIR=/var/lib/open-sandbox`
 - creates `/var/lib/open-sandbox/db` and `/var/lib/open-sandbox/workspace`
 - sets directory permissions for the persistent data folders
-- pulls the GHCR images and starts the stack with `compose.ghcr.yaml`
+- pulls the GHCR images and starts the containers with `docker run`
 
 Because the install path uses `/var/lib/open-sandbox`, the script may prompt for `sudo`.
 
