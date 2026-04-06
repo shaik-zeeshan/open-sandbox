@@ -2,13 +2,14 @@
 	import SandboxCard from "./SandboxCard.svelte";
 	import Combobox from "./Combobox.svelte";
 	import PortsEditor from "./PortsEditor.svelte";
-	import type { ComposeProjectPreview, ContainerSummary, ImageSummary, PreviewUrl, Sandbox } from "$lib/api";
+	import { resolveApiUrl, type ApiConfig, type ComposeProjectPreview, type ContainerSummary, type ImageSummary, type PreviewUrl, type Sandbox } from "$lib/api";
 
 	let {
 		sandboxes,
 		containers,
 		composeProjects,
 		images,
+		config,
 		loading,
 		onOpen,
 		onRestart,
@@ -39,6 +40,7 @@
 		containers: ContainerSummary[];
 		composeProjects: ComposeProjectPreview[];
 		images: ImageSummary[];
+		config: ApiConfig;
 		loading: boolean;
 		onOpen: (id: string) => void;
 		onRestart: (id: string) => void;
@@ -119,6 +121,14 @@
 		{ value: "unknown", label: "Unknown" }
 	] as const;
 
+	const normalizePreviewUrls = (entries: PreviewUrl[] | undefined): PreviewUrl[] =>
+		(entries ?? [])
+			.filter((entry) => entry.private_port > 0 && entry.url.trim().length > 0)
+			.map((entry) => ({
+				...entry,
+				url: resolveApiUrl(config, entry.url)
+			}));
+
 		type WorkloadCardItem = {
 			key: string;
 			kind: "sandbox" | "container" | "compose";
@@ -153,7 +163,7 @@
 			image: sandbox.image,
 			status: sandbox.status,
 			containerId: sandbox.container_id,
-			previewUrls: backingContainer?.preview_urls ?? sandbox.preview_urls ?? [],
+			previewUrls: normalizePreviewUrls(backingContainer?.preview_urls ?? sandbox.preview_urls ?? []),
 			createdAt: sandbox.created_at,
 			metaLabel: "Sandbox",
 			metaValue: owner.length > 0 ? `${owner} · ${workspaceDir}` : `Workspace ${workspaceDir}`,
@@ -182,7 +192,7 @@
 				image: container.image,
 				status: container.status,
 				containerId: container.container_id,
-				previewUrls: container.preview_urls ?? [],
+				previewUrls: normalizePreviewUrls(container.preview_urls ?? []),
 				createdAt: container.created ?? null,
 				metaLabel: composeProject ? "Compose service" : "Standalone container",
 				metaValue,
@@ -275,11 +285,11 @@
 				serviceCount: project.services.length,
 				ports: project.services.flatMap((service: ComposeProjectPreview["services"][number]) =>
 					service.ports
-						.filter((port: ComposeProjectPreview["services"][number]["ports"][number]) => port.private_port > 0 && port.preview_url.trim().startsWith("/"))
+						.filter((port: ComposeProjectPreview["services"][number]["ports"][number]) => port.private_port > 0 && port.preview_url.trim().length > 0)
 						.map((port: ComposeProjectPreview["services"][number]["ports"][number]) => ({
 							serviceName: service.service_name,
 							privatePort: port.private_port,
-							previewUrl: port.preview_url
+							previewUrl: resolveApiUrl(config, port.preview_url)
 						}))
 				)
 			});
@@ -298,16 +308,17 @@
 			existing.serviceCount = Math.max(existing.serviceCount, serviceNames.size);
 
 			for (const preview of container.preview_urls ?? []) {
-				if (preview.private_port <= 0 || !preview.url.trim().startsWith("/")) {
+				if (preview.private_port <= 0 || preview.url.trim().length === 0) {
 					continue;
 				}
-				if (existing.ports.some((item) => item.serviceName === serviceName && item.privatePort === preview.private_port && item.previewUrl === preview.url)) {
+				const absolutePreviewUrl = resolveApiUrl(config, preview.url);
+				if (existing.ports.some((item) => item.serviceName === serviceName && item.privatePort === preview.private_port && item.previewUrl === absolutePreviewUrl)) {
 					continue;
 				}
 				existing.ports.push({
 					serviceName,
 					privatePort: preview.private_port,
-					previewUrl: preview.url
+					previewUrl: absolutePreviewUrl
 				});
 			}
 

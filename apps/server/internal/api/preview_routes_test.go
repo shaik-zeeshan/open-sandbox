@@ -6,6 +6,7 @@ import (
 )
 
 func TestPreviewURLGenerationUsesPublishedPortsAndEscapedTokens(t *testing.T) {
+	s := newTestServer(&mockDocker{})
 	ports := []PortSummary{
 		{Private: 8080, Public: 48080, Type: "tcp"},
 		{Private: 80, Public: 40080, Type: "tcp"},
@@ -15,10 +16,10 @@ func TestPreviewURLGenerationUsesPublishedPortsAndEscapedTokens(t *testing.T) {
 	}
 
 	t.Run("sandbox", func(t *testing.T) {
-		got := previewURLsForSandbox(" sandbox /one ", ports)
+		got := s.previewURLsForSandbox(" sandbox /one ", ports)
 		want := []PreviewURL{
-			{PrivatePort: 80, URL: "/proxy/sandboxes/sandbox%20%2Fone/80/"},
-			{PrivatePort: 8080, URL: "/proxy/sandboxes/sandbox%20%2Fone/8080/"},
+			{PrivatePort: 80, URL: "/auth/preview/launch/sandboxes/sandbox%20%2Fone/80"},
+			{PrivatePort: 8080, URL: "/auth/preview/launch/sandboxes/sandbox%20%2Fone/8080"},
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("unexpected sandbox preview urls: got=%+v want=%+v", got, want)
@@ -26,10 +27,10 @@ func TestPreviewURLGenerationUsesPublishedPortsAndEscapedTokens(t *testing.T) {
 	})
 
 	t.Run("managed_container", func(t *testing.T) {
-		got := previewURLsForManagedContainer(" ctr/123 ", ports)
+		got := s.previewURLsForManagedContainer(" ctr/123 ", ports)
 		want := []PreviewURL{
-			{PrivatePort: 80, URL: "/proxy/containers/ctr%2F123/80/"},
-			{PrivatePort: 8080, URL: "/proxy/containers/ctr%2F123/8080/"},
+			{PrivatePort: 80, URL: "/auth/preview/launch/containers/ctr%2F123/80"},
+			{PrivatePort: 8080, URL: "/auth/preview/launch/containers/ctr%2F123/8080"},
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("unexpected managed preview urls: got=%+v want=%+v", got, want)
@@ -37,10 +38,10 @@ func TestPreviewURLGenerationUsesPublishedPortsAndEscapedTokens(t *testing.T) {
 	})
 
 	t.Run("compose_service", func(t *testing.T) {
-		got := previewURLsForComposeService(" demo/proj ", " web ui ", ports)
+		got := s.previewURLsForComposeService(" demo/proj ", " web ui ", ports)
 		want := []PreviewURL{
-			{PrivatePort: 80, URL: "/proxy/compose/demo%2Fproj/web%20ui/80/"},
-			{PrivatePort: 8080, URL: "/proxy/compose/demo%2Fproj/web%20ui/8080/"},
+			{PrivatePort: 80, URL: "/auth/preview/launch/compose/demo%2Fproj/web%20ui/80"},
+			{PrivatePort: 8080, URL: "/auth/preview/launch/compose/demo%2Fproj/web%20ui/8080"},
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("unexpected compose preview urls: got=%+v want=%+v", got, want)
@@ -49,7 +50,8 @@ func TestPreviewURLGenerationUsesPublishedPortsAndEscapedTokens(t *testing.T) {
 }
 
 func TestBuildComposeProjectPreviewTypedResponse(t *testing.T) {
-	preview := buildComposeProjectPreview("demo project", []ContainerSummary{
+	s := newTestServer(&mockDocker{})
+	preview := s.buildComposeProjectPreview("demo project", []ContainerSummary{
 		{
 			ProjectName: "demo project",
 			ServiceName: "web/api",
@@ -92,7 +94,7 @@ func TestBuildComposeProjectPreviewTypedResponse(t *testing.T) {
 	if len(preview.Services[0].Ports) != 1 {
 		t.Fatalf("expected api service to include one published port, got %+v", preview.Services[0].Ports)
 	}
-	if preview.Services[0].Ports[0].PreviewURL != "/proxy/compose/demo%20project/api/3000/" {
+	if preview.Services[0].Ports[0].PreviewURL != "/auth/preview/launch/compose/demo%20project/api/3000" {
 		t.Fatalf("unexpected api preview url: %q", preview.Services[0].Ports[0].PreviewURL)
 	}
 
@@ -107,7 +109,7 @@ func TestBuildComposeProjectPreviewTypedResponse(t *testing.T) {
 	if webPorts[0].PrivatePort != 80 || webPorts[0].PublicPort != 50080 || webPorts[0].Type != "tcp" {
 		t.Fatalf("unexpected first web port: %+v", webPorts[0])
 	}
-	if webPorts[0].PreviewURL != "/proxy/compose/demo%20project/web%2Fapi/80/" {
+	if webPorts[0].PreviewURL != "/auth/preview/launch/compose/demo%20project/web%2Fapi/80" {
 		t.Fatalf("unexpected escaped web preview url: %q", webPorts[0].PreviewURL)
 	}
 	if webPorts[1].Type != "udp" || webPorts[1].IP != "127.0.0.1" {

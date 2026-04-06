@@ -571,7 +571,7 @@
 							bind:value={endpointValue}
 							autocapitalize="none"
 							spellcheck="false"
-							placeholder="http://localhost:8080"
+							placeholder="http://app.lvh.me:8080"
 							onkeydown={(event) => {
 								if (event.key === "Enter") {
 									event.preventDefault();
@@ -645,6 +645,7 @@
 				{containers}
 				{composeProjects}
 				{images}
+				config={clientState.config}
 				loading={dataLoading}
 				onOpen={(id) => openSandbox(id)}
 				onOpenContainer={(id) => openContainer(id)}

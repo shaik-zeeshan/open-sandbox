@@ -3,13 +3,13 @@ http:
     server:
       entryPoints:
         - web
-      rule: "PathPrefix(`/api`) || PathPrefix(`/auth`) || PathPrefix(`/health`) || PathPrefix(`/metrics`) || PathPrefix(`/swagger`)"
+      rule: "Host(`app.lvh.me`) && (PathPrefix(`/api`) || PathPrefix(`/auth`) || PathPrefix(`/health`) || PathPrefix(`/metrics`) || PathPrefix(`/swagger`))"
       service: server
       priority: 100
     client:
       entryPoints:
         - web
-      rule: "PathPrefix(`/`)"
+      rule: "Host(`app.lvh.me`) && PathPrefix(`/`)"
       service: client
       priority: 1
 

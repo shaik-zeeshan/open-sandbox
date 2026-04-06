@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -14,7 +15,12 @@ import (
 )
 
 func TestParseProxyAuthorizationTarget(t *testing.T) {
-	target, err := parseProxyAuthorizationTarget("/proxy/compose/demo/web/3000/path?x=1")
+	target, err := parseProxyAuthorizationTargetFromHeaders(http.Header{
+		proxyTypeHeaderName:        []string{previewTargetTypeCompose},
+		proxyProjectHeaderName:     []string{"demo"},
+		proxyServiceHeaderName:     []string{"web"},
+		proxyPrivatePortHeaderName: []string{"3000"},
+	})
 	if err != nil {
 		t.Fatalf("expected target to parse: %v", err)
 	}
@@ -22,15 +28,15 @@ func TestParseProxyAuthorizationTarget(t *testing.T) {
 		t.Fatalf("unexpected parsed target: %+v", target)
 	}
 
-	if _, err := parseProxyAuthorizationTarget("/api/containers"); err == nil {
-		t.Fatal("expected non-proxy path to be rejected")
+	if _, err := parseProxyAuthorizationTargetFromHeaders(http.Header{}); err == nil {
+		t.Fatal("expected missing headers to be rejected")
 	}
 }
 
 func TestProxyAuthorizeRejectsMissingCredentials(t *testing.T) {
 	s := newTestServerWithStore(&mockDocker{}, &mockSandboxStore{})
 	req := httptest.NewRequest(http.MethodGet, "/auth/proxy/authorize", nil)
-	req.Header.Set("X-Forwarded-Uri", "/proxy/sandboxes/sandbox-1/3000/")
+	setSandboxProxyHeaders(req, "sandbox-1", 3000)
 	w := httptest.NewRecorder()
 
 	s.Router().ServeHTTP(w, req)
@@ -56,7 +62,7 @@ func TestProxyAuthorizeAllowsOwnedSandboxPublishedPort(t *testing.T) {
 	s := newTestServerWithStore(&mockDocker{}, sandboxStore)
 	req := httptest.NewRequest(http.MethodGet, "/auth/proxy/authorize", nil)
 	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
-	req.Header.Set("X-Forwarded-Uri", "/proxy/sandboxes/sandbox-1/80/")
+	setSandboxProxyHeaders(req, "sandbox-1", 80)
 	w := httptest.NewRecorder()
 
 	s.Router().ServeHTTP(w, req)
@@ -84,7 +90,7 @@ func TestProxyAuthorizeRateLimited(t *testing.T) {
 
 	first := httptest.NewRequest(http.MethodGet, "/auth/proxy/authorize", nil)
 	first.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
-	first.Header.Set("X-Forwarded-Uri", "/proxy/sandboxes/sandbox-1/80/")
+	setSandboxProxyHeaders(first, "sandbox-1", 80)
 	firstWriter := httptest.NewRecorder()
 	s.Router().ServeHTTP(firstWriter, first)
 	if firstWriter.Code != http.StatusOK {
@@ -93,7 +99,7 @@ func TestProxyAuthorizeRateLimited(t *testing.T) {
 
 	second := httptest.NewRequest(http.MethodGet, "/auth/proxy/authorize", nil)
 	second.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
-	second.Header.Set("X-Forwarded-Uri", "/proxy/sandboxes/sandbox-1/80/")
+	setSandboxProxyHeaders(second, "sandbox-1", 80)
 	secondWriter := httptest.NewRecorder()
 	s.Router().ServeHTTP(secondWriter, second)
 	if secondWriter.Code != http.StatusTooManyRequests {
@@ -117,7 +123,7 @@ func TestProxyAuthorizeRejectsForeignSandboxAccess(t *testing.T) {
 	s := newTestServerWithStore(&mockDocker{}, sandboxStore)
 	req := httptest.NewRequest(http.MethodGet, "/auth/proxy/authorize", nil)
 	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-2", Username: "bob", Role: roleMember}))
-	req.Header.Set("X-Forwarded-Uri", "/proxy/sandboxes/sandbox-1/80/")
+	setSandboxProxyHeaders(req, "sandbox-1", 80)
 	w := httptest.NewRecorder()
 
 	s.Router().ServeHTTP(w, req)
@@ -146,7 +152,7 @@ func TestProxyAuthorizeComposeRequiresPublishedPort(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/auth/proxy/authorize", nil)
 	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
-	req.Header.Set("X-Forwarded-Uri", "/proxy/compose/demo/web/3000/")
+	setComposeProxyHeaders(req, "demo", "web", 3000)
 	w := httptest.NewRecorder()
 
 	s.Router().ServeHTTP(w, req)
@@ -172,7 +178,7 @@ func TestProxyAuthorizeSandboxRequiresPublishedPort(t *testing.T) {
 	s := newTestServerWithStore(&mockDocker{}, sandboxStore)
 	req := httptest.NewRequest(http.MethodGet, "/auth/proxy/authorize", nil)
 	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
-	req.Header.Set("X-Forwarded-Uri", "/proxy/sandboxes/sandbox-1/3000/")
+	setSandboxProxyHeaders(req, "sandbox-1", 3000)
 	w := httptest.NewRecorder()
 
 	s.Router().ServeHTTP(w, req)
@@ -201,7 +207,7 @@ func TestProxyAuthorizeAllowsComposePublishedPort(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/auth/proxy/authorize", nil)
 	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
-	req.Header.Set("X-Forwarded-Uri", "/proxy/compose/demo/web/3000/")
+	setComposeProxyHeaders(req, "demo", "web", 3000)
 	w := httptest.NewRecorder()
 
 	s.Router().ServeHTTP(w, req)
@@ -221,7 +227,7 @@ func TestProxyAuthorizeAllowsOwnedDirectContainerPublishedPort(t *testing.T) {
 	s := newTestServer(&mockDocker{})
 	req := httptest.NewRequest(http.MethodGet, "/auth/proxy/authorize", nil)
 	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
-	req.Header.Set("X-Forwarded-Uri", "/proxy/containers/ctr-123/80/")
+	setContainerProxyHeaders(req, "ctr-123", 80)
 	w := httptest.NewRecorder()
 
 	s.Router().ServeHTTP(w, req)
@@ -241,7 +247,7 @@ func TestProxyAuthorizeRejectsUnpublishedDirectContainerPort(t *testing.T) {
 	s := newTestServer(&mockDocker{})
 	req := httptest.NewRequest(http.MethodGet, "/auth/proxy/authorize", nil)
 	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
-	req.Header.Set("X-Forwarded-Uri", "/proxy/containers/ctr-123/3000/")
+	setContainerProxyHeaders(req, "ctr-123", 3000)
 	w := httptest.NewRecorder()
 
 	s.Router().ServeHTTP(w, req)
@@ -261,7 +267,7 @@ func TestProxyAuthorizeRejectsForeignDirectContainerAccess(t *testing.T) {
 	s := newTestServer(&mockDocker{})
 	req := httptest.NewRequest(http.MethodGet, "/auth/proxy/authorize", nil)
 	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-2", Username: "bob", Role: roleMember}))
-	req.Header.Set("X-Forwarded-Uri", "/proxy/containers/ctr-123/80/")
+	setContainerProxyHeaders(req, "ctr-123", 80)
 	w := httptest.NewRecorder()
 
 	s.Router().ServeHTTP(w, req)
@@ -269,4 +275,23 @@ func TestProxyAuthorizeRejectsForeignDirectContainerAccess(t *testing.T) {
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for foreign direct container, got %d", w.Code)
 	}
+}
+
+func setSandboxProxyHeaders(req *http.Request, sandboxID string, privatePort int) {
+	req.Header.Set(proxyTypeHeaderName, previewTargetTypeSandbox)
+	req.Header.Set(proxyWorkloadIDHeaderName, sandboxID)
+	req.Header.Set(proxyPrivatePortHeaderName, strconv.Itoa(privatePort))
+}
+
+func setContainerProxyHeaders(req *http.Request, managedID string, privatePort int) {
+	req.Header.Set(proxyTypeHeaderName, previewTargetTypeDirect)
+	req.Header.Set(proxyWorkloadIDHeaderName, managedID)
+	req.Header.Set(proxyPrivatePortHeaderName, strconv.Itoa(privatePort))
+}
+
+func setComposeProxyHeaders(req *http.Request, projectName string, serviceName string, privatePort int) {
+	req.Header.Set(proxyTypeHeaderName, previewTargetTypeCompose)
+	req.Header.Set(proxyProjectHeaderName, projectName)
+	req.Header.Set(proxyServiceHeaderName, serviceName)
+	req.Header.Set(proxyPrivatePortHeaderName, strconv.Itoa(privatePort))
 }

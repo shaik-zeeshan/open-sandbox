@@ -986,7 +986,7 @@ func TestComposeProjectPreviewEndpointsIncludePublishedPortsOnly(t *testing.T) {
 			if service.Ports[0].PrivatePort != 80 || service.Ports[0].PublicPort != 8080 {
 				t.Fatalf("unexpected web published port mapping: %+v", service.Ports[0])
 			}
-			if service.Ports[0].PreviewURL != "/proxy/compose/demo/web/80/" {
+			if service.Ports[0].PreviewURL != "/auth/preview/launch/compose/demo/web/80" {
 				t.Fatalf("unexpected web preview url: %q", service.Ports[0].PreviewURL)
 			}
 		case "db":
@@ -1426,13 +1426,13 @@ func TestListContainersIncludesServerGeneratedPreviewURLs(t *testing.T) {
 	for _, item := range containers {
 		previewByID[item.ContainerID] = item.PreviewURLs
 	}
-	if len(previewByID["sandbox-container"]) != 1 || previewByID["sandbox-container"][0].URL != "/proxy/sandboxes/sandbox-1/80/" {
+	if len(previewByID["sandbox-container"]) != 1 || previewByID["sandbox-container"][0].URL != "/auth/preview/launch/sandboxes/sandbox-1/80" {
 		t.Fatalf("unexpected sandbox preview urls: %+v", previewByID["sandbox-container"])
 	}
-	if len(previewByID["direct-container"]) != 1 || previewByID["direct-container"][0].URL != "/proxy/containers/ctr-123/80/" {
+	if len(previewByID["direct-container"]) != 1 || previewByID["direct-container"][0].URL != "/auth/preview/launch/containers/ctr-123/80" {
 		t.Fatalf("unexpected direct preview urls: %+v", previewByID["direct-container"])
 	}
-	if len(previewByID["compose-container"]) != 1 || previewByID["compose-container"][0].URL != "/proxy/compose/demo/web/8080/" {
+	if len(previewByID["compose-container"]) != 1 || previewByID["compose-container"][0].URL != "/auth/preview/launch/compose/demo/web/8080" {
 		t.Fatalf("unexpected compose preview urls: %+v", previewByID["compose-container"])
 	}
 }
@@ -2251,7 +2251,7 @@ func TestListSandboxesIncludesServerGeneratedPreviewURLs(t *testing.T) {
 	if len(sandboxes) != 1 {
 		t.Fatalf("expected a single sandbox in response, got %d", len(sandboxes))
 	}
-	if len(sandboxes[0].PreviewURLs) != 1 || sandboxes[0].PreviewURLs[0].URL != "/proxy/sandboxes/sandbox-1/80/" {
+	if len(sandboxes[0].PreviewURLs) != 1 || sandboxes[0].PreviewURLs[0].URL != "/auth/preview/launch/sandboxes/sandbox-1/80" {
 		t.Fatalf("unexpected sandbox preview urls: %+v", sandboxes[0].PreviewURLs)
 	}
 }

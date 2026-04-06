@@ -4,6 +4,7 @@
 	import {
 		formatApiFailure,
 		getComposeProject,
+		resolveApiUrl,
 		runApiEffect,
 		type ApiConfig,
 		type ComposeProjectPreview,
@@ -77,7 +78,12 @@
 	const previewServices = $derived.by(() =>
 		(composeProjectPreview?.services ?? []).map((service) => ({
 			...service,
-			ports: service.ports.filter((port) => port.preview_url.trim().startsWith("/"))
+			ports: service.ports
+				.filter((port) => port.preview_url.trim().length > 0)
+				.map((port) => ({
+					...port,
+					preview_url: resolveApiUrl(config, port.preview_url)
+				}))
 		}))
 	);
 

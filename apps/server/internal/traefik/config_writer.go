@@ -2,11 +2,11 @@ package traefik
 
 import (
 	"bytes"
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,8 +36,17 @@ type WorkloadRoutes struct {
 }
 
 type ConfigWriter struct {
-	dir string
-	mu  sync.Mutex
+	dir                 string
+	appHost             string
+	previewBaseDomain   string
+	previewCallbackPath string
+	mu                  sync.Mutex
+}
+
+type ConfigWriterOptions struct {
+	AppHost             string
+	PreviewBaseDomain   string
+	PreviewCallbackPath string
 }
 
 func (w *ConfigWriter) Dir() string {
@@ -47,13 +56,29 @@ func (w *ConfigWriter) Dir() string {
 	return w.dir
 }
 
-func NewConfigWriter(dir string) (*ConfigWriter, error) {
+func NewConfigWriter(dir string, options ...ConfigWriterOptions) (*ConfigWriter, error) {
 	trimmed := strings.TrimSpace(dir)
 	if trimmed == "" {
 		return nil, fmt.Errorf("traefik dynamic config dir is required")
 	}
 
-	return &ConfigWriter{dir: filepath.Clean(trimmed)}, nil
+	cfg := ConfigWriterOptions{}
+	if len(options) > 0 {
+		cfg = options[0]
+	}
+
+	previewCallbackPath := strings.TrimSpace(cfg.PreviewCallbackPath)
+	if previewCallbackPath == "" {
+		previewCallbackPath = "/_sandbox/auth/"
+	}
+	previewCallbackPath = ensureTrailingSlash(ensureLeadingSlash(previewCallbackPath))
+
+	return &ConfigWriter{
+		dir:                 filepath.Clean(trimmed),
+		appHost:             strings.TrimSpace(cfg.AppHost),
+		previewBaseDomain:   strings.TrimSpace(strings.ToLower(cfg.PreviewBaseDomain)),
+		previewCallbackPath: previewCallbackPath,
+	}, nil
 }
 
 func (w *ConfigWriter) Reconcile(routes WorkloadRoutes) error {
@@ -65,12 +90,12 @@ func (w *ConfigWriter) Reconcile(routes WorkloadRoutes) error {
 	}
 
 	desiredFiles := map[string][]byte{
-		coreConfigFileName: []byte(coreConfig()),
+		coreConfigFileName: []byte(coreConfig(w.appHost)),
 	}
 
 	for _, sandboxID := range sortedKeys(routes.Sandboxes) {
 		fileName := "sandbox-" + sanitizeFileToken(sandboxID) + ".yaml"
-		content := workloadConfig("sandboxes", sandboxID, routes.Sandboxes[sandboxID])
+		content := workloadConfig("sandboxes", sandboxID, routes.Sandboxes[sandboxID], w.previewBaseDomain, w.previewCallbackPath)
 		if len(content) == 0 {
 			continue
 		}
@@ -79,7 +104,7 @@ func (w *ConfigWriter) Reconcile(routes WorkloadRoutes) error {
 
 	for _, managedID := range sortedKeys(routes.Containers) {
 		fileName := "container-" + sanitizeFileToken(managedID) + ".yaml"
-		content := workloadConfig("containers", managedID, routes.Containers[managedID])
+		content := workloadConfig("containers", managedID, routes.Containers[managedID], w.previewBaseDomain, w.previewCallbackPath)
 		if len(content) == 0 {
 			continue
 		}
@@ -88,7 +113,7 @@ func (w *ConfigWriter) Reconcile(routes WorkloadRoutes) error {
 
 	for _, projectName := range sortedKeys(routes.ComposeProjects) {
 		fileName := "compose-" + sanitizeFileToken(projectName) + ".yaml"
-		content := composeConfig(projectName, routes.ComposeProjects[projectName])
+		content := composeConfig(projectName, routes.ComposeProjects[projectName], w.previewBaseDomain, w.previewCallbackPath)
 		if len(content) == 0 {
 			continue
 		}
@@ -125,20 +150,27 @@ func (w *ConfigWriter) Reconcile(routes WorkloadRoutes) error {
 	return nil
 }
 
-func coreConfig() string {
+func coreConfig(appHost string) string {
 	bt := "`"
+	serverRule := "PathPrefix(" + bt + "/api" + bt + ") || PathPrefix(" + bt + "/auth" + bt + ") || PathPrefix(" + bt + "/health" + bt + ") || PathPrefix(" + bt + "/metrics" + bt + ") || PathPrefix(" + bt + "/swagger" + bt + ")"
+	clientRule := "PathPrefix(" + bt + "/" + bt + ")"
+	host := strings.TrimSpace(appHost)
+	if host != "" {
+		serverRule = "Host(" + bt + host + bt + ") && (" + serverRule + ")"
+		clientRule = "Host(" + bt + host + bt + ") && " + clientRule
+	}
 	return "http:\n" +
 		"  routers:\n" +
 		"    server:\n" +
 		"      entryPoints:\n" +
 		"        - web\n" +
-		"      rule: \"PathPrefix(" + bt + "/api" + bt + ") || PathPrefix(" + bt + "/auth" + bt + ") || PathPrefix(" + bt + "/health" + bt + ") || PathPrefix(" + bt + "/metrics" + bt + ") || PathPrefix(" + bt + "/swagger" + bt + ")\"\n" +
+		"      rule: \"" + serverRule + "\"\n" +
 		"      service: server\n" +
 		"      priority: 100\n" +
 		"    client:\n" +
 		"      entryPoints:\n" +
 		"        - web\n" +
-		"      rule: \"PathPrefix(" + bt + "/" + bt + ")\"\n" +
+		"      rule: \"" + clientRule + "\"\n" +
 		"      service: client\n" +
 		"      priority: 1\n" +
 		"\n" +
@@ -163,9 +195,12 @@ func coreConfig() string {
 		"        trustForwardHeader: false\n"
 }
 
-func workloadConfig(workloadType string, workloadID string, ports []WorkloadPort) []byte {
+func workloadConfig(workloadType string, workloadID string, ports []WorkloadPort, previewBaseDomain string, previewCallbackPath string) []byte {
 	trimmedID := strings.TrimSpace(workloadID)
 	if trimmedID == "" {
+		return nil
+	}
+	if strings.TrimSpace(previewBaseDomain) == "" {
 		return nil
 	}
 
@@ -174,7 +209,6 @@ func workloadConfig(workloadType string, workloadID string, ports []WorkloadPort
 		return nil
 	}
 
-	escapedID := url.PathEscape(trimmedID)
 	safeID := sanitizeResourceToken(trimmedID)
 
 	var buf bytes.Buffer
@@ -182,30 +216,23 @@ func workloadConfig(workloadType string, workloadID string, ports []WorkloadPort
 	buf.WriteString("  routers:\n")
 	for _, port := range normalizedPorts {
 		routerName := fmt.Sprintf("preview-%s-%s-%d-router", workloadType, safeID, port.Private)
-		exactRouterName := fmt.Sprintf("preview-%s-%s-%d-exact-router", workloadType, safeID, port.Private)
+		callbackRouterName := fmt.Sprintf("preview-%s-%s-%d-callback-router", workloadType, safeID, port.Private)
 		serviceName := fmt.Sprintf("preview-%s-%s-%d-service", workloadType, safeID, port.Private)
-		stripName := fmt.Sprintf("preview-%s-%s-%d-strip", workloadType, safeID, port.Private)
+		targetHeadersName := fmt.Sprintf("preview-%s-%s-%d-target-headers", workloadType, safeID, port.Private)
+		host := buildWorkloadPreviewHost(previewBaseDomain, workloadType, trimmedID, port.Private)
+		callbackPathRule := ensureLeadingSlash(strings.TrimSpace(previewCallbackPath))
 
-		prefix := "/proxy/" + workloadType + "/" + escapedID + "/" + strconv.Itoa(port.Private)
-		exactPathRule := "^" + regexp.QuoteMeta(prefix) + "$"
-		pathRule := prefix + "/"
 		buf.WriteString("    ")
-		buf.WriteString(exactRouterName)
+		buf.WriteString(callbackRouterName)
 		buf.WriteString(":\n")
 		buf.WriteString("      entryPoints:\n")
 		buf.WriteString("        - web\n")
-		buf.WriteString("      rule: \"PathRegexp(`")
-		buf.WriteString(exactPathRule)
+		buf.WriteString("      rule: \"Host(`")
+		buf.WriteString(host)
+		buf.WriteString("`) && PathPrefix(`")
+		buf.WriteString(callbackPathRule)
 		buf.WriteString("`)\"\n")
-		buf.WriteString("      service: ")
-		buf.WriteString(serviceName)
-		buf.WriteString("\n")
-		buf.WriteString("      middlewares:\n")
-		buf.WriteString("        - preview-forward-auth-placeholder\n")
-		buf.WriteString("        - ")
-		buf.WriteString(stripName)
-		buf.WriteString("\n")
-		buf.WriteString("        - preview-header-placeholder\n")
+		buf.WriteString("      service: server\n")
 		buf.WriteString("      priority: 210\n")
 
 		buf.WriteString("    ")
@@ -213,17 +240,17 @@ func workloadConfig(workloadType string, workloadID string, ports []WorkloadPort
 		buf.WriteString(":\n")
 		buf.WriteString("      entryPoints:\n")
 		buf.WriteString("        - web\n")
-		buf.WriteString("      rule: \"PathPrefix(`")
-		buf.WriteString(pathRule)
-		buf.WriteString("`)\"\n")
+		buf.WriteString("      rule: \"Host(`")
+		buf.WriteString(host)
+		buf.WriteString("`) && PathPrefix(`/`)\"\n")
 		buf.WriteString("      service: ")
 		buf.WriteString(serviceName)
 		buf.WriteString("\n")
 		buf.WriteString("      middlewares:\n")
-		buf.WriteString("        - preview-forward-auth-placeholder\n")
 		buf.WriteString("        - ")
-		buf.WriteString(stripName)
+		buf.WriteString(targetHeadersName)
 		buf.WriteString("\n")
+		buf.WriteString("        - preview-forward-auth-placeholder\n")
 		buf.WriteString("        - preview-header-placeholder\n")
 		buf.WriteString("      priority: 200\n")
 	}
@@ -246,25 +273,32 @@ func workloadConfig(workloadType string, workloadID string, ports []WorkloadPort
 	buf.WriteString("\n")
 	buf.WriteString("  middlewares:\n")
 	for _, port := range normalizedPorts {
-		stripName := fmt.Sprintf("preview-%s-%s-%d-strip", workloadType, safeID, port.Private)
-		prefix := "/proxy/" + workloadType + "/" + escapedID + "/" + strconv.Itoa(port.Private)
+		targetHeadersName := fmt.Sprintf("preview-%s-%s-%d-target-headers", workloadType, safeID, port.Private)
 		buf.WriteString("    ")
-		buf.WriteString(stripName)
+		buf.WriteString(targetHeadersName)
 		buf.WriteString(":\n")
-		buf.WriteString("      stripPrefix:\n")
-		buf.WriteString("        forceSlash: true\n")
-		buf.WriteString("        prefixes:\n")
-		buf.WriteString("          - \"")
-		buf.WriteString(prefix)
+		buf.WriteString("      headers:\n")
+		buf.WriteString("        customRequestHeaders:\n")
+		buf.WriteString("          X-Open-Sandbox-Proxy-Type: \"")
+		buf.WriteString(workloadType)
+		buf.WriteString("\"\n")
+		buf.WriteString("          X-Open-Sandbox-Proxy-Workload-Id: \"")
+		buf.WriteString(trimmedID)
+		buf.WriteString("\"\n")
+		buf.WriteString("          X-Open-Sandbox-Proxy-Private-Port: \"")
+		buf.WriteString(strconv.Itoa(port.Private))
 		buf.WriteString("\"\n")
 	}
 
 	return buf.Bytes()
 }
 
-func composeConfig(projectName string, ports []ComposeServicePort) []byte {
+func composeConfig(projectName string, ports []ComposeServicePort, previewBaseDomain string, previewCallbackPath string) []byte {
 	trimmedProject := strings.TrimSpace(projectName)
 	if trimmedProject == "" {
+		return nil
+	}
+	if strings.TrimSpace(previewBaseDomain) == "" {
 		return nil
 	}
 
@@ -273,41 +307,31 @@ func composeConfig(projectName string, ports []ComposeServicePort) []byte {
 		return nil
 	}
 
-	escapedProject := url.PathEscape(trimmedProject)
 	safeProject := sanitizeResourceToken(trimmedProject)
 
 	var buf bytes.Buffer
 	buf.WriteString("http:\n")
 	buf.WriteString("  routers:\n")
 	for _, item := range normalizedPorts {
-		escapedService := url.PathEscape(item.Service)
 		safeService := sanitizeResourceToken(item.Service)
 		routerName := fmt.Sprintf("preview-compose-%s-%s-%d-router", safeProject, safeService, item.Private)
-		exactRouterName := fmt.Sprintf("preview-compose-%s-%s-%d-exact-router", safeProject, safeService, item.Private)
+		callbackRouterName := fmt.Sprintf("preview-compose-%s-%s-%d-callback-router", safeProject, safeService, item.Private)
 		serviceName := fmt.Sprintf("preview-compose-%s-%s-%d-service", safeProject, safeService, item.Private)
-		stripName := fmt.Sprintf("preview-compose-%s-%s-%d-strip", safeProject, safeService, item.Private)
-
-		prefix := "/proxy/compose/" + escapedProject + "/" + escapedService + "/" + strconv.Itoa(item.Private)
-		exactPathRule := "^" + regexp.QuoteMeta(prefix) + "$"
-		pathRule := prefix + "/"
+		targetHeadersName := fmt.Sprintf("preview-compose-%s-%s-%d-target-headers", safeProject, safeService, item.Private)
+		host := BuildComposePreviewHost(previewBaseDomain, trimmedProject, item.Service, item.Private)
+		callbackPathRule := ensureLeadingSlash(strings.TrimSpace(previewCallbackPath))
 
 		buf.WriteString("    ")
-		buf.WriteString(exactRouterName)
+		buf.WriteString(callbackRouterName)
 		buf.WriteString(":\n")
 		buf.WriteString("      entryPoints:\n")
 		buf.WriteString("        - web\n")
-		buf.WriteString("      rule: \"PathRegexp(`")
-		buf.WriteString(exactPathRule)
+		buf.WriteString("      rule: \"Host(`")
+		buf.WriteString(host)
+		buf.WriteString("`) && PathPrefix(`")
+		buf.WriteString(callbackPathRule)
 		buf.WriteString("`)\"\n")
-		buf.WriteString("      service: ")
-		buf.WriteString(serviceName)
-		buf.WriteString("\n")
-		buf.WriteString("      middlewares:\n")
-		buf.WriteString("        - preview-forward-auth-placeholder\n")
-		buf.WriteString("        - ")
-		buf.WriteString(stripName)
-		buf.WriteString("\n")
-		buf.WriteString("        - preview-header-placeholder\n")
+		buf.WriteString("      service: server\n")
 		buf.WriteString("      priority: 210\n")
 
 		buf.WriteString("    ")
@@ -315,17 +339,17 @@ func composeConfig(projectName string, ports []ComposeServicePort) []byte {
 		buf.WriteString(":\n")
 		buf.WriteString("      entryPoints:\n")
 		buf.WriteString("        - web\n")
-		buf.WriteString("      rule: \"PathPrefix(`")
-		buf.WriteString(pathRule)
-		buf.WriteString("`)\"\n")
+		buf.WriteString("      rule: \"Host(`")
+		buf.WriteString(host)
+		buf.WriteString("`) && PathPrefix(`/`)\"\n")
 		buf.WriteString("      service: ")
 		buf.WriteString(serviceName)
 		buf.WriteString("\n")
 		buf.WriteString("      middlewares:\n")
-		buf.WriteString("        - preview-forward-auth-placeholder\n")
 		buf.WriteString("        - ")
-		buf.WriteString(stripName)
+		buf.WriteString(targetHeadersName)
 		buf.WriteString("\n")
+		buf.WriteString("        - preview-forward-auth-placeholder\n")
 		buf.WriteString("        - preview-header-placeholder\n")
 		buf.WriteString("      priority: 200\n")
 	}
@@ -349,18 +373,22 @@ func composeConfig(projectName string, ports []ComposeServicePort) []byte {
 	buf.WriteString("\n")
 	buf.WriteString("  middlewares:\n")
 	for _, item := range normalizedPorts {
-		escapedService := url.PathEscape(item.Service)
 		safeService := sanitizeResourceToken(item.Service)
-		stripName := fmt.Sprintf("preview-compose-%s-%s-%d-strip", safeProject, safeService, item.Private)
-		prefix := "/proxy/compose/" + escapedProject + "/" + escapedService + "/" + strconv.Itoa(item.Private)
+		targetHeadersName := fmt.Sprintf("preview-compose-%s-%s-%d-target-headers", safeProject, safeService, item.Private)
 		buf.WriteString("    ")
-		buf.WriteString(stripName)
+		buf.WriteString(targetHeadersName)
 		buf.WriteString(":\n")
-		buf.WriteString("      stripPrefix:\n")
-		buf.WriteString("        forceSlash: true\n")
-		buf.WriteString("        prefixes:\n")
-		buf.WriteString("          - \"")
-		buf.WriteString(prefix)
+		buf.WriteString("      headers:\n")
+		buf.WriteString("        customRequestHeaders:\n")
+		buf.WriteString("          X-Open-Sandbox-Proxy-Type: \"compose\"\n")
+		buf.WriteString("          X-Open-Sandbox-Proxy-Project: \"")
+		buf.WriteString(trimmedProject)
+		buf.WriteString("\"\n")
+		buf.WriteString("          X-Open-Sandbox-Proxy-Service: \"")
+		buf.WriteString(item.Service)
+		buf.WriteString("\"\n")
+		buf.WriteString("          X-Open-Sandbox-Proxy-Private-Port: \"")
+		buf.WriteString(strconv.Itoa(item.Private))
 		buf.WriteString("\"\n")
 	}
 
@@ -475,6 +503,74 @@ func sanitizeFileToken(raw string) string {
 		return "workload"
 	}
 	return value
+}
+
+func ensureLeadingSlash(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "/"
+	}
+	if strings.HasPrefix(trimmed, "/") {
+		return trimmed
+	}
+	return "/" + trimmed
+}
+
+func ensureTrailingSlash(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "/"
+	}
+	if strings.HasSuffix(trimmed, "/") {
+		return trimmed
+	}
+	return trimmed + "/"
+}
+
+func BuildSandboxPreviewHost(previewBaseDomain string, sandboxID string, privatePort int) string {
+	return buildWorkloadPreviewHost(previewBaseDomain, "sandboxes", sandboxID, privatePort)
+}
+
+func BuildContainerPreviewHost(previewBaseDomain string, managedID string, privatePort int) string {
+	return buildWorkloadPreviewHost(previewBaseDomain, "containers", managedID, privatePort)
+}
+
+func BuildComposePreviewHost(previewBaseDomain string, projectName string, serviceName string, privatePort int) string {
+	base := strings.TrimSpace(strings.ToLower(previewBaseDomain))
+	if base == "" || privatePort <= 0 {
+		return ""
+	}
+	safeProject := sanitizeResourceToken(projectName)
+	safeService := sanitizeResourceToken(serviceName)
+	hash := hashHostToken("compose", strings.TrimSpace(projectName), strings.TrimSpace(serviceName), strconv.Itoa(privatePort))
+	return fmt.Sprintf("cmp-%s-%s-p%d-%s.%s", safeProject, safeService, privatePort, hash, base)
+}
+
+func buildWorkloadPreviewHost(previewBaseDomain string, workloadType string, workloadID string, privatePort int) string {
+	base := strings.TrimSpace(strings.ToLower(previewBaseDomain))
+	if base == "" || privatePort <= 0 {
+		return ""
+	}
+	prefix := "wrk"
+	switch strings.TrimSpace(workloadType) {
+	case "sandboxes":
+		prefix = "sbx"
+	case "containers":
+		prefix = "ctr"
+	}
+	safeID := sanitizeResourceToken(workloadID)
+	hash := hashHostToken(strings.TrimSpace(workloadType), strings.TrimSpace(workloadID), strconv.Itoa(privatePort))
+	return fmt.Sprintf("%s-%s-p%d-%s.%s", prefix, safeID, privatePort, hash, base)
+}
+
+func hashHostToken(values ...string) string {
+	joined := strings.Join(values, "\n")
+	sum := sha1.Sum([]byte(joined))
+	encoded := hex.EncodeToString(sum[:])
+	if len(encoded) <= 10 {
+		return encoded
+	}
+	return encoded[:10]
 }
 
 func sortedKeys[T any](input map[string]T) []string {

@@ -9,7 +9,7 @@ import (
 
 func TestReconcileWritesCoreAndWorkloadConfigs(t *testing.T) {
 	dir := t.TempDir()
-	writer, err := NewConfigWriter(dir)
+	writer, err := NewConfigWriter(dir, ConfigWriterOptions{AppHost: "app.lvh.me:3000", PreviewBaseDomain: "preview.lvh.me"})
 	if err != nil {
 		t.Fatalf("new config writer: %v", err)
 	}
@@ -42,28 +42,29 @@ func TestReconcileWritesCoreAndWorkloadConfigs(t *testing.T) {
 	assertFileContains(t, filepath.Join(dir, "00-core.yaml"), "preview-forward-auth-placeholder")
 	assertFileContains(t, filepath.Join(dir, "00-core.yaml"), "address: \"http://server:8080/auth/proxy/authorize\"")
 	assertFileContains(t, filepath.Join(dir, "00-core.yaml"), "trustForwardHeader: false")
-	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "PathPrefix(`/proxy/sandboxes/sandbox-1/3000/`)")
-	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "PathRegexp(`^/proxy/sandboxes/sandbox-1/3000$`)")
+	assertFileContains(t, filepath.Join(dir, "00-core.yaml"), "Host(`app.lvh.me:3000`) && (PathPrefix(`/api`)")
+	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "Host(`sbx-sandbox-1-p3000-")
+	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), ".preview.lvh.me`) && PathPrefix(`/`)")
+	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "PathPrefix(`/_sandbox/auth/`)")
 	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "url: \"http://host.docker.internal:43000\"")
 	assertFileNotContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "url: \"http://host.docker.internal:43010\"")
 	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "preview-header-placeholder")
 	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "preview-forward-auth-placeholder")
-	assertMiddlewareOrder(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "preview-forward-auth-placeholder", "preview-sandboxes-sandbox-1-3000-strip")
+	assertFileContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "X-Open-Sandbox-Proxy-Type: \"sandboxes\"")
 	assertFileNotContains(t, filepath.Join(dir, "sandbox-sandbox-1.yaml"), "-         -")
-	assertFileContains(t, filepath.Join(dir, "container-ctr-1.yaml"), "PathPrefix(`/proxy/containers/ctr-1/8080/`)")
+	assertFileContains(t, filepath.Join(dir, "container-ctr-1.yaml"), "Host(`ctr-ctr-1-p8080-")
 	assertFileContains(t, filepath.Join(dir, "container-ctr-1.yaml"), "url: \"http://host.docker.internal:48080\"")
-	assertFileContains(t, filepath.Join(dir, "compose-demo.yaml"), "PathPrefix(`/proxy/compose/demo/web/80/`)")
-	assertFileContains(t, filepath.Join(dir, "compose-demo.yaml"), "PathRegexp(`^/proxy/compose/demo/web/80$`)")
-	assertFileContains(t, filepath.Join(dir, "compose-demo.yaml"), "PathPrefix(`/proxy/compose/demo/api/3000/`)")
+	assertFileContains(t, filepath.Join(dir, "compose-demo.yaml"), "Host(`cmp-demo-web-p80-")
+	assertFileContains(t, filepath.Join(dir, "compose-demo.yaml"), "Host(`cmp-demo-api-p3000-")
 	assertFileContains(t, filepath.Join(dir, "compose-demo.yaml"), "url: \"http://host.docker.internal:50080\"")
 	assertFileNotContains(t, filepath.Join(dir, "compose-demo.yaml"), "url: \"http://host.docker.internal:50090\"")
-	assertMiddlewareOrder(t, filepath.Join(dir, "compose-demo.yaml"), "preview-forward-auth-placeholder", "preview-compose-demo-web-80-strip")
+	assertFileContains(t, filepath.Join(dir, "compose-demo.yaml"), "X-Open-Sandbox-Proxy-Type: \"compose\"")
 	assertFileNotContains(t, filepath.Join(dir, "compose-demo.yaml"), "-         -")
 }
 
 func TestReconcileRemovesStaleWorkloadFiles(t *testing.T) {
 	dir := t.TempDir()
-	writer, err := NewConfigWriter(dir)
+	writer, err := NewConfigWriter(dir, ConfigWriterOptions{AppHost: "app.lvh.me:3000", PreviewBaseDomain: "preview.lvh.me"})
 	if err != nil {
 		t.Fatalf("new config writer: %v", err)
 	}
@@ -101,7 +102,7 @@ func TestReconcileRemovesStaleWorkloadFiles(t *testing.T) {
 
 func TestReconcileUpdatesRouteFilesAndKeepsUnmanagedFiles(t *testing.T) {
 	dir := t.TempDir()
-	writer, err := NewConfigWriter(dir)
+	writer, err := NewConfigWriter(dir, ConfigWriterOptions{AppHost: "app.lvh.me:3000", PreviewBaseDomain: "preview.lvh.me"})
 	if err != nil {
 		t.Fatalf("new config writer: %v", err)
 	}

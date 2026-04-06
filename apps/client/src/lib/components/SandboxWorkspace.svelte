@@ -304,9 +304,12 @@
 		Array.from(
 			new Map(
 				(entries ?? [])
-					.filter((entry) => entry.private_port > 0 && entry.url.trim().startsWith("/"))
+					.filter((entry) => entry.private_port > 0 && entry.url.trim().length > 0)
 					.sort((a, b) => a.private_port - b.private_port)
-					.map((entry) => [entry.url, { url: entry.url, privatePort: entry.private_port }])
+					.map((entry) => {
+						const resolvedURL = resolveApiUrl(config, entry.url);
+						return [resolvedURL, { url: resolvedURL, privatePort: entry.private_port }] as const;
+					})
 			).values()
 		);
 

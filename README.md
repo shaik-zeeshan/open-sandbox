@@ -62,7 +62,7 @@ make compose-dev-up
 ```
 
 Default URL:
-- UI + API + auth + preview routes: `http://localhost:3000`
+- UI + API + auth launcher routes: `http://app.lvh.me:3000`
 
 Notes:
 - server hot reload runs with `go tool air -c .air.toml`
@@ -99,7 +99,7 @@ docker compose up -d
 ```
 
 Default URL:
-- UI + API + auth + preview routes: `http://localhost:3000`
+- UI + API + auth launcher routes: `http://app.lvh.me:3000`
 
 The stack runs three containers:
 - `traefik`: public edge proxy (the only published port)
@@ -110,15 +110,15 @@ The API talks to the host Docker daemon through `/var/run/docker.sock`.
 
 ### Preview routing model
 
-Preview URLs are path-based and served through Traefik:
-- sandboxes: `/proxy/sandboxes/<sandbox-id>/<private-port>/`
-- managed containers: `/proxy/containers/<managed-id>/<private-port>/`
-- compose services: `/proxy/compose/<project>/<service>/<private-port>/`
+Preview URLs are launcher routes on the main host and redirect to dedicated preview subdomains:
+- sandboxes: `/auth/preview/launch/sandboxes/<sandbox-id>/<private-port>`
+- managed containers: `/auth/preview/launch/containers/<managed-id>/<private-port>`
+- compose services: `/auth/preview/launch/compose/<project>/<service>/<private-port>`
 
 Important behavior:
 - compose previews are available only for ports published to the host (`HOST:CONTAINER`)
 - container ports that are only internal (for example `3000/tcp` with no host publish) are not previewable
-- because previews are path-based, apps that assume they are mounted at `/` may need their own base-path configuration
+- previews are served from dedicated hosts (`*.preview.lvh.me` by default), so apps run at `/` without path-prefix rewrites
 
 ### Compose environment variables
 
@@ -134,6 +134,9 @@ Top-level values (from `.env`):
 - `SANDBOX_PROXY_AUTH_RATE_LIMIT_RPS` (optional, default `120`)
 - `SANDBOX_PROXY_AUTH_RATE_LIMIT_BURST` (optional, default `240`)
 - `SANDBOX_PROXY_AUTH_RATE_LIMIT_IDLE_TTL` (optional, default `10m`)
+- `SANDBOX_PUBLIC_BASE_URL` (optional, default `http://app.lvh.me:${OPEN_SANDBOX_HTTP_PORT}`)
+- `SANDBOX_PREVIEW_BASE_DOMAIN` (optional, default `preview.lvh.me`)
+- `SANDBOX_PREVIEW_SESSION_TTL` (optional, default `10m`)
 
 Backend values inside the server container:
 - `SANDBOX_DB_PATH=/data/open-sandbox.db`
@@ -200,7 +203,7 @@ Persistent data under `${OPEN_SANDBOX_DATA_DIR}`:
 - `${OPEN_SANDBOX_DATA_DIR}/workspace`: managed compose projects and workspace state
 
 After first start:
-- open `http://localhost:${OPEN_SANDBOX_HTTP_PORT:-3000}`
+- open `http://app.lvh.me:${OPEN_SANDBOX_HTTP_PORT:-3000}`
 - create the initial admin account from the login screen
 - health endpoint: `/health`
 - Swagger: `/swagger/index.html`

@@ -103,6 +103,7 @@ type Server struct {
 	docker           DockerAPI
 	runtime          workloadRuntime
 	auth             AuthConfig
+	previewRouting   previewRoutingConfig
 	router           *gin.Engine
 	sandboxStore     SandboxStore
 	userStore        UserStore
@@ -320,6 +321,7 @@ func NewServerWithStore(dockerClient DockerAPI, authConfig AuthConfig, sandboxSt
 	s := &Server{
 		docker:           dockerClient,
 		auth:             authConfig,
+		previewRouting:   loadPreviewRoutingConfig(),
 		router:           r,
 		sandboxStore:     sandboxStore,
 		userStore:        userStore,
@@ -333,7 +335,11 @@ func NewServerWithStore(dockerClient DockerAPI, authConfig AuthConfig, sandboxSt
 		execWaitTimeout:  loadExecWaitTimeout(),
 	}
 	if traefikDir := strings.TrimSpace(os.Getenv("SANDBOX_TRAEFIK_DYNAMIC_CONFIG_DIR")); traefikDir != "" {
-		writer, writerErr := traefikcfg.NewConfigWriter(traefikDir)
+		writer, writerErr := traefikcfg.NewConfigWriter(traefikDir, traefikcfg.ConfigWriterOptions{
+			AppHost:             s.previewRouting.AppHost,
+			PreviewBaseDomain:   s.previewRouting.PreviewBaseDomain,
+			PreviewCallbackPath: s.previewRouting.CallbackPathPrefix,
+		})
 		if writerErr != nil {
 			logger.Warn("traefik_route_writer_disabled", slog.String("reason", writerErr.Error()))
 		} else {
@@ -359,6 +365,8 @@ func (s *Server) registerRoutes() {
 	s.router.POST("/auth/login", s.login)
 	s.router.POST("/auth/refresh", s.refresh)
 	s.router.GET("/auth/session", s.session)
+	s.router.GET(s.previewRouting.LaunchPathPrefix+"/*target", s.previewLaunch)
+	s.router.GET(s.previewRouting.CallbackPath, s.previewAuthCallback)
 	s.router.GET("/auth/proxy/authorize", s.proxyAuthorize)
 	s.router.POST("/auth/logout", s.logout)
 	workerControl := s.router.Group("/control")
@@ -940,7 +948,7 @@ func (s *Server) listComposeProjects(c *gin.Context) {
 
 	projects := make([]ComposeProjectPreviewResponse, 0, len(projectNames))
 	for projectName := range projectNames {
-		projects = append(projects, buildComposeProjectPreview(projectName, containers))
+		projects = append(projects, s.buildComposeProjectPreview(projectName, containers))
 	}
 	sort.Slice(projects, func(i, j int) bool {
 		return projects[i].ProjectName < projects[j].ProjectName
@@ -978,7 +986,7 @@ func (s *Server) getComposeProject(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
-	preview := buildComposeProjectPreview(project.ProjectName, containers)
+	preview := s.buildComposeProjectPreview(project.ProjectName, containers)
 	if len(preview.Services) == 0 {
 		writeError(c, http.StatusNotFound, errors.New("compose project not found"))
 		return
@@ -1017,7 +1025,7 @@ func (s *Server) visibleManagedContainers(ctx context.Context, identity AuthIden
 	return visible, nil
 }
 
-func buildComposeProjectPreview(projectName string, containers []ContainerSummary) ComposeProjectPreviewResponse {
+func (s *Server) buildComposeProjectPreview(projectName string, containers []ContainerSummary) ComposeProjectPreviewResponse {
 	servicesByName := map[string]*ComposeServicePreviewResponse{}
 	for _, item := range containers {
 		itemProjectName := strings.TrimSpace(item.ProjectName)
@@ -1059,7 +1067,7 @@ func buildComposeProjectPreview(projectName string, containers []ContainerSummar
 				PublicPort:  port.Public,
 				Type:        port.Type,
 				IP:          port.IP,
-				PreviewURL:  fmt.Sprintf("/proxy/compose/%s/%s/%d/", url.PathEscape(projectName), url.PathEscape(serviceName), port.Private),
+				PreviewURL:  s.previewLaunchURLForComposeService(projectName, serviceName, port.Private),
 			})
 		}
 	}
