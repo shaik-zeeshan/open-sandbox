@@ -190,15 +190,22 @@
 		width: var(--sidebar-width);
 		min-width: var(--sidebar-width);
 		max-width: var(--sidebar-width);
-		height: 100vh;
-		position: sticky;
-		top: 0;
+		height: calc(100vh - 20px);
+		position: fixed;
+		top: 10px;
+		left: 10px;
 		background: var(--bg-surface);
-		border-right: 1px solid var(--border-dim);
+		border: 1px solid var(--border-dim);
+		border-radius: var(--radius-xl);
+		box-shadow:
+			0 4px 24px rgba(0, 0, 0, 0.4),
+			0 1px 4px rgba(0, 0, 0, 0.2),
+			inset 0 1px 0 rgba(255, 255, 255, 0.03);
 		display: flex;
 		flex-direction: column;
 		overflow: hidden;
 		flex-shrink: 0;
+		z-index: 40;
 		transition: width 0.22s var(--ease-snappy), min-width 0.22s var(--ease-snappy), max-width 0.22s var(--ease-snappy);
 	}
 

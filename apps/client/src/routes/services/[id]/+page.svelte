@@ -40,14 +40,17 @@
 		return "container" as const;
 	});
 
-	const loadingTitle = $derived(runtimeKind === "compose service" ? "Loading compose service..." : "Loading container...");
-	const missingTitle = $derived(runtimeKind === "compose service" ? "Compose service not found" : "Container not found");
+	const missingTitle = $derived(runtimeKind === "compose service" ? "Compose service not found" : `${runtimeKind[0].toUpperCase()}${runtimeKind.slice(1)} not found`);
 	const missingSubtitle = $derived(
 		runtimeKind === "compose service"
 			? "This compose service may have been removed."
-			: "This container may have been removed."
+			: `This ${runtimeKind} may have been removed.`
 	);
-	const errorTitle = $derived(runtimeKind === "compose service" ? "Unable to load compose service" : "Unable to load container");
+	const errorTitle = $derived(
+		runtimeKind === "compose service"
+			? "Unable to load compose service"
+			: `Unable to load ${runtimeKind}`
+	);
 
 	async function refreshData(options?: RefreshOptions): Promise<void> {
 		const showLoading = options?.showLoading ?? true;
@@ -116,8 +119,39 @@
 		currentRole={clientState.role}
 	>
 		{#if loading && runtimeContainer === null && !missingContainer && errorMessage.length === 0}
-			<div class="panel-card">
-				<p class="panel-title">{loadingTitle}</p>
+			<div class="skeleton-page anim-fade-up">
+				<div class="skel-header">
+					<div class="skel-block" style="width:1.5rem;height:1.5rem;border-radius:var(--radius-sm);flex-shrink:0"></div>
+					<div class="skel-block" style="width:11rem;height:1rem"></div>
+					<div class="skel-block" style="width:4.5rem;height:1rem;margin-left:auto"></div>
+				</div>
+				<div class="skel-tabs">
+					{#each [5.5, 4.5, 3.5, 3] as w}
+						<div class="skel-block" style="width:{w}rem;height:0.7rem"></div>
+					{/each}
+				</div>
+				<div class="skel-panel">
+					<div class="skel-row">
+						<div class="skel-block" style="width:5rem;height:0.65rem"></div>
+						<div class="skel-block" style="width:9rem;height:0.65rem;margin-left:auto"></div>
+					</div>
+					<div class="skel-row">
+						<div class="skel-block" style="width:4rem;height:0.65rem"></div>
+						<div class="skel-block" style="width:7rem;height:0.65rem;margin-left:auto"></div>
+					</div>
+					<div class="skel-row">
+						<div class="skel-block" style="width:6rem;height:0.65rem"></div>
+						<div class="skel-block" style="width:5rem;height:0.65rem;margin-left:auto"></div>
+					</div>
+				</div>
+				<div class="skel-panel">
+					<div class="skel-row">
+						<div class="skel-block" style="width:8rem;height:0.65rem"></div>
+					</div>
+					<div class="skel-row">
+						<div class="skel-block" style="width:100%;height:2rem;border-radius:var(--radius-sm)"></div>
+					</div>
+				</div>
 			</div>
 		{:else if missingContainer}
 			<div class="panel-card">
@@ -197,5 +231,66 @@
 		font-family: var(--font-mono);
 		font-size: 0.68rem;
 		color: var(--text-muted);
+	}
+
+	@keyframes shimmer {
+		from { background-position: -200% center; }
+		to   { background-position:  200% center; }
+	}
+
+	.skeleton-page {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+		padding: 1rem;
+	}
+
+	.skel-header {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		padding: 0.75rem 1rem;
+		background: var(--bg-surface);
+		border: 1px solid var(--border-dim);
+		border-radius: var(--radius-xl);
+	}
+
+	.skel-tabs {
+		display: flex;
+		align-items: center;
+		gap: 1.25rem;
+		padding: 0.6rem 1rem;
+		background: var(--bg-surface);
+		border: 1px solid var(--border-dim);
+		border-radius: var(--radius-lg);
+	}
+
+	.skel-panel {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+		padding: 0.875rem 1rem;
+		background: var(--bg-surface);
+		border: 1px solid var(--border-dim);
+		border-radius: var(--radius-lg);
+	}
+
+	.skel-row {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+
+	.skel-block {
+		border-radius: var(--radius-sm);
+		background: linear-gradient(
+			90deg,
+			var(--bg-raised) 0%,
+			var(--bg-overlay) 50%,
+			var(--bg-raised) 100%
+		);
+		background-size: 200% 100%;
+		animation: shimmer 1.6s ease-in-out infinite;
+		flex-shrink: 0;
 	}
 </style>

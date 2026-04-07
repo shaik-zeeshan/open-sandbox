@@ -84,6 +84,77 @@
 	let workloadSearch = $state("");
 	let workloadKindFilter = $state<"all" | "sandbox" | "container" | "compose">("all");
 	let workloadStatusFilter = $state("all");
+
+	// Inline validation state for the create drawer
+	let nameError = $state("");
+	let imageError = $state("");
+	let repoUrlError = $state("");
+	let formTouched = $state(false);
+
+	function isValidUrl(value: string): boolean {
+		try {
+			new URL(value);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	function validateForm(): boolean {
+		let valid = true;
+		nameError = "";
+		imageError = "";
+		repoUrlError = "";
+		if (createName.trim().length === 0) {
+			nameError = "Sandbox name is required.";
+			valid = false;
+		}
+		if (createExistingImage.trim().length === 0) {
+			imageError = "Select an image.";
+			valid = false;
+		}
+		if (createRepoUrl.trim().length > 0 && !isValidUrl(createRepoUrl.trim())) {
+			repoUrlError = "Enter a valid URL.";
+			valid = false;
+		}
+		return valid;
+	}
+
+	function handleSubmit(): void {
+		formTouched = true;
+		if (validateForm()) {
+			onCreateSubmit();
+		}
+	}
+
+	// Reset validation state when drawer closes
+	$effect(() => {
+		if (!showCreateForm) {
+			nameError = "";
+			imageError = "";
+			repoUrlError = "";
+			formTouched = false;
+		}
+	});
+
+	// Clear image error when a value is selected
+	$effect(() => {
+		if (createExistingImage.trim().length > 0) {
+			imageError = "";
+		}
+	});
+
+	$effect(() => {
+		if (!formTouched) {
+			return;
+		}
+		if (createName.trim().length > 0) {
+			nameError = "";
+		}
+		if (createRepoUrl.trim().length === 0 || isValidUrl(createRepoUrl.trim())) {
+			repoUrlError = "";
+		}
+	});
 	const sandboxContainerIDs = $derived(new Set(sandboxes.map((sandbox: Sandbox) => sandbox.id)));
 	const runtimeContainers = $derived(containers.filter((container: ContainerSummary) => !sandboxContainerIDs.has(container.id)));
 
@@ -428,18 +499,59 @@
 	</div>
 
 	<!-- Workload table list -->
-	{#if workloadCount === 0 && !showCreateForm}
+	{#if loading && workloadCount === 0 && !showCreateForm}
+		<div class="sandbox-table-wrap">
+			<table class="sandbox-table">
+				<thead>
+					<tr class="thead-row">
+						<th class="th">Name</th>
+						<th class="th">Image</th>
+						<th class="th">Status</th>
+						<th class="th">Ports</th>
+						<th class="th">Created</th>
+						<th class="th">Container ID</th>
+						<th class="th th-actions"></th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each { length: 4 } as _, i}
+						<tr class="skeleton-row">
+							<td class="td-skel">
+								<div class="skel-line skel-line--name"></div>
+								<div class="skel-line skel-line--sub"></div>
+							</td>
+							<td class="td-skel"><div class="skel-line skel-line--image"></div></td>
+							<td class="td-skel">
+								<div class="skel-status">
+									<div class="skel-dot"></div>
+									<div class="skel-line skel-line--status"></div>
+								</div>
+							</td>
+							<td class="td-skel"><div class="skel-line skel-line--port"></div></td>
+							<td class="td-skel"><div class="skel-line skel-line--date"></div></td>
+							<td class="td-skel"><div class="skel-line skel-line--id"></div></td>
+							<td class="td-skel td-skel--actions">
+								<div class="skel-actions">
+									<div class="skel-btn"></div>
+									<div class="skel-btn skel-btn--wide"></div>
+								</div>
+							</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+		</div>
+	{:else if workloadCount === 0 && !showCreateForm}
 		<div class="empty-state anim-fade-up anim-delay-1">
 			<div class="empty-icon">
 				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-					<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
+					<rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 3H8l-2 4h12l-2-4z"/>
+					<path d="M12 12v5M9.5 14.5l2.5-2.5 2.5 2.5"/>
 				</svg>
 			</div>
-			<p class="empty-title">{loading ? "Loading..." : "No workloads yet"}</p>
-			{#if !loading}
-				<p class="empty-sub">Create a sandbox to get started.</p>
-				<button class="btn-ghost btn-sm" type="button" onclick={onToggleCreate}>+ New sandbox</button>
-			{/if}
+			<p class="empty-title">No workloads yet</p>
+			<p class="empty-sub">Create a sandbox to get started with your development environment.</p>
+			<button class="btn-ghost btn-sm" type="button" onclick={onToggleCreate}>+ New sandbox</button>
 		</div>
 	{:else if filteredWorkloads.length === 0}
 		<div class="empty-state anim-fade-up anim-delay-1">
@@ -603,24 +715,46 @@
 			<div class="form-section">
 				<label class="field-col">
 					<span class="section-label">Sandbox name</span>
-					<input class="field" bind:value={createName} placeholder="my-workspace" required />
+					<input
+						class="field"
+						class:field--error={!!nameError}
+						bind:value={createName}
+						placeholder="my-workspace"
+						required
+						onblur={() => {
+							if (formTouched && createName.trim().length === 0) {
+								nameError = "Sandbox name is required.";
+							}
+						}}
+						oninput={() => {
+							if (createName.trim().length > 0) nameError = "";
+						}}
+					/>
+					{#if nameError}
+						<span class="field-inline-error">{nameError}</span>
+					{/if}
 				</label>
 			</div>
 
 			<div class="form-section">
 				<span class="section-label">Image</span>
 				<label class="field-col">
-					<Combobox
-						bind:value={createExistingImage}
-						options={localImageOptions}
-						placeholder="Search local images..."
-						emptyText={localImageOptions.length === 0 ? "No local images available." : "No matches"}
-					/>
+					<div class:field--error={!!imageError} class="combobox-error-wrapper">
+						<Combobox
+							bind:value={createExistingImage}
+							options={localImageOptions}
+							placeholder="Search local images..."
+							emptyText={localImageOptions.length === 0 ? "No local images available." : "No matches"}
+						/>
+					</div>
 					{#if localImageOptions.length === 0}
 						<div class="create-image-empty">
 							<span class="field-help">No local images found. Create or pull one from the Images route.</span>
 							<a class="btn-ghost btn-xs" href={createImageHref}>Open Images</a>
 						</div>
+					{/if}
+					{#if imageError}
+						<span class="field-inline-error">{imageError}</span>
 					{/if}
 				</label>
 			</div>
@@ -630,7 +764,19 @@
 				<div class="form-row-2">
 					<label class="field-col">
 						<span class="section-label">Repo URL</span>
-						<input class="field" bind:value={createRepoUrl} placeholder="https://github.com/org/repo.git" />
+						<input
+							class="field"
+							class:field--error={!!repoUrlError}
+							bind:value={createRepoUrl}
+							placeholder="https://github.com/org/repo.git"
+							oninput={() => {
+								const v = createRepoUrl.trim();
+								if (v.length === 0 || isValidUrl(v)) repoUrlError = "";
+							}}
+						/>
+						{#if repoUrlError}
+							<span class="field-inline-error">{repoUrlError}</span>
+						{/if}
 					</label>
 					<label class="field-col">
 						<span class="section-label">Branch</span>
@@ -655,7 +801,7 @@
 		<button class="btn-ghost btn-sm" type="button" onclick={onToggleCreate} disabled={createLoading}>
 			Cancel
 		</button>
-		<button class="btn-primary" type="button" onclick={onCreateSubmit} disabled={createLoading}>
+		<button class="btn-primary" type="button" onclick={handleSubmit} disabled={createLoading}>
 			{#if createLoading}
 				<svg class="spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.22-8.56"/></svg>
 				Creating...
@@ -667,6 +813,23 @@
 </div>
 
 <style>
+	/* Inline validation */
+	.field--error {
+		border-color: var(--status-error-border) !important;
+	}
+	.field-inline-error {
+		font-family: var(--font-mono);
+		font-size: 0.62rem;
+		color: var(--status-error);
+		margin-top: 0.1rem;
+	}
+	.combobox-error-wrapper {
+		display: contents;
+	}
+	.combobox-error-wrapper.field--error :global(.combobox-input) {
+		border-color: var(--status-error-border) !important;
+	}
+
 	.list-view {
 		display: flex;
 		flex-direction: column;
@@ -1238,6 +1401,75 @@
 	.pg-size-select:focus {
 		border-color: var(--border-focus);
 	}
+
+	/* ── Skeleton loading rows ────────────────────────────────────────────────── */
+	@keyframes shimmer {
+		0%   { background-position: 200% 0; }
+		100% { background-position: -200% 0; }
+	}
+
+	.skeleton-row {
+		background: transparent;
+	}
+
+	.td-skel {
+		padding: 0.75rem 0.875rem;
+		border-bottom: 1px solid var(--border-dim);
+	}
+
+	.td-skel--actions {
+		text-align: right;
+	}
+
+	.skel-line {
+		height: 9px;
+		border-radius: 4px;
+		background: linear-gradient(90deg, var(--bg-raised) 25%, var(--bg-overlay) 50%, var(--bg-raised) 75%);
+		background-size: 200% 100%;
+		animation: shimmer 1.5s ease-in-out infinite;
+	}
+
+	.skel-line--name  { width: 72%; max-width: 9rem; }
+	.skel-line--sub   { width: 48%; max-width: 6rem; height: 7px; margin-top: 5px; opacity: 0.6; }
+	.skel-line--image { width: 65%; max-width: 8rem; }
+	.skel-line--status { width: 4rem; }
+	.skel-line--port  { width: 3rem; }
+	.skel-line--date  { width: 7rem; }
+	.skel-line--id    { width: 5rem; }
+
+	.skel-status {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+	}
+
+	.skel-dot {
+		width: 7px;
+		height: 7px;
+		border-radius: 50%;
+		flex-shrink: 0;
+		background: linear-gradient(90deg, var(--bg-raised) 25%, var(--bg-overlay) 50%, var(--bg-raised) 75%);
+		background-size: 200% 100%;
+		animation: shimmer 1.5s ease-in-out infinite;
+	}
+
+	.skel-actions {
+		display: flex;
+		align-items: center;
+		justify-content: flex-end;
+		gap: 0.4rem;
+	}
+
+	.skel-btn {
+		height: 24px;
+		width: 52px;
+		border-radius: 4px;
+		background: linear-gradient(90deg, var(--bg-raised) 25%, var(--bg-overlay) 50%, var(--bg-raised) 75%);
+		background-size: 200% 100%;
+		animation: shimmer 1.5s ease-in-out infinite;
+	}
+
+	.skel-btn--wide { width: 72px; }
 
 	/* Shared */
 	.btn-ghost { display: inline-flex; align-items: center; gap: 0.35rem; }

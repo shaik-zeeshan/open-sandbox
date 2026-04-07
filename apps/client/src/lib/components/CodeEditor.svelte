@@ -7,6 +7,8 @@
 	import { javascript } from "@codemirror/lang-javascript";
 	import { css } from "@codemirror/lang-css";
 	import { yaml } from "@codemirror/lang-yaml";
+	import { StreamLanguage } from "@codemirror/language";
+	import { dockerFile } from "@codemirror/legacy-modes/mode/dockerfile";
 	import type { Extension } from "@codemirror/state";
 
 	type Language = "dockerfile" | "shell" | "yaml" | "javascript" | "css" | "text";
@@ -36,8 +38,7 @@
 			case "javascript": return [javascript()];
 			case "css": return [css()];
 			case "yaml": return [yaml()];
-			// dockerfile/shell: use a basic text mode with no language pack
-			// (no official @codemirror/lang-dockerfile yet)
+			case "dockerfile": return [StreamLanguage.define(dockerFile)];
 			default: return [];
 		}
 	}

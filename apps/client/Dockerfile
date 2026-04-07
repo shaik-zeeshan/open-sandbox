@@ -15,11 +15,11 @@ ENV VITE_SANDBOX_BASE_URL=${VITE_SANDBOX_BASE_URL}
 WORKDIR /app/apps/client
 RUN bun run build
 
-FROM nginx:1.27-alpine
+FROM joseluisq/static-web-server:2-alpine
 
-COPY apps/client/nginx.conf /etc/nginx/conf.d/default.conf
-COPY --from=build /app/apps/client/build /usr/share/nginx/html
+COPY apps/client/config.toml /etc/sws/config.toml
+COPY --from=build /app/apps/client/build /var/public
 
 EXPOSE 80
 
-CMD ["nginx", "-g", "daemon off;"]
+CMD ["static-web-server", "--config-file", "/etc/sws/config.toml"]

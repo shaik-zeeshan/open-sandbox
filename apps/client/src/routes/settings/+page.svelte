@@ -22,6 +22,9 @@
 	let confirmPassword = $state("");
 	let passwordLoading = $state(false);
 	let passwordError = $state("");
+	let passwordFieldError = $state("");
+	let passwordSuccess = $state(false);
+	let passwordSuccessTimer: TimeoutHandle | null = null;
 
 	const isValidUrl = (v: string): boolean => {
 		try { new URL(v); return true; } catch { return false; }
@@ -42,12 +45,15 @@
 
 	async function changePassword(): Promise<void> {
 		passwordError = "";
+		passwordFieldError = "";
+		passwordSuccess = false;
+		clearScheduledTimeout(passwordSuccessTimer);
 		if (newPassword !== confirmPassword) {
-			passwordError = "Passwords do not match.";
+			passwordFieldError = "Passwords do not match.";
 			return;
 		}
 		if (newPassword.length < 4) {
-			passwordError = "Password must be at least 4 characters.";
+			passwordFieldError = "Password must be at least 4 characters.";
 			return;
 		}
 		passwordLoading = true;
@@ -57,6 +63,11 @@
 			currentPassword = "";
 			newPassword = "";
 			confirmPassword = "";
+			passwordSuccess = true;
+			passwordSuccessTimer = scheduleTimeout(() => {
+				passwordSuccess = false;
+				passwordSuccessTimer = null;
+			}, 3000);
 		} catch (error) {
 			passwordError = formatApiFailure(error);
 		} finally {
@@ -64,6 +75,16 @@
 		}
 	}
 
+
+	async function pingAndToast(): Promise<void> {
+		const toastId = toast.loading("Testing connection...");
+		await checkHealth();
+		if (authController.health === "ok") {
+			toast.update(toastId, "ok", "Connected.");
+		} else {
+			toast.update(toastId, "error", authController.healthMessage);
+		}
+	}
 
 	$effect(() => {
 		clientState.baseUrl;
@@ -140,7 +161,7 @@
 								"></span>
 								<span class="health-label">{authController.healthMessage}</span>
 							</div>
-							<button class="btn-ghost btn-sm" type="button" onclick={() => void checkHealth()}>
+							<button class="btn-ghost btn-sm" type="button" onclick={() => void pingAndToast()}>
 								{authController.health === "checking" ? "Checking..." : "Test connection"}
 							</button>
 						</div>
@@ -197,9 +218,18 @@
 									required
 									placeholder="Repeat new password"
 								/>
+								{#if passwordFieldError}
+									<span class="field-inline-error">{passwordFieldError}</span>
+								{/if}
 							</label>
 						{#if passwordError}
 							<p class="alert-error">{passwordError}</p>
+						{/if}
+						{#if passwordSuccess}
+							<div class="password-success">
+								<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+								<span>Password updated</span>
+							</div>
 						{/if}
 						<div class="form-footer">
 								<button class="btn-primary btn-sm" type="submit" disabled={passwordLoading || !newPassword || !confirmPassword}>
@@ -455,6 +485,33 @@
 		border-color: var(--status-error-border) !important;
 	}
 
+	.field-inline-error {
+		font-family: var(--font-mono);
+		font-size: 0.62rem;
+		color: var(--status-error);
+		margin-top: 0.1rem;
+	}
+
+	.password-success {
+		grid-column: span 2;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.45rem;
+		padding: 0.5rem 0.75rem;
+		background: var(--status-ok-bg);
+		border: 1px solid var(--status-ok-border);
+		border-radius: var(--radius-sm);
+		color: var(--status-ok);
+		font-family: var(--font-mono);
+		font-size: 0.68rem;
+		animation: fade-success 0.2s ease;
+	}
+
+	@keyframes fade-success {
+		from { opacity: 0; transform: translateY(-3px); }
+		to   { opacity: 1; transform: translateY(0); }
+	}
+
 	.field-col {
 		display: flex;
 		flex-direction: column;
@@ -475,6 +532,7 @@
 		.settings-page { padding: 1rem; }
 		.password-form { grid-template-columns: 1fr; }
 		.password-form .alert-error,
+		.password-success,
 		.form-footer { grid-column: span 1; }
 		.endpoint-row { flex-direction: column; }
 		.endpoint-row .btn-primary { width: 100%; }

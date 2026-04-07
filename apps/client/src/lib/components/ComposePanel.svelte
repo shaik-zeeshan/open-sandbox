@@ -26,8 +26,11 @@
 	let selectedServices = $state<string[]>([]);
 	let removeVolumes = $state(false);
 	let removeOrphans = $state(true);
-	let loading = $state(false);
+	let activeAction = $state<"up" | "status" | "down" | null>(null);
+	let projectNameError = $state("");
+	let composeContentError = $state("");
 	let previewRefreshLoading = $state(false);
+	const loading = $derived(activeAction !== null);
 	let step = $state("Idle");
 	let logs = $state("");
 	let statusServiceNames = $state<string[]>([]);
@@ -105,6 +108,20 @@
 	});
 
 	$effect(() => {
+		projectName;
+		if (projectNameError && projectName.length > 0) {
+			projectNameError = "";
+		}
+	});
+
+	$effect(() => {
+		composeContent;
+		if (composeContentError && composeContent.length > 0) {
+			composeContentError = "";
+		}
+	});
+
+	$effect(() => {
 		logs;
 		if (!logsViewport) return;
 		queueMicrotask(() => {
@@ -135,7 +152,34 @@
 		return request;
 	}
 
+	function validateForm(): boolean {
+		const normalizedProjectName = projectName.trim();
+		const normalizedComposeContent = composeContent.trim();
+		const nextProjectNameError =
+			normalizedProjectName.length === 0 ? "Enter a project name before running a compose action." : "";
+		const nextComposeContentError =
+			normalizedComposeContent.length === 0 ? "Paste compose YAML before running a compose action." : "";
+
+		projectNameError = nextProjectNameError;
+		composeContentError = nextComposeContentError;
+
+		if (nextProjectNameError) {
+			toast.error(nextProjectNameError);
+		}
+
+		if (nextComposeContentError) {
+			toast.error(nextComposeContentError);
+		}
+
+		return nextProjectNameError.length === 0 && nextComposeContentError.length === 0;
+	}
+
 	async function runAction(action: ComposeAction): Promise<void> {
+		if (!validateForm()) {
+			return;
+		}
+
+		activeAction = action;
 		await runComposeAction({
 			action,
 			config,
@@ -144,7 +188,9 @@
 			removeOrphans,
 			runtime: {
 				setLoading: (value) => {
-					loading = value;
+					if (!value) {
+						activeAction = null;
+					}
 				},
 				setStep: (value) => {
 					step = value;
@@ -195,14 +241,18 @@
 			<span class="panel-title">Manage compose project</span>
 		</div>
 		<div class="panel-body compose-body">
-			<div class="compose-note">
-				<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-				<span>Compose projects are stored under <code class="inline-code">.open-sandbox/compose</code> in the server workspace root.</span>
-			</div>
-
 			<label class="field-col">
-				<span class="section-label">Project name</span>
-				<input class="field" bind:value={projectName} placeholder="my-project" required />
+				<span class="section-label" title="Compose projects are stored under .open-sandbox/compose in the server workspace root.">Project name</span>
+				<input
+					class="field"
+					class:field--error={projectNameError.length > 0}
+					bind:value={projectName}
+					placeholder="my-project"
+					required
+				/>
+				{#if projectNameError}
+					<span class="field-error-text">{projectNameError}</span>
+				{/if}
 			</label>
 
 			<div class="field-col">
@@ -213,6 +263,9 @@
 					placeholder="version: '3.8'&#10;services:&#10;  app:&#10;    image: ubuntu:24.04&#10;    command: sleep infinity"
 					minHeight="16rem"
 				/>
+				{#if composeContentError}
+					<span class="field-error-text">{composeContentError}</span>
+				{/if}
 			</div>
 
 			<div class="field-col">
@@ -235,31 +288,53 @@
 				{/if}
 			</div>
 
-			<div class="down-options">
+			<div class="compose-actions">
 				<label class="checkbox-row">
 					<input type="checkbox" bind:checked={removeVolumes} />
-					<span>Remove volumes on down</span>
+					<span>Remove volumes</span>
 				</label>
 				<label class="checkbox-row">
 					<input type="checkbox" bind:checked={removeOrphans} />
-					<span>Remove orphan containers on down</span>
+					<span>Remove orphans</span>
 				</label>
+				<div class="compose-actions-spacer"></div>
+				<button class="btn-primary" type="button" onclick={() => void runAction("up")} disabled={loading}>
+					{#if activeAction === "up"}
+						<svg class="btn-spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="12" height="12"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+						Starting...
+					{:else}
+						Run up
+					{/if}
+				</button>
+				<button class="btn-ghost" type="button" onclick={() => void runAction("status")} disabled={loading}>
+					{#if activeAction === "status"}
+						<svg class="btn-spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="12" height="12"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+						Checking...
+					{:else}
+						Status
+					{/if}
+				</button>
+				<button class="btn-danger" type="button" onclick={() => void runAction("down")} disabled={loading}>
+					{#if activeAction === "down"}
+						<svg class="btn-spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="12" height="12"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+						Stopping...
+					{:else}
+						Down
+					{/if}
+				</button>
 			</div>
 
-			<div class="compose-actions">
-				<button class="btn-primary" type="button" onclick={() => void runAction("up")} disabled={loading}>Run up</button>
-				<button class="btn-ghost" type="button" onclick={() => void runAction("status")} disabled={loading}>Status</button>
-				<button class="btn-danger" type="button" onclick={() => void runAction("down")} disabled={loading}>Down</button>
-			</div>
-
-			<div class="pipeline-panel">
-				<div class="pipeline-header">
-					<span class="pipeline-title">Output</span>
-					<span class="pipeline-step">{loading ? `${step}...` : step}</span>
+			{#if step !== "Idle" || logs}
+				<div class="pipeline-panel">
+					<div class="pipeline-header">
+						<span class="pipeline-title">Output</span>
+						<span class="pipeline-step">{loading ? `${step}...` : step}</span>
+					</div>
+					<pre bind:this={logsViewport} class="pipeline-log">{stripAnsi(logs) || "Waiting for output..."}</pre>
 				</div>
-				<pre bind:this={logsViewport} class="pipeline-log">{stripAnsi(logs) || "Waiting for output..."}</pre>
-			</div>
+			{/if}
 
+			{#if previewServices.length > 0 || composeProjectPreview}
 			<div class="pipeline-panel">
 				<div class="pipeline-header">
 					<span class="pipeline-title">Service previews</span>
@@ -297,6 +372,7 @@
 					</div>
 				{/if}
 			</div>
+			{/if}
 		</div>
 	</section>
 </div>
@@ -347,34 +423,14 @@
 		line-height: 1.45;
 	}
 
-	.compose-note {
-		display: flex;
-		align-items: flex-start;
-		gap: 0.5rem;
-		padding: 0.625rem 0.75rem;
-		background: var(--status-warn-bg);
-		border: 1px solid var(--status-warn-border);
-		border-radius: var(--radius-md);
-		font-family: var(--font-mono);
-		font-size: 0.65rem;
-		color: var(--status-warn);
-		line-height: 1.5;
+	.field--error {
+		border-color: var(--status-error-border);
 	}
 
-	.compose-note svg {
-		flex-shrink: 0;
-		margin-top: 0.1rem;
-		color: var(--status-warn);
-	}
-
-	.inline-code {
+	.field-error-text {
+		color: var(--status-error);
 		font-family: var(--font-mono);
-		font-size: 0.62rem;
-		background: var(--bg-overlay);
-		border: 1px solid var(--border-mid);
-		border-radius: 3px;
-		padding: 0.05rem 0.3rem;
-		color: var(--text-secondary);
+		font-size: 0.6rem;
 	}
 
 	.opt {
@@ -402,26 +458,40 @@
 		color: var(--text-secondary);
 	}
 
-	.down-options {
-		display: flex;
-		flex-direction: column;
-		gap: 0.35rem;
-	}
-
 	.checkbox-row {
 		display: inline-flex;
 		align-items: center;
 		gap: 0.4rem;
 		font-family: var(--font-mono);
-		font-size: 0.64rem;
-		color: var(--text-secondary);
+		font-size: 0.62rem;
+		color: var(--text-muted);
 	}
 
 	.compose-actions {
 		display: flex;
-		justify-content: flex-end;
+		align-items: center;
 		gap: 0.5rem;
 		flex-wrap: wrap;
+	}
+
+	.compose-actions-spacer {
+		flex: 1;
+	}
+
+	.compose-actions :global(button) {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+	}
+
+	.btn-spinner {
+		flex-shrink: 0;
+		animation: spin 0.75s linear infinite;
+	}
+
+	@keyframes spin {
+		from { transform: rotate(0deg); }
+		to   { transform: rotate(360deg); }
 	}
 
 	.pipeline-panel {
