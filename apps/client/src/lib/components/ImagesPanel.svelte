@@ -578,12 +578,13 @@
 				<span class="panel-title">Create image</span>
 			</div>
 			<div class="panel-body create-body">
-				<div class="method-grid">
-					{#each createMethods as method}
+			<div class="method-tabs">
+				{#each createMethods as method}
 					<button
 						type="button"
-						class="method-btn"
-						class:method-btn--active={createMethod === method.id}
+						class="method-tab"
+						class:method-tab--active={createMethod === method.id}
+						title={method.description}
 						onclick={() => {
 							createMethod = method.id;
 							pullImageError = "";
@@ -593,11 +594,10 @@
 							inlineContentError = "";
 						}}
 					>
-							<span class="method-label">{method.label}</span>
-							<span class="method-description">{method.description}</span>
-						</button>
-					{/each}
-				</div>
+						{method.label}
+					</button>
+				{/each}
+			</div>
 
 				{#if createMethod === "pull"}
 					<div class="form-stack">
@@ -620,16 +620,6 @@
 								<span class="field-inline-error">{pullImageError}</span>
 							{/if}
 						</label>
-						<div class="pull-search-actions">
-							<button class="btn-ghost btn-sm" type="button" onclick={() => void runImageSearch()} disabled={createPullSearchLoading}>
-								{#if createPullSearchLoading}
-									<svg class="btn-spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="12" height="12"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
-									Searching...
-								{:else}
-									Search
-								{/if}
-							</button>
-						</div>
 						{#if createPullSearchError}
 							<p class="alert-error">{createPullSearchError}</p>
 						{/if}
@@ -715,19 +705,6 @@
 						{/if}
 					</button>
 				</div>
-
-				{#if createStep !== "Idle" || createResolvedImage || createLogs}
-					<div class="pipeline-panel">
-						<div class="pipeline-header">
-							<span class="pipeline-title">Creation output</span>
-							<span class="pipeline-step">{createStep}</span>
-						</div>
-						{#if createResolvedImage}
-							<p class="pipeline-image">Image: <code>{createResolvedImage}</code></p>
-						{/if}
-						<pre class="pipeline-log">{stripAnsi(createLogs) || "Waiting for pipeline..."}</pre>
-					</div>
-				{/if}
 			</div>
 		</section>
 
@@ -747,7 +724,6 @@
 										<div class="skel-tag skel-tag--short"></div>
 									</div>
 									<div class="skel-meta">
-										<div class="skel-line skel-line--id"></div>
 										<div class="skel-line skel-line--size"></div>
 										<div class="skel-line skel-line--date"></div>
 									</div>
@@ -782,11 +758,10 @@
 											<span class="tag-chip">untagged</span>
 										{/if}
 									</div>
-									<div class="image-meta">
-										<span class="image-id">{image.id.slice(0, 16)}</span>
-										<span>{formatSize(image.size)}</span>
-										<span>{formatDate(image.created)}</span>
-									</div>
+								<div class="image-meta">
+									<span>{formatSize(image.size)}</span>
+									<span>{formatDate(image.created)}</span>
+								</div>
 								</div>
 							<button class="btn-danger btn-xs" type="button" onclick={() => void submitDelete(image)} disabled={loading || deletingId !== null}>
 								{#if deletingId === image.id}
@@ -805,6 +780,21 @@
 			</div>
 		</section>
 	</div>
+
+	{#if createStep !== "Idle" || createResolvedImage || createLogs}
+		<section class="panel pipeline-output-panel">
+			<div class="panel-header">
+				<span class="panel-title">Build output</span>
+				<span class="pipeline-step">{createStep}</span>
+			</div>
+			<div class="panel-body">
+				{#if createResolvedImage}
+					<p class="pipeline-image">Image: <code>{createResolvedImage}</code></p>
+				{/if}
+				<pre class="pipeline-log">{stripAnsi(createLogs) || "Waiting for pipeline..."}</pre>
+			</div>
+		</section>
+	{/if}
 </div>
 
 <style>
@@ -834,8 +824,8 @@
 	}
 
 	.images-layout {
-		display: grid;
-		grid-template-columns: minmax(20rem, 28rem) minmax(0, 1fr);
+		display: flex;
+		flex-direction: column;
 		gap: 1rem;
 	}
 
@@ -847,7 +837,6 @@
 	}
 
 	.images-header button,
-	.pull-search-actions button,
 	.create-footer button,
 	.image-row button {
 		display: inline-flex;
@@ -865,56 +854,48 @@
 		to   { transform: rotate(360deg); }
 	}
 
-	.method-grid {
-		display: grid;
-		gap: 0.45rem;
-	}
-
-	.method-btn {
+	.method-tabs {
 		display: flex;
-		flex-direction: column;
-		gap: 0.2rem;
-		text-align: left;
-		padding: 0.65rem 0.75rem;
-		border-radius: var(--radius-md);
+		gap: 0;
 		border: 1px solid var(--border-dim);
+		border-radius: var(--radius-md);
+		overflow: hidden;
 		background: var(--bg-raised);
+	}
+
+	.method-tab {
+		flex: 1;
+		padding: 0.5rem 0.5rem;
+		font-family: var(--font-mono);
+		font-size: 0.65rem;
 		color: var(--text-secondary);
+		background: transparent;
+		border: none;
+		border-right: 1px solid var(--border-dim);
 		cursor: pointer;
-		transition: border-color 0.12s, color 0.12s, background 0.12s;
+		transition: color 0.12s, background 0.12s;
+		text-align: center;
+		white-space: nowrap;
 	}
 
-	.method-btn:hover {
-		border-color: var(--border-mid);
+	.method-tab:last-child {
+		border-right: none;
+	}
+
+	.method-tab:hover {
 		color: var(--text-primary);
+		background: var(--bg-overlay);
 	}
 
-	.method-btn--active {
-		border-color: var(--border-hi);
+	.method-tab--active {
 		color: var(--text-primary);
 		background: var(--accent-dim);
-	}
-
-	.method-label {
-		font-family: var(--font-mono);
-		font-size: 0.68rem;
-	}
-
-	.method-description {
-		font-family: var(--font-mono);
-		font-size: 0.6rem;
-		color: var(--text-muted);
 	}
 
 	.form-stack {
 		display: flex;
 		flex-direction: column;
 		gap: 0.7rem;
-	}
-
-	.pull-search-actions {
-		display: flex;
-		justify-content: flex-end;
 	}
 
 	.field-col {
@@ -961,23 +942,10 @@
 		justify-content: flex-end;
 	}
 
-	.pipeline-panel {
-		border: 1px solid var(--border-dim);
-		border-radius: var(--radius-md);
-		background: var(--bg-raised);
-		overflow: hidden;
+	.pipeline-output-panel {
+		margin-top: 0;
 	}
 
-	.pipeline-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 0.5rem;
-		padding: 0.55rem 0.65rem;
-		border-bottom: 1px solid var(--border-dim);
-	}
-
-	.pipeline-title,
 	.pipeline-step,
 	.pipeline-image {
 		font-family: var(--font-mono);
@@ -1065,9 +1033,6 @@
 		color: var(--text-muted);
 	}
 
-	.image-id {
-		color: var(--text-secondary);
-	}
 	/* ── Images empty state ─────────────────────────────────────────────────── */
 	.images-empty-state {
 		display: flex;
@@ -1147,7 +1112,6 @@
 		animation: shimmer 1.5s ease-in-out infinite;
 	}
 
-	.skel-line--id   { width: 5rem; }
 	.skel-line--size { width: 3rem; }
 	.skel-line--date { width: 8rem; }
 
@@ -1161,9 +1125,4 @@
 		flex-shrink: 0;
 	}
 
-	@media (max-width: 1024px) {
-		.images-layout {
-			grid-template-columns: 1fr;
-		}
-	}
 </style>
