@@ -354,6 +354,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.85rem;
+		height: 100%;
 		min-height: 0;
 	}
 
@@ -407,23 +408,30 @@
 	}
 
 	.terminal-shell {
+		display: flex;
+		flex-direction: column;
 		overflow: hidden;
-		padding: 0;
+		padding: 0.9rem;
 		background: #040404;
 		border-radius: var(--radius-md);
-		min-height: 26rem;
+		flex: 1;
+		min-height: 20rem;
 	}
 
 	.terminal-canvas {
-		height: 26rem;
-		padding: 0.9rem;
+		width: 100%;
+		height: 100%;
+		padding: 0;
+		overflow: hidden;
 	}
 
 	:global(.terminal-canvas .xterm) {
+		width: 100%;
 		height: 100%;
 	}
 
 	:global(.terminal-canvas .xterm-viewport) {
+		height: 100%;
 		overflow-y: auto;
 	}
 
@@ -432,11 +440,7 @@
 	}
 
 	@media (max-width: 640px) {
-		.terminal-shell,
-		.terminal-canvas {
-			min-height: 22rem;
-			height: 22rem;
-		}
+		.terminal-shell { min-height: 16rem; }
 
 		.terminal-actions {
 			width: 100%;

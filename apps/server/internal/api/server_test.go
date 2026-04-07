@@ -2634,9 +2634,27 @@ func TestTerminalWebSocketAllowsSameHostOriginBehindProxy(t *testing.T) {
 	req.Header.Set("X-Forwarded-Proto", "http")
 
 	allowOrigin := buildAllowOriginFunc(loadAllowedOrigins())
-	allowed := allowOrigin("http://192.168.0.8:8010") || requestOriginMatchesForwardedHost(req, "http://192.168.0.8:8010")
+	allowed := allowOrigin("http://192.168.0.8:8010") ||
+		requestOriginMatchesForwardedHost(req, "http://192.168.0.8:8010") ||
+		requestOriginHostMatchesForwardedHost(req, "http://192.168.0.8:8010")
 	if !allowed {
 		t.Fatal("expected websocket origin to be allowed for proxied same-host request")
+	}
+}
+
+func TestTerminalWebSocketAllowsHTTPSOriginWhenForwardedProtoIsHTTP(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/sandboxes/sandbox-1/terminal/ws?cols=100&rows=32", nil)
+	req.Host = "sandbox.shaiks.space"
+	req.Header.Set("Origin", "https://sandbox.shaiks.space")
+	req.Header.Set("X-Forwarded-Host", "sandbox.shaiks.space")
+	req.Header.Set("X-Forwarded-Proto", "http")
+
+	allowOrigin := buildAllowOriginFunc(loadAllowedOrigins())
+	allowed := allowOrigin("https://sandbox.shaiks.space") ||
+		requestOriginMatchesForwardedHost(req, "https://sandbox.shaiks.space") ||
+		requestOriginHostMatchesForwardedHost(req, "https://sandbox.shaiks.space")
+	if !allowed {
+		t.Fatal("expected websocket origin to be allowed when host matches behind TLS-terminating proxy")
 	}
 }
 

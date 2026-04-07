@@ -1299,7 +1299,9 @@ func (s *Server) streamTerminalForContainer(c *gin.Context, workerID string, con
 			if origin == "" {
 				return true
 			}
-			return allowOrigin(origin) || requestOriginMatchesForwardedHost(r, origin)
+			return allowOrigin(origin) ||
+				requestOriginMatchesForwardedHost(r, origin) ||
+				requestOriginHostMatchesForwardedHost(r, origin)
 		},
 	}
 
@@ -2286,6 +2288,35 @@ func requestOriginMatchesForwardedHost(r *http.Request, origin string) bool {
 	requestHostIncludesPort := parsedRequestHost.Host != parsedRequestHost.Hostname()
 	if requestHostIncludesPort {
 		return strings.EqualFold(parsedOrigin.Host, parsedRequestHost.Host)
+	}
+
+	return strings.EqualFold(parsedOrigin.Hostname(), parsedRequestHost.Hostname())
+}
+
+func requestOriginHostMatchesForwardedHost(r *http.Request, origin string) bool {
+	parsedOrigin, err := url.Parse(origin)
+	if err != nil || parsedOrigin.Host == "" || parsedOrigin.Hostname() == "" {
+		return false
+	}
+
+	requestHost := forwardedRequestHost(r)
+	if requestHost == "" {
+		return false
+	}
+
+	parsedRequestHost, err := url.Parse("//" + requestHost)
+	if err != nil || parsedRequestHost.Hostname() == "" {
+		return false
+	}
+
+	requestHostIncludesPort := parsedRequestHost.Host != parsedRequestHost.Hostname()
+	originIncludesPort := parsedOrigin.Host != parsedOrigin.Hostname()
+	if requestHostIncludesPort || originIncludesPort {
+		originPort := parsedOrigin.Port()
+		requestPort := parsedRequestHost.Port()
+		if originPort != "" && requestPort != "" {
+			return strings.EqualFold(parsedOrigin.Host, parsedRequestHost.Host)
+		}
 	}
 
 	return strings.EqualFold(parsedOrigin.Hostname(), parsedRequestHost.Hostname())
