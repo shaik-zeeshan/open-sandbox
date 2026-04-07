@@ -129,16 +129,15 @@ func (s *Server) previewLaunch(c *gin.Context) {
 	}
 
 	requestHost := forwardedRequestHost(c.Request)
-	callbackHost := s.previewCallbackHost(previewHost, requestHost)
-	grantToken, err := s.issuePreviewToken(previewTokenTypeGrant, identity, target, callbackHost)
-	if err != nil {
-		writeError(c, http.StatusInternalServerError, err)
-		return
-	}
-
 	scheme := strings.TrimSpace(forwardedRequestProto(c.Request))
 	if scheme == "" {
 		scheme = s.previewRouting.PublicBaseScheme
+	}
+	callbackHost := s.previewCallbackHost(previewHost, requestHost)
+	grantToken, err := s.issuePreviewToken(previewTokenTypeGrant, identity, target, callbackHost, scheme)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
 	}
 
 	callbackURL := url.URL{
@@ -184,7 +183,15 @@ func (s *Server) previewAuthCallback(c *gin.Context) {
 	}
 
 	targetHost := forwardedRequestHost(c.Request)
-	claims, err := s.validatePreviewToken(rawGrant, previewTokenTypeGrant, targetHost)
+	targetScheme := strings.TrimSpace(forwardedRequestProto(c.Request))
+	if targetScheme == "" {
+		if requestIsSecure(c.Request) {
+			targetScheme = "https"
+		} else {
+			targetScheme = "http"
+		}
+	}
+	claims, err := s.validatePreviewToken(rawGrant, previewTokenTypeGrant, targetHost, targetScheme)
 	if err != nil {
 		c.AbortWithStatus(http.StatusUnauthorized)
 		return
@@ -202,7 +209,7 @@ func (s *Server) previewAuthCallback(c *gin.Context) {
 		return
 	}
 
-	sessionToken, err := s.issuePreviewToken(previewTokenTypeSession, identity, target, targetHost)
+	sessionToken, err := s.issuePreviewToken(previewTokenTypeSession, identity, target, targetHost, targetScheme)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
@@ -369,7 +376,16 @@ func (s *Server) authenticateProxyIdentity(r *http.Request, target proxyAuthoriz
 		return AuthIdentity{}, reason, err
 	}
 
-	claims, validateErr := s.validatePreviewToken(previewToken, previewTokenTypeSession, forwardedRequestHost(r))
+	requestScheme := strings.TrimSpace(forwardedRequestProto(r))
+	if requestScheme == "" {
+		if r.TLS != nil {
+			requestScheme = "https"
+		} else {
+			requestScheme = "http"
+		}
+	}
+
+	claims, validateErr := s.validatePreviewToken(previewToken, previewTokenTypeSession, forwardedRequestHost(r), requestScheme)
 	if validateErr != nil {
 		return AuthIdentity{}, "token_invalid", validateErr
 	}
@@ -392,9 +408,13 @@ func targetsEqual(a proxyAuthorizationTarget, b proxyAuthorizationTarget) bool {
 		a.PrivatePort == b.PrivatePort
 }
 
-func (s *Server) issuePreviewToken(tokenType string, identity AuthIdentity, target proxyAuthorizationTarget, host string) (string, error) {
+func (s *Server) issuePreviewToken(tokenType string, identity AuthIdentity, target proxyAuthorizationTarget, host string, scheme string) (string, error) {
 	if len(s.auth.JWTSecret) == 0 {
 		return "", errors.New("jwt secret is not configured")
+	}
+	normalizedHost := normalizePreviewTokenHost(host, scheme)
+	if normalizedHost == "" {
+		normalizedHost = strings.ToLower(strings.TrimSpace(host))
 	}
 	now := time.Now().UTC()
 	expiresAt := now.Add(s.previewRouting.SessionTTL)
@@ -403,7 +423,7 @@ func (s *Server) issuePreviewToken(tokenType string, identity AuthIdentity, targ
 		UserID:       strings.TrimSpace(identity.UserID),
 		Username:     strings.TrimSpace(identity.Username),
 		Role:         strings.TrimSpace(identity.Role),
-		Host:         strings.ToLower(strings.TrimSpace(host)),
+		Host:         normalizedHost,
 		WorkloadType: strings.TrimSpace(target.WorkloadType),
 		WorkloadID:   strings.TrimSpace(target.WorkloadID),
 		ProjectName:  strings.TrimSpace(target.ProjectName),
@@ -421,7 +441,7 @@ func (s *Server) issuePreviewToken(tokenType string, identity AuthIdentity, targ
 	return token.SignedString(s.auth.JWTSecret)
 }
 
-func (s *Server) validatePreviewToken(raw string, tokenType string, host string) (*previewAuthClaims, error) {
+func (s *Server) validatePreviewToken(raw string, tokenType string, host string, scheme string) (*previewAuthClaims, error) {
 	if len(s.auth.JWTSecret) == 0 {
 		return nil, errors.New("jwt secret is not configured")
 	}
@@ -438,8 +458,8 @@ func (s *Server) validatePreviewToken(raw string, tokenType string, host string)
 	if strings.TrimSpace(claims.TokenType) != tokenType {
 		return nil, errors.New("invalid preview token type")
 	}
-	expectedHost := strings.ToLower(strings.TrimSpace(host))
-	tokenHost := strings.ToLower(strings.TrimSpace(claims.Host))
+	expectedHost := normalizePreviewTokenHost(host, scheme)
+	tokenHost := normalizePreviewTokenHost(claims.Host, scheme)
 	if expectedHost == "" || tokenHost == "" || expectedHost != tokenHost {
 		return nil, errors.New("preview token host mismatch")
 	}
@@ -447,6 +467,35 @@ func (s *Server) validatePreviewToken(raw string, tokenType string, host string)
 		return nil, errors.New("preview token target is invalid")
 	}
 	return claims, nil
+}
+
+func normalizePreviewTokenHost(rawHost string, scheme string) string {
+	trimmed := strings.TrimSpace(rawHost)
+	if trimmed == "" {
+		return ""
+	}
+
+	parsed, err := url.Parse("//" + trimmed)
+	if err != nil || strings.TrimSpace(parsed.Hostname()) == "" {
+		return strings.ToLower(strings.TrimSuffix(trimmed, "."))
+	}
+
+	hostname := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(parsed.Hostname()), "."))
+	if hostname == "" {
+		return ""
+	}
+
+	port := strings.TrimSpace(parsed.Port())
+	normalizedScheme := strings.ToLower(strings.TrimSpace(scheme))
+	if (normalizedScheme == "https" && port == "443") || (normalizedScheme == "http" && port == "80") {
+		port = ""
+	}
+
+	if port == "" {
+		return hostname
+	}
+
+	return net.JoinHostPort(hostname, port)
 }
 
 func (c *previewAuthClaims) proxyTarget() proxyAuthorizationTarget {

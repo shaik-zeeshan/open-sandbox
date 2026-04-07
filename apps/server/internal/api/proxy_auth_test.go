@@ -414,6 +414,51 @@ func TestPreviewLaunchRedirectUsesForwardedHostWithoutForcedConfiguredPort(t *te
 	}
 }
 
+func TestValidatePreviewTokenAcceptsHTTPSDefaultPortOnForwardedHost(t *testing.T) {
+	s := newTestServer(&mockDocker{})
+	identity := AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}
+	target := proxyAuthorizationTarget{WorkloadType: previewTargetTypeSandbox, WorkloadID: "sandbox-1", PrivatePort: 3000}
+
+	token, err := s.issuePreviewToken(previewTokenTypeSession, identity, target, "sbx-123.preview.shaiks.space", "https")
+	if err != nil {
+		t.Fatalf("issue preview token: %v", err)
+	}
+
+	if _, err := s.validatePreviewToken(token, previewTokenTypeSession, "sbx-123.preview.shaiks.space:443", "https"); err != nil {
+		t.Fatalf("expected token validation to accept default https port mismatch, got %v", err)
+	}
+}
+
+func TestValidatePreviewTokenAcceptsHTTPDefaultPortOnForwardedHost(t *testing.T) {
+	s := newTestServer(&mockDocker{})
+	identity := AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}
+	target := proxyAuthorizationTarget{WorkloadType: previewTargetTypeSandbox, WorkloadID: "sandbox-1", PrivatePort: 3000}
+
+	token, err := s.issuePreviewToken(previewTokenTypeSession, identity, target, "sbx-123.preview.lvh.me", "http")
+	if err != nil {
+		t.Fatalf("issue preview token: %v", err)
+	}
+
+	if _, err := s.validatePreviewToken(token, previewTokenTypeSession, "sbx-123.preview.lvh.me:80", "http"); err != nil {
+		t.Fatalf("expected token validation to accept default http port mismatch, got %v", err)
+	}
+}
+
+func TestValidatePreviewTokenRejectsNonDefaultPortMismatch(t *testing.T) {
+	s := newTestServer(&mockDocker{})
+	identity := AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}
+	target := proxyAuthorizationTarget{WorkloadType: previewTargetTypeSandbox, WorkloadID: "sandbox-1", PrivatePort: 3000}
+
+	token, err := s.issuePreviewToken(previewTokenTypeSession, identity, target, "sbx-123.preview.shaiks.space", "https")
+	if err != nil {
+		t.Fatalf("issue preview token: %v", err)
+	}
+
+	if _, err := s.validatePreviewToken(token, previewTokenTypeSession, "sbx-123.preview.shaiks.space:8443", "https"); err == nil {
+		t.Fatal("expected token validation to reject non-default port mismatch")
+	}
+}
+
 func setSandboxProxyHeaders(req *http.Request, sandboxID string, privatePort int) {
 	req.Header.Set(proxyTypeHeaderName, previewTargetTypeSandbox)
 	req.Header.Set(proxyWorkloadIDHeaderName, sandboxID)
