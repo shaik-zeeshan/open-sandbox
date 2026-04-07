@@ -203,6 +203,7 @@ Compose projects are written to `<workspace-root>/.open-sandbox/compose/<project
 curl -X POST "$BASE_URL/api/compose/up" \
   -H "$AUTH_HEADER" \
   -H "Accept: text/event-stream" \
+  -H "Accept-Encoding: identity" \
   -H "Content-Type: application/json" \
   -d '{
     "content": "services:\n  app:\n    image: alpine:3.20\n",
@@ -339,7 +340,9 @@ curl -X POST "$BASE_URL/api/containers/<container-id>/exec" \
 
 ```bash
 curl -N "$BASE_URL/api/containers/<container-id>/logs?follow=true&tail=100" \
-  -H "$AUTH_HEADER"
+  -H "$AUTH_HEADER" \
+  -H "Accept: text/event-stream" \
+  -H "Accept-Encoding: identity"
 ```
 
 ## Auth notes

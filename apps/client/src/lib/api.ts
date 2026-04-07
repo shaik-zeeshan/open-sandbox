@@ -923,7 +923,11 @@ const streamJsonPost = (
 	onEvent?: (event: StreamEvent) => void
 ): Effect.Effect<ComposeResponse, ApiFailure> =>
 	Effect.gen(function* () {
-		const headers = new Headers({ "Content-Type": "application/json", Accept: "text/event-stream" });
+		const headers = new Headers({
+			"Content-Type": "application/json",
+			Accept: "text/event-stream",
+			"Accept-Encoding": "identity"
+		});
 		const token = config.token?.trim() ?? "";
 		if (token.length > 0) {
 			headers.set("Authorization", `Bearer ${token}`);

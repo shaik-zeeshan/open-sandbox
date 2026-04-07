@@ -181,6 +181,8 @@
 				);
 
 				const headers = new Headers();
+				headers.set("Accept", "text/event-stream");
+				headers.set("Accept-Encoding", "identity");
 				const token = config.token?.trim() ?? "";
 				if (token.length > 0) {
 					headers.set("Authorization", `Bearer ${token}`);

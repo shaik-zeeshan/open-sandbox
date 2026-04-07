@@ -551,6 +551,7 @@ func (s *Server) buildImageStream(c *gin.Context) {
 	}
 
 	c.Header("Content-Type", "text/event-stream")
+	c.Header("Accept-Encoding", "identity")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
 
@@ -744,6 +745,7 @@ func (s *Server) composeUp(c *gin.Context) {
 	}
 
 	c.Header("Content-Type", "text/event-stream")
+	c.Header("Accept-Encoding", "identity")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
 
