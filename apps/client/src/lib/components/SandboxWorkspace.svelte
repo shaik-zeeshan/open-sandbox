@@ -7,7 +7,7 @@
 		scheduleTimeout,
 		type TimeoutHandle
 	} from "$lib/client/browser";
-	import { toast } from "$lib/toast.svelte";
+	import { toast, type ToastKind } from "$lib/toast.svelte";
 	import SandboxTerminal from "$lib/components/SandboxTerminal.svelte";
 	import AnsiToHtml from "ansi-to-html";
 	import {
@@ -76,6 +76,7 @@
 	let uploadPath = $state<string>(defaultUploadPath("/"));
 	let uploadFile = $state<File | null>(null);
 	let uploadLoading = $state(false);
+	let uploadPathError = $state("");
 
 	const ansiConverter = new AnsiToHtml({
 		fg: "rgba(255,255,255,0.85)",
@@ -139,6 +140,8 @@
 	interface WorkspaceFeedbackService {
 		error: (error: unknown) => Effect.Effect<void>;
 		ok: (message: string) => Effect.Effect<void>;
+		loadingToast: (message: string) => Effect.Effect<string>;
+		updateToast: (id: string, kind: ToastKind, message: string) => Effect.Effect<void>;
 	}
 
 	const WorkspaceFileIoService = Context.GenericTag<WorkspaceFileIoService>(
@@ -284,6 +287,12 @@
 		ok: (message) =>
 			Effect.sync(() => {
 				toast.ok(message);
+			}),
+		loadingToast: (message) =>
+			Effect.sync(() => toast.loading(message)),
+		updateToast: (id, kind, message) =>
+			Effect.sync(() => {
+				toast.update(id, kind, message);
 			})
 	};
 
@@ -404,11 +413,17 @@
 			const fileIo = yield* WorkspaceFileIoService;
 			const feedback = yield* WorkspaceFeedbackService;
 
+			const normalizedPath = pathToLoad.trim();
+			if (normalizedPath.length === 0) {
+				yield* feedback.error(new Error("Path cannot be empty."));
+				return;
+			}
+
 			yield* Effect.sync(() => {
 				readLoading = true;
 			});
 
-			const normalizedPath = pathToLoad.trim();
+			const toastId = yield* feedback.loadingToast("Loading...");
 			try {
 				const payload = yield* fileIo.read(normalizedPath);
 				yield* Effect.sync(() => {
@@ -416,8 +431,9 @@
 					browsePath = normalizedPath;
 					editorContent = payload.kind === "file" ? payload.content ?? "" : "";
 				});
+				yield* feedback.updateToast(toastId, "ok", "Loaded.");
 			} catch (error) {
-				yield* feedback.error(error);
+				yield* feedback.updateToast(toastId, "error", formatApiFailure(error));
 			} finally {
 				yield* Effect.sync(() => {
 					readLoading = false;
@@ -438,16 +454,17 @@
 				saveLoading = true;
 			});
 
+			const toastId = yield* feedback.loadingToast("Saving...");
 			try {
 				yield* fileIo.save(browsePath, editorContent);
-				yield* feedback.ok("File saved.");
+				yield* feedback.updateToast(toastId, "ok", "File saved.");
 				yield* Effect.sync(() => {
 					if (filePayload?.kind === "file") {
 						filePayload = { ...filePayload, content: editorContent };
 					}
 				});
 			} catch (error) {
-				yield* feedback.error(error);
+				yield* feedback.updateToast(toastId, "error", formatApiFailure(error));
 			} finally {
 				yield* Effect.sync(() => {
 					saveLoading = false;
@@ -464,16 +481,26 @@
 				return;
 			}
 
+			const destPath = uploadPath.trim();
+			if (destPath.length === 0) {
+				yield* Effect.sync(() => {
+					uploadPathError = "Destination path cannot be empty.";
+				});
+				return;
+			}
+
 			yield* Effect.sync(() => {
 				uploadLoading = true;
+				uploadPathError = "";
 			});
 
+			const toastId = yield* feedback.loadingToast("Uploading...");
 			try {
-				yield* fileIo.upload(uploadPath.trim(), uploadFile);
-				yield* feedback.ok("File uploaded.");
+				yield* fileIo.upload(destPath, uploadFile);
+				yield* feedback.updateToast(toastId, "ok", "File uploaded.");
 				yield* loadPathProgram(filePayload?.kind === "directory" ? browsePath : parentPath(uploadPath));
 			} catch (error) {
-				yield* feedback.error(error);
+				yield* feedback.updateToast(toastId, "error", formatApiFailure(error));
 			} finally {
 				yield* Effect.sync(() => {
 					uploadLoading = false;
@@ -803,26 +830,33 @@
 						</form>
 
 						{#if filePayload?.kind === "directory"}
-							<div class="entry-list">
-								{#if directoryEntries.length === 0}
-									<p class="entry-empty">Empty directory</p>
-								{:else}
-									{#each directoryEntries as entry (entry.path)}
-										<button class="entry-row" type="button" onclick={() => void loadPath(entry.path)}>
-											<span class="entry-icon">
-												{#if entry.kind === "directory"}
-													<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-												{:else}
-													<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
-												{/if}
-											</span>
-											<span class="entry-name">{entry.name}</span>
-											{#if entry.kind === "file" && entry.size}
-												<span class="entry-size">{entry.size}B</span>
-											{/if}
-										</button>
-									{/each}
+							<div class="entry-list-wrap">
+								{#if readLoading}
+									<div class="entry-loading-overlay" aria-label="Loading directory">
+										<svg class="entry-spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+									</div>
 								{/if}
+								<div class="entry-list" class:entry-list--loading={readLoading}>
+									{#if directoryEntries.length === 0}
+										<p class="entry-empty">Empty directory</p>
+									{:else}
+										{#each directoryEntries as entry (entry.path)}
+											<button class="entry-row" type="button" onclick={() => void loadPath(entry.path)}>
+												<span class="entry-icon">
+													{#if entry.kind === "directory"}
+														<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+													{:else}
+														<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+													{/if}
+												</span>
+												<span class="entry-name">{entry.name}</span>
+												{#if entry.kind === "file" && entry.size}
+													<span class="entry-size">{entry.size}B</span>
+												{/if}
+											</button>
+										{/each}
+									{/if}
+								</div>
 							</div>
 						{:else if filePayload?.kind === "file"}
 							<div class="file-actions">
@@ -835,7 +869,9 @@
 							</div>
 							<textarea class="editor-textarea" bind:value={editorContent} spellcheck={false}></textarea>
 						{:else}
-							<p class="entry-empty">Loading...</p>
+							<div class="entry-initial-load">
+								<svg class="entry-spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+							</div>
 						{/if}
 					</div>
 
@@ -847,7 +883,15 @@
 						<div class="panel-body upload-body">
 							<label class="field-col">
 								<span class="section-label">Destination</span>
-								<input class="field" bind:value={uploadPath} />
+								<input
+									class="field"
+									class:field--error={uploadPathError}
+									bind:value={uploadPath}
+									oninput={() => uploadPathError = ""}
+								/>
+								{#if uploadPathError}
+									<span class="field-inline-error">{uploadPathError}</span>
+								{/if}
 							</label>
 							<label class="file-pick-label">
 								<input type="file" class="file-pick-hidden" onchange={(e) => {
@@ -1241,6 +1285,37 @@
 	}
 	.path-field { flex: 1; font-size: 0.65rem; }
 	.entry-list { overflow: hidden; }
+	.entry-list-wrap {
+		position: relative;
+	}
+	.entry-list--loading {
+		opacity: 0.35;
+		pointer-events: none;
+		user-select: none;
+	}
+	.entry-loading-overlay {
+		position: absolute;
+		inset: 0;
+		z-index: 1;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: rgba(0, 0, 0, 0.15);
+	}
+	.entry-spinner {
+		color: var(--text-muted);
+		animation: entry-spin 0.75s linear infinite;
+	}
+	.entry-initial-load {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 2rem;
+	}
+	@keyframes entry-spin {
+		from { transform: rotate(0deg); }
+		to   { transform: rotate(360deg); }
+	}
 	.entry-row {
 		width: 100%;
 		display: flex;
@@ -1320,6 +1395,17 @@
 	.file-pick-label:hover .file-pick-display {
 		border-color: var(--border-hi);
 		color: var(--text-primary);
+	}
+
+	.field--error {
+		border-color: var(--status-error-border) !important;
+	}
+
+	.field-inline-error {
+		font-family: var(--font-mono);
+		font-size: 0.62rem;
+		color: var(--status-error);
+		margin-top: 0.1rem;
 	}
 
 	/* ── Logs ────────────────────────────────────────────────────────────────── */

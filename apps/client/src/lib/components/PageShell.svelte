@@ -37,22 +37,25 @@
 		{currentRole}
 		bind:collapsed
 	/>
-	<main class="shell-main">
+	<main class="shell-main" class:shell-main--collapsed={collapsed}>
 		{@render children()}
 	</main>
 </div>
 
 <style>
 	.shell {
-		display: flex;
 		min-height: 100vh;
-		align-items: stretch;
 	}
 
 	.shell-main {
-		flex: 1;
 		min-width: 0;
 		overflow-y: auto;
 		height: 100vh;
+		margin-left: calc(var(--sidebar-width) + 20px);
+		transition: margin-left 0.22s var(--ease-snappy);
+	}
+
+	.shell-main--collapsed {
+		margin-left: calc(52px + 20px);
 	}
 </style>

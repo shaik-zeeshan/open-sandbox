@@ -228,9 +228,14 @@
 
 	// ── Auth actions ───────────────────────────────────────────────────────────
 	async function submitLogin(): Promise<void> {
-		loginLoading = true;
 		loginError = "";
 		clearAuthNotice();
+		if (loginUsername.trim().length === 0 || loginPassword.trim().length === 0) {
+			loginError = "Username and password are required.";
+			return;
+		}
+		loginLoading = true;
+		const toastId = toast.loading(bootstrapRequired ? "Creating admin account..." : "Authenticating...");
 		try {
 			const r = await runApiEffect(
 				bootstrapRequired
@@ -247,9 +252,11 @@
 			bootstrapRequired = false;
 			loginUsername = "";
 			loginPassword = "";
+			toast.update(toastId, "ok", "Signed in.");
 			await refreshData();
 		} catch (err) {
 			loginError = formatApiFailure(err);
+			toast.update(toastId, "error", formatApiFailure(err));
 		} finally {
 			loginLoading = false;
 		}
@@ -398,6 +405,7 @@
 
 	async function submitCreate(): Promise<void> {
 		createLoading = true;
+		const toastId = toast.loading("Creating sandbox...");
 		try {
 			const parseLines = (v: string) => v.split("\n").map((l) => l.trim()).filter(Boolean);
 			const sandboxName = createName.trim();
@@ -427,9 +435,10 @@
 			createPorts = "";
 			await runProgram(invalidateWorkloadCaches(clientState.config));
 			await refreshData();
+			toast.update(toastId, "ok", "Sandbox created.");
 			await goto(`/sandboxes/${encodeURIComponent(created.id)}`);
 		} catch (err) {
-			toast.error(formatApiFailure(err));
+			toast.update(toastId, "error", formatApiFailure(err));
 		} finally {
 			createLoading = false;
 		}

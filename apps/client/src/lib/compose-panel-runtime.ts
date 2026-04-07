@@ -61,6 +61,7 @@ const loadComposeProjectPreview = (
 	projectName: string
 ): Effect.Effect<ComposeProjectPreview | null, never> =>
 	Effect.promise(() => runApiEffect(getComposeProject(config, projectName))).pipe(
+		// Non-critical: preview metadata is best-effort; failures should not block compose actions.
 		Effect.catchAll(() => Effect.succeed(null))
 	);
 

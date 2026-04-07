@@ -10,7 +10,7 @@ export type Cleanup = () => void;
 
 export type ToastDispatch = {
 	id: string;
-	kind: "error" | "ok" | "warn";
+	kind: "error" | "ok" | "warn" | "loading";
 	message: string;
 	duration: number;
 };
@@ -45,6 +45,7 @@ const storageService: StorageService = {
 		try {
 			return window.localStorage.getItem(key);
 		} catch {
+			// Ignore storage quota/privacy mode errors.
 			return null;
 		}
 	},
@@ -93,7 +94,7 @@ const isToastDispatch = (detail: unknown): detail is ToastDispatch => {
 	const payload = detail as Partial<ToastDispatch>;
 	return (
 		typeof payload.id === "string" &&
-		(payload.kind === "error" || payload.kind === "ok" || payload.kind === "warn") &&
+		(payload.kind === "error" || payload.kind === "ok" || payload.kind === "warn" || payload.kind === "loading") &&
 		typeof payload.message === "string" &&
 		typeof payload.duration === "number"
 	);

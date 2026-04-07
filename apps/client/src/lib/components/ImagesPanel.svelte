@@ -46,6 +46,14 @@
 	let createLogs = $state("");
 	let createResolvedImage = $state("");
 	let deleteConfirmId = $state<string | null>(null);
+	let deletingId = $state<string | null>(null);
+
+	// Field-level validation errors
+	let pullImageError = $state("");
+	let buildContextPathError = $state("");
+	let buildTagError = $state("");
+	let inlineTagError = $state("");
+	let inlineContentError = $state("");
 
 	const createMethods: Array<{ id: ImageCreateMethod; label: string; description: string }> = [
 		{ id: "pull", label: "Pull image", description: "Pull from Docker Hub or another registry" },
@@ -67,6 +75,44 @@
 	const sortedImages = $derived.by(() =>
 		[...images].sort((a, b) => b.created - a.created)
 	);
+
+	function validateCreateForm(): boolean {
+		pullImageError = "";
+		buildContextPathError = "";
+		buildTagError = "";
+		inlineTagError = "";
+		inlineContentError = "";
+
+		if (createMethod === "pull") {
+			if (createPullImage.trim().length === 0) {
+				pullImageError = "Image name is required.";
+				return false;
+			}
+		} else if (createMethod === "build-context") {
+			let valid = true;
+			if (createBuildContextPath.trim().length === 0) {
+				buildContextPathError = "Context path is required.";
+				valid = false;
+			}
+			if (createBuildTag.trim().length === 0) {
+				buildTagError = "Output tag is required.";
+				valid = false;
+			}
+			if (!valid) return false;
+		} else if (createMethod === "build-inline") {
+			let valid = true;
+			if (createInlineTag.trim().length === 0) {
+				inlineTagError = "Output tag is required.";
+				valid = false;
+			}
+			if (createInlineContent.trim().length === 0) {
+				inlineContentError = "Dockerfile content is required.";
+				valid = false;
+			}
+			if (!valid) return false;
+		}
+		return true;
+	}
 
 	function resetPipelineState(): void {
 		createStep = "Idle";
@@ -405,6 +451,9 @@
 		Effect.gen(function* () {
 			const feedback = yield* ImagesFeedbackService;
 
+			const valid = yield* Effect.sync(() => validateCreateForm());
+			if (!valid) return;
+
 			yield* Effect.sync(() => {
 				createLoading = true;
 				resetPipelineState();
@@ -443,7 +492,7 @@
 			const deleteConfirmation = yield* DeleteConfirmationService;
 
 			yield* Effect.sync(() => {
-				loading = true;
+				deletingId = image.id;
 			});
 
 			try {
@@ -456,7 +505,7 @@
 				yield* feedback.error(error);
 			} finally {
 				yield* Effect.sync(() => {
-					loading = false;
+					deletingId = null;
 				});
 			}
 		}).pipe(Effect.provide(imagesPanelLayer));
@@ -514,7 +563,12 @@
 			<h1 class="images-title">Images</h1>
 		</div>
 		<button class="btn-ghost btn-sm" type="button" onclick={() => void refreshImages({ force: true })} disabled={loading}>
-			{loading ? "Refreshing..." : "Refresh"}
+			{#if loading}
+				<svg class="btn-spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="12" height="12"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+				Refreshing...
+			{:else}
+				Refresh
+			{/if}
 		</button>
 	</div>
 
@@ -526,12 +580,19 @@
 			<div class="panel-body create-body">
 				<div class="method-grid">
 					{#each createMethods as method}
-						<button
-							type="button"
-							class="method-btn"
-							class:method-btn--active={createMethod === method.id}
-							onclick={() => createMethod = method.id}
-						>
+					<button
+						type="button"
+						class="method-btn"
+						class:method-btn--active={createMethod === method.id}
+						onclick={() => {
+							createMethod = method.id;
+							pullImageError = "";
+							buildContextPathError = "";
+							buildTagError = "";
+							inlineTagError = "";
+							inlineContentError = "";
+						}}
+					>
 							<span class="method-label">{method.label}</span>
 							<span class="method-description">{method.description}</span>
 						</button>
@@ -550,11 +611,25 @@
 								emptyText="Type to search Docker Hub"
 								onSearch={(query) => {
 									createPullSearchQuery = query;
+									pullImageError = "";
 									void runImageSearch(query);
 								}}
-								onSelect={(option) => selectPullSearchImage(option.value)}
+								onSelect={(option) => { selectPullSearchImage(option.value); pullImageError = ""; }}
 							/>
+							{#if pullImageError}
+								<span class="field-inline-error">{pullImageError}</span>
+							{/if}
 						</label>
+						<div class="pull-search-actions">
+							<button class="btn-ghost btn-sm" type="button" onclick={() => void runImageSearch()} disabled={createPullSearchLoading}>
+								{#if createPullSearchLoading}
+									<svg class="btn-spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="12" height="12"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+									Searching...
+								{:else}
+									Search
+								{/if}
+							</button>
+						</div>
 						{#if createPullSearchError}
 							<p class="alert-error">{createPullSearchError}</p>
 						{/if}
@@ -569,12 +644,32 @@
 					<div class="form-stack">
 						<label class="field-col">
 							<span class="section-label">Context path</span>
-							<input class="field" bind:value={createBuildContextPath} placeholder="apps/server" required />
+							<input
+								class="field"
+								class:field--error={buildContextPathError}
+								bind:value={createBuildContextPath}
+								placeholder="apps/server"
+								required
+								oninput={() => buildContextPathError = ""}
+							/>
+							{#if buildContextPathError}
+								<span class="field-inline-error">{buildContextPathError}</span>
+							{/if}
 							<span class="field-help">Resolved on the server inside its workspace root. Must include a <code class="inline-code">Dockerfile</code>.</span>
 						</label>
 						<label class="field-col">
 							<span class="section-label">Output tag</span>
-							<input class="field" bind:value={createBuildTag} placeholder="sandbox-app:latest" required />
+							<input
+								class="field"
+								class:field--error={buildTagError}
+								bind:value={createBuildTag}
+								placeholder="sandbox-app:latest"
+								required
+								oninput={() => buildTagError = ""}
+							/>
+							{#if buildTagError}
+								<span class="field-inline-error">{buildTagError}</span>
+							{/if}
 						</label>
 					</div>
 				{/if}
@@ -583,7 +678,17 @@
 					<div class="form-stack">
 						<label class="field-col">
 							<span class="section-label">Output tag</span>
-							<input class="field" bind:value={createInlineTag} placeholder="sandbox-inline:latest" required />
+							<input
+								class="field"
+								class:field--error={inlineTagError}
+								bind:value={createInlineTag}
+								placeholder="sandbox-inline:latest"
+								required
+								oninput={() => inlineTagError = ""}
+							/>
+							{#if inlineTagError}
+								<span class="field-inline-error">{inlineTagError}</span>
+							{/if}
 						</label>
 						<div class="field-col">
 							<span class="section-label">Dockerfile</span>
@@ -593,13 +698,21 @@
 								placeholder="FROM ubuntu:24.04&#10;WORKDIR /workspace"
 								minHeight="14rem"
 							/>
+							{#if inlineContentError}
+								<span class="field-inline-error">{inlineContentError}</span>
+							{/if}
 						</div>
 					</div>
 				{/if}
 
 				<div class="create-footer">
 					<button class="btn-primary" type="button" onclick={() => void submitCreate()} disabled={createLoading}>
-						{createLoading ? `${createStep}...` : "Create image"}
+						{#if createLoading}
+							<svg class="btn-spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="12" height="12"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+							{createStep}...
+						{:else}
+							Create image
+						{/if}
 					</button>
 				</div>
 
@@ -624,8 +737,37 @@
 				<span class="images-count">{sortedImages.length}</span>
 			</div>
 			<div class="panel-body images-list-body">
-				{#if sortedImages.length === 0 && !loading}
-					<p class="empty-copy">No images yet. Pull or build one to use in sandbox creation.</p>
+				{#if loading && sortedImages.length === 0}
+					<div class="images-list">
+						{#each { length: 4 } as _, i}
+							<div class="image-row skeleton-image-row">
+								<div class="image-row-main">
+									<div class="skel-tags">
+										<div class="skel-tag"></div>
+										<div class="skel-tag skel-tag--short"></div>
+									</div>
+									<div class="skel-meta">
+										<div class="skel-line skel-line--id"></div>
+										<div class="skel-line skel-line--size"></div>
+										<div class="skel-line skel-line--date"></div>
+									</div>
+								</div>
+								<div class="skel-btn"></div>
+							</div>
+						{/each}
+					</div>
+				{:else if sortedImages.length === 0 && !loading}
+					<div class="images-empty-state">
+						<div class="images-empty-icon">
+							<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+								<rect x="2" y="4" width="20" height="16" rx="2"/>
+								<path d="M2 8h20M8 4v4"/>
+								<circle cx="8" cy="14" r="2"/><path d="m14 12 3 3-3 3"/>
+							</svg>
+						</div>
+						<p class="images-empty-title">No local images</p>
+						<p class="images-empty-sub">Pull from a registry or build from a Dockerfile to get started.</p>
+					</div>
 				{:else}
 					<div class="images-list">
 						{#each sortedImages as image}
@@ -646,11 +788,18 @@
 										<span>{formatDate(image.created)}</span>
 									</div>
 								</div>
-								<button class="btn-danger btn-xs" type="button" onclick={() => void submitDelete(image)} disabled={loading}>
-									{deleteConfirmId === image.id ? "Confirm delete" : "Delete"}
-								</button>
-							</div>
-						{/each}
+							<button class="btn-danger btn-xs" type="button" onclick={() => void submitDelete(image)} disabled={loading || deletingId !== null}>
+								{#if deletingId === image.id}
+									<svg class="btn-spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="12" height="12"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+									Deleting...
+								{:else if deleteConfirmId === image.id}
+									Confirm delete
+								{:else}
+									Delete
+								{/if}
+							</button>
+						</div>
+					{/each}
 					</div>
 				{/if}
 			</div>
@@ -695,6 +844,25 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.85rem;
+	}
+
+	.images-header button,
+	.pull-search-actions button,
+	.create-footer button,
+	.image-row button {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+	}
+
+	.btn-spinner {
+		flex-shrink: 0;
+		animation: spin 0.75s linear infinite;
+	}
+
+	@keyframes spin {
+		from { transform: rotate(0deg); }
+		to   { transform: rotate(360deg); }
 	}
 
 	.method-grid {
@@ -744,10 +912,26 @@
 		gap: 0.7rem;
 	}
 
+	.pull-search-actions {
+		display: flex;
+		justify-content: flex-end;
+	}
+
 	.field-col {
 		display: flex;
 		flex-direction: column;
 		gap: 0.3rem;
+	}
+
+	.field--error {
+		border-color: var(--status-error-border) !important;
+	}
+
+	.field-inline-error {
+		font-family: var(--font-mono);
+		font-size: 0.62rem;
+		color: var(--status-error);
+		margin-top: 0.1rem;
 	}
 
 	.field-help {
@@ -884,12 +1068,97 @@
 	.image-id {
 		color: var(--text-secondary);
 	}
+	/* ── Images empty state ─────────────────────────────────────────────────── */
+	.images-empty-state {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 0.625rem;
+		padding: 3rem 1.5rem;
+		text-align: center;
+	}
 
-	.empty-copy {
+	.images-empty-icon {
+		display: grid;
+		place-items: center;
+		width: 44px;
+		height: 44px;
+		border-radius: var(--radius-md);
+		background: var(--bg-raised);
+		border: 1px solid var(--border-dim);
+		color: var(--text-muted);
+		margin-bottom: 0.5rem;
+	}
+
+	.images-empty-title {
 		margin: 0;
 		font-family: var(--font-mono);
-		font-size: 0.68rem;
+		font-size: 0.82rem;
+		color: var(--text-secondary);
+	}
+
+	.images-empty-sub {
+		margin: 0;
+		font-family: var(--font-mono);
+		font-size: 0.7rem;
 		color: var(--text-muted);
+	}
+
+	/* ── Skeleton loading rows ───────────────────────────────────────────────── */
+	@keyframes shimmer {
+		0%   { background-position: 200% 0; }
+		100% { background-position: -200% 0; }
+	}
+
+	.skeleton-image-row {
+		pointer-events: none;
+	}
+
+	.skel-tags {
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
+	}
+
+	.skel-tag {
+		height: 18px;
+		width: 7rem;
+		border-radius: 3px;
+		background: linear-gradient(90deg, var(--bg-raised) 25%, var(--bg-overlay) 50%, var(--bg-raised) 75%);
+		background-size: 200% 100%;
+		animation: shimmer 1.5s ease-in-out infinite;
+	}
+
+	.skel-tag--short { width: 4.5rem; }
+
+	.skel-meta {
+		display: flex;
+		align-items: center;
+		gap: 0.55rem;
+		flex-wrap: wrap;
+	}
+
+	.skel-line {
+		height: 8px;
+		border-radius: 4px;
+		background: linear-gradient(90deg, var(--bg-raised) 25%, var(--bg-overlay) 50%, var(--bg-raised) 75%);
+		background-size: 200% 100%;
+		animation: shimmer 1.5s ease-in-out infinite;
+	}
+
+	.skel-line--id   { width: 5rem; }
+	.skel-line--size { width: 3rem; }
+	.skel-line--date { width: 8rem; }
+
+	.skel-btn {
+		height: 26px;
+		width: 52px;
+		border-radius: 4px;
+		background: linear-gradient(90deg, var(--bg-raised) 25%, var(--bg-overlay) 50%, var(--bg-raised) 75%);
+		background-size: 200% 100%;
+		animation: shimmer 1.5s ease-in-out infinite;
+		flex-shrink: 0;
 	}
 
 	@media (max-width: 1024px) {

@@ -76,6 +76,59 @@
 
 	const previewPorts = $derived(previewLinks(previewUrls));
 
+	// ── Per-action loading state ───────────────────────────────────────────────
+	// Tracks which action is currently in progress. Only one at a time.
+	let actionInProgress = $state<"stop" | "start" | "restart" | "reset" | "delete" | null>(null);
+
+	// ── Delete confirmation state (two-click with 3s timeout) ─────────────────
+	let deleteConfirmPending = $state(false);
+	let deleteConfirmTimer = $state<ReturnType<typeof setTimeout> | null>(null);
+
+	function armDeleteConfirm(e: MouseEvent) {
+		e.stopPropagation();
+		if (actionInProgress !== null) return;
+		deleteConfirmPending = true;
+		deleteConfirmTimer = setTimeout(() => {
+			deleteConfirmPending = false;
+			deleteConfirmTimer = null;
+		}, 3000);
+	}
+
+	async function confirmDelete(e: MouseEvent) {
+		e.stopPropagation();
+		if (deleteConfirmTimer !== null) {
+			clearTimeout(deleteConfirmTimer);
+			deleteConfirmTimer = null;
+		}
+		deleteConfirmPending = false;
+		menuOpen = false;
+		actionInProgress = "delete";
+		try {
+			await Promise.resolve(onDelete());
+		} finally {
+			actionInProgress = null;
+		}
+	}
+
+	// Unified action runner: wraps a callback with loading state tracking.
+	function makeActionHandler(
+		key: "stop" | "start" | "restart" | "reset",
+		fn: () => void,
+		closeMenuOnRun = false
+	) {
+		return async (e: MouseEvent) => {
+			e.stopPropagation();
+			if (actionInProgress !== null) return;
+			if (closeMenuOnRun) menuOpen = false;
+			actionInProgress = key;
+			try {
+				await Promise.resolve(fn());
+			} finally {
+				actionInProgress = null;
+			}
+		};
+	}
+
 	// ── Dropdown menu state ────────────────────────────────────────────────────
 	let menuOpen = $state(false);
 	let triggerEl = $state<HTMLButtonElement | null>(null);
@@ -91,14 +144,6 @@
 
 	function closeMenu() {
 		menuOpen = false;
-	}
-
-	function runAction(fn: () => void) {
-		return (e: MouseEvent) => {
-			e.stopPropagation();
-			menuOpen = false;
-			fn();
-		};
 	}
 
 	// Svelte action: mounts content into document.body so it's outside the table
@@ -124,25 +169,71 @@
 		onclick={(e) => e.stopPropagation()}
 		onkeydown={(e) => e.key === 'Escape' && closeMenu()}
 	>
-		<button class="menu-item" role="menuitem" type="button" onclick={runAction(onOpen)}>
+		<button class="menu-item" role="menuitem" type="button" onclick={(e) => { e.stopPropagation(); menuOpen = false; onOpen(); }}>
 			<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
 			Open
 		</button>
-		<button class="menu-item" role="menuitem" type="button" onclick={runAction(onRestart)}>
-			<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-			Restart
+		<button
+			class="menu-item"
+			role="menuitem"
+			type="button"
+			disabled={actionInProgress !== null}
+			onclick={makeActionHandler("restart", onRestart, true)}
+		>
+			{#if actionInProgress === "restart"}
+				<svg class="spinner" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.22-8.56"/></svg>
+				Restarting...
+			{:else}
+				<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+				Restart
+			{/if}
 		</button>
 		{#if showReset}
-			<button class="menu-item" role="menuitem" type="button" onclick={runAction(onReset)}>
-				<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
-				Reset
+			<button
+				class="menu-item"
+				role="menuitem"
+				type="button"
+				disabled={actionInProgress !== null}
+				onclick={makeActionHandler("reset", onReset, true)}
+			>
+				{#if actionInProgress === "reset"}
+					<svg class="spinner" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.22-8.56"/></svg>
+					Resetting...
+				{:else}
+					<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+					Reset
+				{/if}
 			</button>
 		{/if}
 		<div class="menu-sep" role="separator"></div>
-		<button class="menu-item menu-item--danger" role="menuitem" type="button" onclick={runAction(onDelete)}>
-			<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
-			{deleteLabel}
-		</button>
+		{#if deleteConfirmPending}
+			<button
+				class="menu-item menu-item--danger menu-item--confirm"
+				role="menuitem"
+				type="button"
+				disabled={actionInProgress === "delete"}
+				onclick={confirmDelete}
+			>
+				{#if actionInProgress === "delete"}
+					<svg class="spinner" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.22-8.56"/></svg>
+					Deleting...
+				{:else}
+					<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+					Confirm?
+				{/if}
+			</button>
+		{:else}
+			<button
+				class="menu-item menu-item--danger"
+				role="menuitem"
+				type="button"
+				disabled={actionInProgress !== null}
+				onclick={armDeleteConfirm}
+			>
+				<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+				{deleteLabel}
+			</button>
+		{/if}
 	</div>
 {/if}
 
@@ -220,25 +311,47 @@
 
 			<!-- Stop (when running) / Start (when stopped/idle) -->
 			{#if isRunning}
-				<button class="act" type="button" onclick={onStop} title="Stop">
-					<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-						<rect x="3" y="3" width="18" height="18" rx="2"/>
-					</svg>
-					Stop
+				<button
+					class="act {actionInProgress === 'stop' ? 'act--loading' : ''}"
+					type="button"
+					disabled={actionInProgress !== null}
+					onclick={makeActionHandler("stop", onStop)}
+					title="Stop"
+				>
+					{#if actionInProgress === "stop"}
+						<svg class="spinner" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.22-8.56"/></svg>
+						Stopping...
+					{:else}
+						<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+							<rect x="3" y="3" width="18" height="18" rx="2"/>
+						</svg>
+						Stop
+					{/if}
 				</button>
 			{:else}
-				<button class="act" type="button" onclick={onRestart} title="Start">
-					<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-						<polygon points="5 3 19 12 5 21 5 3"/>
-					</svg>
-					Start
+				<button
+					class="act {actionInProgress === 'start' ? 'act--loading' : ''}"
+					type="button"
+					disabled={actionInProgress !== null}
+					onclick={makeActionHandler("start", onRestart)}
+					title="Start"
+				>
+					{#if actionInProgress === "start"}
+						<svg class="spinner" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.22-8.56"/></svg>
+						Starting...
+					{:else}
+						<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+							<polygon points="5 3 19 12 5 21 5 3"/>
+						</svg>
+						Start
+					{/if}
 				</button>
 			{/if}
 
 				<!-- More menu trigger -->
 			<button
 				bind:this={triggerEl}
-				class="act act--icon"
+				class="act act--icon {menuOpen ? 'act--icon-active' : ''}"
 				type="button"
 				title="More actions"
 				aria-label="More actions"
@@ -485,15 +598,26 @@
 		font-size: 0.6rem;
 		padding: 0.22rem 0.5rem;
 		cursor: pointer;
-		transition: color 0.1s, border-color 0.1s, background 0.1s;
+		transition: color 0.1s, border-color 0.1s, background 0.1s, opacity 0.1s;
 		white-space: nowrap;
 		line-height: 1;
 	}
 
-	.act:hover {
+	.act:hover:not(:disabled) {
 		color: var(--text-primary);
 		border-color: var(--border-mid);
 		background: var(--accent-dim);
+	}
+
+	.act:disabled {
+		opacity: 0.45;
+		cursor: not-allowed;
+	}
+
+	/* Loading state on action button */
+	.act--loading {
+		color: var(--text-muted);
+		border-color: var(--border-dim);
 	}
 
 	/* Icon-only more button */
@@ -506,6 +630,16 @@
 		color: var(--text-primary);
 		border-color: var(--border-mid);
 		background: var(--accent-dim);
+	}
+
+	/* ── Spinner ──────────────────────────────────────────────────────────────── */
+	.spinner {
+		animation: spin-action 0.7s linear infinite;
+		flex-shrink: 0;
+	}
+
+	@keyframes spin-action {
+		to { transform: rotate(360deg); }
 	}
 
 	/* ── Dropdown menu portal ─────────────────────────────────────────────────── */
@@ -551,16 +685,30 @@
 		white-space: nowrap;
 	}
 
-	:global(.menu-portal .menu-item:hover) {
+	:global(.menu-portal .menu-item:hover:not(:disabled)) {
 		color: var(--text-primary);
 		background: var(--accent-dim);
+	}
+
+	:global(.menu-portal .menu-item:disabled) {
+		opacity: 0.45;
+		cursor: not-allowed;
 	}
 
 	:global(.menu-portal .menu-item--danger) {
 		color: var(--text-muted);
 	}
 
-	:global(.menu-portal .menu-item--danger:hover) {
+	:global(.menu-portal .menu-item--danger:hover:not(:disabled)) {
+		color: var(--status-error);
+		background: var(--status-error-bg);
+	}
+
+	:global(.menu-portal .menu-item--confirm) {
+		color: var(--status-error);
+	}
+
+	:global(.menu-portal .menu-item--confirm:hover:not(:disabled)) {
 		color: var(--status-error);
 		background: var(--status-error-bg);
 	}

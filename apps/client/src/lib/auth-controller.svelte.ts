@@ -78,7 +78,8 @@ export const signOut = async (revoke = true): Promise<void> => {
 		try {
 			await runClientEffect(logout({ baseUrl: clientState.baseUrl }));
 		} catch {
-			// Always clear client auth state even if revoke fails.
+			// Always clear client auth state even if server-side revoke fails.
+			toast.warn("Sign out completed, but session cleanup failed.");
 		}
 	}
 

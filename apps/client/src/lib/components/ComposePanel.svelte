@@ -26,8 +26,11 @@
 	let selectedServices = $state<string[]>([]);
 	let removeVolumes = $state(false);
 	let removeOrphans = $state(true);
-	let loading = $state(false);
+	let activeAction = $state<"up" | "status" | "down" | null>(null);
+	let projectNameError = $state("");
+	let composeContentError = $state("");
 	let previewRefreshLoading = $state(false);
+	const loading = $derived(activeAction !== null);
 	let step = $state("Idle");
 	let logs = $state("");
 	let statusServiceNames = $state<string[]>([]);
@@ -105,6 +108,20 @@
 	});
 
 	$effect(() => {
+		projectName;
+		if (projectNameError && projectName.length > 0) {
+			projectNameError = "";
+		}
+	});
+
+	$effect(() => {
+		composeContent;
+		if (composeContentError && composeContent.length > 0) {
+			composeContentError = "";
+		}
+	});
+
+	$effect(() => {
 		logs;
 		if (!logsViewport) return;
 		queueMicrotask(() => {
@@ -135,7 +152,34 @@
 		return request;
 	}
 
+	function validateForm(): boolean {
+		const normalizedProjectName = projectName.trim();
+		const normalizedComposeContent = composeContent.trim();
+		const nextProjectNameError =
+			normalizedProjectName.length === 0 ? "Enter a project name before running a compose action." : "";
+		const nextComposeContentError =
+			normalizedComposeContent.length === 0 ? "Paste compose YAML before running a compose action." : "";
+
+		projectNameError = nextProjectNameError;
+		composeContentError = nextComposeContentError;
+
+		if (nextProjectNameError) {
+			toast.error(nextProjectNameError);
+		}
+
+		if (nextComposeContentError) {
+			toast.error(nextComposeContentError);
+		}
+
+		return nextProjectNameError.length === 0 && nextComposeContentError.length === 0;
+	}
+
 	async function runAction(action: ComposeAction): Promise<void> {
+		if (!validateForm()) {
+			return;
+		}
+
+		activeAction = action;
 		await runComposeAction({
 			action,
 			config,
@@ -144,7 +188,9 @@
 			removeOrphans,
 			runtime: {
 				setLoading: (value) => {
-					loading = value;
+					if (!value) {
+						activeAction = null;
+					}
 				},
 				setStep: (value) => {
 					step = value;
@@ -202,7 +248,16 @@
 
 			<label class="field-col">
 				<span class="section-label">Project name</span>
-				<input class="field" bind:value={projectName} placeholder="my-project" required />
+				<input
+					class="field"
+					class:field--error={projectNameError.length > 0}
+					bind:value={projectName}
+					placeholder="my-project"
+					required
+				/>
+				{#if projectNameError}
+					<span class="field-error-text">{projectNameError}</span>
+				{/if}
 			</label>
 
 			<div class="field-col">
@@ -213,6 +268,9 @@
 					placeholder="version: '3.8'&#10;services:&#10;  app:&#10;    image: ubuntu:24.04&#10;    command: sleep infinity"
 					minHeight="16rem"
 				/>
+				{#if composeContentError}
+					<span class="field-error-text">{composeContentError}</span>
+				{/if}
 			</div>
 
 			<div class="field-col">
@@ -247,9 +305,30 @@
 			</div>
 
 			<div class="compose-actions">
-				<button class="btn-primary" type="button" onclick={() => void runAction("up")} disabled={loading}>Run up</button>
-				<button class="btn-ghost" type="button" onclick={() => void runAction("status")} disabled={loading}>Status</button>
-				<button class="btn-danger" type="button" onclick={() => void runAction("down")} disabled={loading}>Down</button>
+				<button class="btn-primary" type="button" onclick={() => void runAction("up")} disabled={loading}>
+					{#if activeAction === "up"}
+						<svg class="btn-spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="12" height="12"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+						Starting...
+					{:else}
+						Run up
+					{/if}
+				</button>
+				<button class="btn-ghost" type="button" onclick={() => void runAction("status")} disabled={loading}>
+					{#if activeAction === "status"}
+						<svg class="btn-spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="12" height="12"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+						Checking...
+					{:else}
+						Status
+					{/if}
+				</button>
+				<button class="btn-danger" type="button" onclick={() => void runAction("down")} disabled={loading}>
+					{#if activeAction === "down"}
+						<svg class="btn-spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="12" height="12"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+						Stopping...
+					{:else}
+						Down
+					{/if}
+				</button>
 			</div>
 
 			<div class="pipeline-panel">
@@ -347,6 +426,16 @@
 		line-height: 1.45;
 	}
 
+	.field--error {
+		border-color: var(--status-error-border);
+	}
+
+	.field-error-text {
+		color: var(--status-error);
+		font-family: var(--font-mono);
+		font-size: 0.6rem;
+	}
+
 	.compose-note {
 		display: flex;
 		align-items: flex-start;
@@ -422,6 +511,22 @@
 		justify-content: flex-end;
 		gap: 0.5rem;
 		flex-wrap: wrap;
+	}
+
+	.compose-actions :global(button) {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+	}
+
+	.btn-spinner {
+		flex-shrink: 0;
+		animation: spin 0.75s linear infinite;
+	}
+
+	@keyframes spin {
+		from { transform: rotate(0deg); }
+		to   { transform: rotate(360deg); }
 	}
 
 	.pipeline-panel {

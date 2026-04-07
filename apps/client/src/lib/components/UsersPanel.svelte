@@ -33,10 +33,18 @@
 	let createRole = $state("member");
 	let createLoading = $state(false);
 
+	// Create form validation
+	let createUsernameError = $state("");
+	let createPasswordError = $state("");
+	let createFormTouched = $state(false);
+
 	// Password reset inline
 	let resetPasswords = $state<Record<string, string>>({});
 	let resetLoadingUserId = $state("");
 	let showResetFor = $state<string | null>(null);
+
+	// Password reset validation
+	let resetPasswordError = $state<Record<string, string>>({});
 
 	// Delete confirm
 	let deleteConfirmId = $state<string | null>(null);
@@ -243,6 +251,23 @@
 
 	const getInitial = (name: string): string => name ? name[0].toUpperCase() : "?";
 
+	// Reset create form validation when the form is hidden
+	$effect(() => {
+		if (!showCreateForm) {
+			createUsernameError = "";
+			createPasswordError = "";
+			createFormTouched = false;
+		}
+	});
+
+	// Clear create form errors as user types (only after first submit attempt)
+	$effect(() => {
+		if (createFormTouched) {
+			if (createUsername.trim().length >= 2) createUsernameError = "";
+			if (createPassword.length >= 4) createPasswordError = "";
+		}
+	});
+
 	$effect(() => {
 		return () => {
 			void runUsersProgram(deleteConfirmationService.clear);
@@ -286,15 +311,28 @@
 				<span class="panel-title">New user</span>
 			</div>
 			<div class="panel-body">
-				<form class="create-form" onsubmit={(e) => { e.preventDefault(); void submitCreate(); }}>
-					<label class="field-col">
-						<span class="section-label">Username</span>
-						<input class="field" type="text" bind:value={createUsername} autocomplete="off" autocapitalize="none" spellcheck="false" required placeholder="username" />
-					</label>
-					<label class="field-col">
-						<span class="section-label">Temporary password</span>
-						<input class="field" type="password" bind:value={createPassword} autocomplete="new-password" required placeholder="password" />
-					</label>
+			<form class="create-form" onsubmit={(e) => {
+					e.preventDefault();
+					createFormTouched = true;
+					createUsernameError = "";
+					createPasswordError = "";
+					let valid = true;
+					if (createUsername.trim().length === 0) { createUsernameError = "Username is required."; valid = false; }
+					else if (createUsername.trim().length < 2) { createUsernameError = "Username must be at least 2 characters."; valid = false; }
+					if (createPassword.length === 0) { createPasswordError = "Password is required."; valid = false; }
+					else if (createPassword.length < 4) { createPasswordError = "Password must be at least 4 characters."; valid = false; }
+					if (valid) void submitCreate();
+				}}>
+				<label class="field-col">
+					<span class="section-label">Username</span>
+					<input class="field" class:field--error={!!createUsernameError} type="text" bind:value={createUsername} autocomplete="off" autocapitalize="none" spellcheck="false" required placeholder="username" />
+					{#if createUsernameError}<span class="field-inline-error">{createUsernameError}</span>{/if}
+				</label>
+				<label class="field-col">
+					<span class="section-label">Temporary password</span>
+					<input class="field" class:field--error={!!createPasswordError} type="password" bind:value={createPassword} autocomplete="new-password" required placeholder="password" />
+					{#if createPasswordError}<span class="field-inline-error">{createPasswordError}</span>{/if}
+				</label>
 					<label class="field-col">
 						<span class="section-label">Role</span>
 						<div class="role-toggle">
@@ -308,20 +346,44 @@
 							{/each}
 						</div>
 					</label>
-					<div class="create-form-footer">
-						<button class="btn-primary btn-sm" type="submit" disabled={createLoading}>
-							{createLoading ? "Creating..." : "Create user"}
-						</button>
-					</div>
+				<div class="create-form-footer">
+					<button class="btn-primary btn-sm" type="submit" disabled={createLoading || (createFormTouched && (!!createUsernameError || !!createPasswordError))}>
+						{createLoading ? "Creating..." : "Create user"}
+					</button>
+				</div>
 				</form>
 			</div>
 		</div>
 	{/if}
 
 	<!-- User list -->
-	{#if users.length === 0 && !loading}
+	{#if loading && users.length === 0}
+		<div class="user-list">
+			{#each { length: 4 } as _, i}
+				<div class="user-row skeleton-user-row" style="animation-delay: {i * 0.04}s">
+					<div class="user-identity">
+						<div class="skel-avatar"></div>
+						<div class="user-info">
+							<div class="skel-line skel-line--uname"></div>
+							<div class="skel-line skel-line--role"></div>
+						</div>
+					</div>
+					<div class="user-actions">
+						<div class="skel-btn"></div>
+						<div class="skel-btn skel-btn--narrow"></div>
+					</div>
+				</div>
+			{/each}
+		</div>
+	{:else if users.length === 0 && !loading}
 		<div class="empty-state">
-			<p class="empty-text">No users found.</p>
+			<div class="empty-icon">
+				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+					<circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
+				</svg>
+			</div>
+			<p class="empty-title">No users found</p>
+			<p class="empty-sub">User accounts will appear here once created.</p>
 		</div>
 	{:else}
 		<div class="user-list">
@@ -343,28 +405,48 @@
 
 					<!-- Actions -->
 					<div class="user-actions">
-						<!-- Password reset -->
-						{#if showResetFor === user.id}
-							<div class="inline-reset anim-fade-up">
+					<!-- Password reset -->
+					{#if showResetFor === user.id}
+						<div class="inline-reset anim-fade-up">
+							<div class="inline-reset-field">
 								<input
 									class="field inline-reset-input"
+									class:field--error={!!resetPasswordError[user.id]}
 									type="password"
 									value={resetPasswords[user.id] ?? ""}
-									oninput={(e) => { resetPasswords = { ...resetPasswords, [user.id]: (e.currentTarget as HTMLInputElement).value }; }}
+									oninput={(e) => {
+										const val = (e.currentTarget as HTMLInputElement).value;
+										resetPasswords = { ...resetPasswords, [user.id]: val };
+										if (val.length >= 4) resetPasswordError = { ...resetPasswordError, [user.id]: "" };
+									}}
 									placeholder="new password"
 								/>
-								<button
-									class="btn-ghost btn-sm"
-									type="button"
-									onclick={() => void submitPasswordReset(user.id)}
-									disabled={resetLoadingUserId === user.id || !(resetPasswords[user.id]?.length > 0)}
-								>
-									{resetLoadingUserId === user.id ? "Saving..." : "Save"}
-								</button>
-								<button class="btn-ghost btn-sm" type="button" onclick={() => { showResetFor = null; }}>
-									Cancel
-								</button>
+								{#if resetPasswordError[user.id]}<span class="field-inline-error">{resetPasswordError[user.id]}</span>{/if}
 							</div>
+							<button
+								class="btn-ghost btn-sm"
+								type="button"
+								onclick={() => {
+									const pw = resetPasswords[user.id] ?? "";
+									if (pw.length === 0) {
+										resetPasswordError = { ...resetPasswordError, [user.id]: "Password is required." };
+										return;
+									}
+									if (pw.length < 4) {
+										resetPasswordError = { ...resetPasswordError, [user.id]: "Password must be at least 4 characters." };
+										return;
+									}
+									resetPasswordError = { ...resetPasswordError, [user.id]: "" };
+									void submitPasswordReset(user.id);
+								}}
+								disabled={resetLoadingUserId === user.id}
+							>
+								{resetLoadingUserId === user.id ? "Saving..." : "Save"}
+							</button>
+							<button class="btn-ghost btn-sm" type="button" onclick={() => { showResetFor = null; resetPasswordError = { ...resetPasswordError, [user.id]: "" }; }}>
+								Cancel
+							</button>
+						</div>
 						{:else}
 							<button
 								class="btn-ghost btn-sm"
@@ -482,20 +564,95 @@
 		justify-content: flex-end;
 	}
 
+	.field--error {
+		border-color: var(--status-error-border) !important;
+	}
+
+	.field-inline-error {
+		font-family: var(--font-mono);
+		font-size: 0.62rem;
+		color: var(--status-error);
+		margin-top: 0.1rem;
+	}
+
 	/* Empty state */
 	.empty-state {
 		display: flex;
+		flex-direction: column;
 		align-items: center;
 		justify-content: center;
-		padding: 3rem 2rem;
+		gap: 0.625rem;
+		padding: 4rem 2rem;
+		text-align: center;
 	}
 
-	.empty-text {
+	.empty-icon {
+		display: grid;
+		place-items: center;
+		width: 44px;
+		height: 44px;
+		border-radius: var(--radius-md);
+		background: var(--bg-raised);
+		border: 1px solid var(--border-dim);
+		color: var(--text-muted);
+		margin-bottom: 0.5rem;
+	}
+
+	.empty-title {
 		margin: 0;
 		font-family: var(--font-mono);
-		font-size: 0.75rem;
+		font-size: 0.82rem;
+		color: var(--text-secondary);
+	}
+
+	.empty-sub {
+		margin: 0;
+		font-family: var(--font-mono);
+		font-size: 0.7rem;
 		color: var(--text-muted);
 	}
+
+	/* ── Skeleton loading rows ────────────────────────────────────────────────── */
+	@keyframes shimmer {
+		0%   { background-position: 200% 0; }
+		100% { background-position: -200% 0; }
+	}
+
+	.skeleton-user-row {
+		pointer-events: none;
+	}
+
+	.skel-avatar {
+		width: 34px;
+		height: 34px;
+		border-radius: 50%;
+		flex-shrink: 0;
+		background: linear-gradient(90deg, var(--bg-raised) 25%, var(--bg-overlay) 50%, var(--bg-raised) 75%);
+		background-size: 200% 100%;
+		animation: shimmer 1.5s ease-in-out infinite;
+	}
+
+	.skel-line {
+		height: 9px;
+		border-radius: 4px;
+		background: linear-gradient(90deg, var(--bg-raised) 25%, var(--bg-overlay) 50%, var(--bg-raised) 75%);
+		background-size: 200% 100%;
+		animation: shimmer 1.5s ease-in-out infinite;
+	}
+
+	.skel-line--uname { width: 8rem; }
+	.skel-line--role  { width: 3.5rem; height: 7px; margin-top: 4px; opacity: 0.6; }
+
+	.skel-btn {
+		height: 28px;
+		width: 90px;
+		border-radius: 4px;
+		background: linear-gradient(90deg, var(--bg-raised) 25%, var(--bg-overlay) 50%, var(--bg-raised) 75%);
+		background-size: 200% 100%;
+		animation: shimmer 1.5s ease-in-out infinite;
+	}
+
+	.skel-btn--narrow { width: 56px; }
 
 	/* User list */
 	.user-list {
@@ -620,8 +777,14 @@
 
 	.inline-reset {
 		display: flex;
-		align-items: center;
+		align-items: flex-start;
 		gap: 0.4rem;
+	}
+
+	.inline-reset-field {
+		display: flex;
+		flex-direction: column;
+		gap: 0.1rem;
 	}
 
 	.inline-reset-input {

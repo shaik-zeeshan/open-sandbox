@@ -1,13 +1,11 @@
 <script lang="ts">
 	import { scheduleTimeout } from "$lib/client/browser";
-	import { toast } from "$lib/toast.svelte";
+	import { toast, type ToastKind } from "$lib/toast.svelte";
 
-	// Track which toasts are animating out
 	let dismissing = $state<Set<string>>(new Set());
 
 	function dismiss(id: string) {
 		dismissing = new Set([...dismissing, id]);
-		// Wait for the exit animation before removing from store
 		scheduleTimeout(() => {
 			toast.remove(id);
 			dismissing = new Set([...dismissing].filter((x) => x !== id));
@@ -15,9 +13,10 @@
 	}
 
 	const icons = {
-		error: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`,
-		ok:    `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`,
-		warn:  `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`
+		error: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`,
+		ok:      `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`,
+		warn:    `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`,
+		loading: `<svg class="toast-spin" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>`
 	};
 </script>
 
@@ -31,9 +30,11 @@
 			>
 				<span class="toast-icon" aria-hidden="true">{@html icons[t.kind]}</span>
 				<span class="toast-msg">{t.message}</span>
-				<button class="toast-close" type="button" onclick={() => dismiss(t.id)} aria-label="Dismiss">
-					<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-				</button>
+				{#if t.kind !== "loading"}
+					<button class="toast-close" type="button" onclick={() => dismiss(t.id)} aria-label="Dismiss">
+						<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+					</button>
+				{/if}
 			</div>
 		{/each}
 	</div>
@@ -42,56 +43,62 @@
 <style>
 	.toaster {
 		position: fixed;
-		bottom: 1.25rem;
-		right: 1.25rem;
+		bottom: 1.5rem;
+		left: 50%;
+		transform: translateX(-50%);
 		z-index: 9999;
 		display: flex;
 		flex-direction: column-reverse;
-		gap: 0.5rem;
-		max-width: min(420px, calc(100vw - 2.5rem));
+		gap: 0.55rem;
+		width: min(480px, calc(100vw - 2rem));
 		pointer-events: none;
 	}
 
 	.toast {
 		display: flex;
 		align-items: flex-start;
-		gap: 0.55rem;
-		padding: 0.65rem 0.75rem;
+		gap: 0.65rem;
+		padding: 0.8rem 0.9rem;
 		border-radius: var(--radius-md);
 		border: 1px solid;
 		font-family: var(--font-mono);
-		font-size: 0.7rem;
+		font-size: 0.75rem;
 		line-height: 1.55;
 		backdrop-filter: blur(12px);
 		pointer-events: auto;
 		animation: toastIn 0.3s var(--ease-snappy) both;
 		max-width: 100%;
+		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
 	}
 
 	.toast--out {
 		animation: toastOut 0.28s var(--ease-out) both;
 	}
 
-	/* ── Variants ──────────────────────────────────────────────────────────────── */
 	.toast--error {
-		background: rgba(12, 5, 5, 0.92);
+		background: rgba(12, 5, 5, 0.94);
 		border-color: var(--status-error-border);
 		color: var(--status-error);
 	}
 
 	.toast--ok {
-		background: rgba(4, 12, 7, 0.92);
+		background: rgba(4, 12, 7, 0.94);
 		border-color: var(--status-ok-border);
 		color: var(--status-ok);
 	}
 
 	.toast--warn {
-		background: rgba(12, 10, 4, 0.92);
+		background: rgba(12, 10, 4, 0.94);
 		border-color: var(--status-warn-border);
 		color: var(--status-warn);
 	}
 
-	/* ── Parts ─────────────────────────────────────────────────────────────────── */
+	.toast--loading {
+		background: rgba(6, 6, 10, 0.94);
+		border-color: var(--border-mid);
+		color: var(--text-secondary);
+	}
+
 	.toast-icon {
 		display: flex;
 		align-items: center;
@@ -125,11 +132,19 @@
 		opacity: 1;
 	}
 
-	/* ── Animations ────────────────────────────────────────────────────────────── */
+	:global(.toast-spin) {
+		animation: toastSpinAnim 0.75s linear infinite;
+	}
+
+	@keyframes toastSpinAnim {
+		from { transform: rotate(0deg); }
+		to   { transform: rotate(360deg); }
+	}
+
 	@keyframes toastIn {
 		from {
 			opacity: 0;
-			transform: translateY(10px) scale(0.97);
+			transform: translateY(12px) scale(0.97);
 		}
 		to {
 			opacity: 1;
@@ -144,7 +159,7 @@
 		}
 		to {
 			opacity: 0;
-			transform: translateY(6px) scale(0.97);
+			transform: translateY(8px) scale(0.97);
 		}
 	}
 </style>
