@@ -1,0 +1,17 @@
+[general]
+port = 80
+root = "/var/public"
+page-fallback = "/var/public/index.html"
+log-level = "info"
+redirect-trailing-slash = false
+health = true
+
+[advanced]
+
+[[advanced.headers]]
+source = "/_app/immutable/**"
+headers = { Cache-Control = "public, max-age=31536000, immutable" }
+
+[[advanced.headers]]
+source = "/{,*.html}"
+headers = { Cache-Control = "no-cache, no-store, must-revalidate" }
