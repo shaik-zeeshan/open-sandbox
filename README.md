@@ -108,6 +108,19 @@ The stack runs three containers:
 
 The API talks to the host Docker daemon through `/var/run/docker.sock`.
 
+### Running behind OpenResty/Nginx (SSE endpoints)
+
+Some API routes stream with Server-Sent Events (for example container logs and compose/build output). If you place another proxy in front of Traefik (OpenResty/Nginx), keep streaming unbuffered or clients can observe truncated streams (for example `curl: (18) transfer closed with outstanding read data remaining`).
+
+Recommended location settings for those upstream API paths:
+
+- `proxy_http_version 1.1;`
+- `proxy_buffering off;`
+- `proxy_request_buffering off;`
+- `proxy_read_timeout 1h;`
+
+The server already emits `X-Accel-Buffering: no` on SSE responses, and Traefik forwards that response header on server routes.
+
 ### Preview routing model
 
 Preview URLs are launcher routes on the main host and redirect to dedicated preview subdomains:
