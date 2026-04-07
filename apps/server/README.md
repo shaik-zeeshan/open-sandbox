@@ -40,6 +40,7 @@ Optional:
 - `SANDBOX_PUBLIC_BASE_URL`: public app URL used to build preview launcher links, default `http://app.lvh.me:3000`
 - `SANDBOX_PREVIEW_BASE_DOMAIN`: wildcard preview domain; when unset it is auto-derived from `SANDBOX_PUBLIC_BASE_URL` host as `preview.<base-domain>` (fallback `preview.lvh.me`)
 - `SANDBOX_PREVIEW_SESSION_TTL`: signed preview session lifetime, default `10m`
+- `SANDBOX_TRAEFIK_TRUST_FORWARDED_HEADERS`: set to `true` when an external proxy (Nginx, OpenResty, etc.) sits in front of Traefik, so Traefik trusts incoming `X-Forwarded-*` headers; default `false`
 
 `/health` is intentionally public.
 

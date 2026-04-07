@@ -108,11 +108,29 @@ The stack runs three containers:
 
 The API talks to the host Docker daemon through `/var/run/docker.sock`.
 
-### Running behind OpenResty/Nginx (SSE endpoints)
+### Running behind OpenResty/Nginx
 
-Some API routes stream with Server-Sent Events (for example container logs and compose/build output). If you place another proxy in front of Traefik (OpenResty/Nginx), keep streaming unbuffered or clients can observe truncated streams (for example `curl: (18) transfer closed with outstanding read data remaining`).
+If you place another proxy (Nginx, OpenResty, Caddy, etc.) in front of Traefik, three things must be configured correctly:
 
-Recommended location settings for those upstream API paths:
+**1. Wildcard `server_name` for preview subdomains**
+
+Preview URLs are served from dedicated hosts under `SANDBOX_PREVIEW_BASE_DOMAIN` (default `preview.<base-domain>`). Your external proxy must route both the main app domain **and** the wildcard preview domain to Traefik, otherwise preview asset requests (CSS, JS, images) will hit the default server block and return 403.
+
+```nginx
+server_name sandbox.example.com *.preview.example.com;
+```
+
+A reference config is shipped at `deploy/nginx/open-sandbox.conf`.
+
+**2. Trust forwarded headers**
+
+Set `SANDBOX_TRAEFIK_TRUST_FORWARDED_HEADERS=true` in your `.env` so Traefik preserves `X-Forwarded-Proto` and `X-Forwarded-Host` from the external proxy. Without this, the server cannot detect HTTPS and preview cookie `Secure` flags / redirect URLs will be wrong.
+
+**3. SSE streaming**
+
+Some API routes stream with Server-Sent Events (for example container logs and compose/build output). Keep streaming unbuffered or clients can observe truncated streams (for example `curl: (18) transfer closed with outstanding read data remaining`).
+
+Recommended location settings for upstream API paths:
 
 - `proxy_http_version 1.1;`
 - `proxy_buffering off;`
@@ -151,6 +169,7 @@ Top-level values (from `.env`):
   - set this to your external app URL when you expose a non-default host/port (for preview callback links)
 - `SANDBOX_PREVIEW_BASE_DOMAIN` (optional, default auto-derived from `SANDBOX_PUBLIC_BASE_URL` host as `preview.<base-domain>`, fallback `preview.lvh.me`)
 - `SANDBOX_PREVIEW_SESSION_TTL` (optional, default `10m`)
+- `SANDBOX_TRAEFIK_TRUST_FORWARDED_HEADERS` (optional, default `false`): set to `true` when running behind an external proxy (Nginx, OpenResty, etc.) so Traefik trusts `X-Forwarded-*` headers from the upstream
 
 Backend values inside the server container:
 - `SANDBOX_DB_PATH=/data/open-sandbox.db`

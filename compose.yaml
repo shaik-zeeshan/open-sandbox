@@ -14,7 +14,7 @@ services:
       - --log.level=INFO
       - --accesslog=true
       - --entrypoints.web.address=:80
-      - --entrypoints.web.forwardedHeaders.insecure=false
+      - --entrypoints.web.forwardedHeaders.insecure=${SANDBOX_TRAEFIK_TRUST_FORWARDED_HEADERS:-false}
       - --providers.file.directory=/etc/traefik/dynamic
       - --providers.file.watch=true
     volumes:

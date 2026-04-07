@@ -149,6 +149,8 @@ SANDBOX_RUNTIME_PIDS_LIMIT=${SANDBOX_RUNTIME_PIDS_LIMIT:-512}
 SANDBOX_MAINTENANCE_ARTIFACT_MAX_AGE=${SANDBOX_MAINTENANCE_ARTIFACT_MAX_AGE:-168h}
 SANDBOX_MAINTENANCE_MISSING_SANDBOX_MAX_AGE=${SANDBOX_MAINTENANCE_MISSING_SANDBOX_MAX_AGE:-24h}
 SANDBOX_PUBLIC_BASE_URL=${SANDBOX_PUBLIC_BASE_URL:-http://app.lvh.me:${OPEN_SANDBOX_HTTP_PORT}}
+SANDBOX_TRAEFIK_TRUST_FORWARDED_HEADERS=$(grep -E '^SANDBOX_TRAEFIK_TRUST_FORWARDED_HEADERS=' "$ENV_FILE" | tail -n 1 | cut -d '=' -f 2- || true)
+SANDBOX_TRAEFIK_TRUST_FORWARDED_HEADERS=${SANDBOX_TRAEFIK_TRUST_FORWARDED_HEADERS:-false}
 
 if [[ "$SANDBOX_PREVIEW_BASE_DOMAIN" == "preview.lvh.me" && "$SANDBOX_PUBLIC_BASE_URL" != *"lvh.me"* ]]; then
   SANDBOX_PREVIEW_BASE_DOMAIN=""
@@ -221,7 +223,7 @@ docker run -d \
   --log.level=INFO \
   --accesslog=true \
   --entrypoints.web.address=:80 \
-  --entrypoints.web.forwardedHeaders.insecure=false \
+  --entrypoints.web.forwardedHeaders.insecure="$SANDBOX_TRAEFIK_TRUST_FORWARDED_HEADERS" \
   --providers.file.directory=/etc/traefik/dynamic \
   --providers.file.watch=true >/dev/null
 
