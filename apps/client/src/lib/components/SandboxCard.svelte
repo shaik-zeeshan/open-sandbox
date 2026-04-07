@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onDestroy } from "svelte";
 	import type { PreviewUrl } from "$lib/api";
 
 	let {
@@ -145,6 +146,13 @@
 	function closeMenu() {
 		menuOpen = false;
 	}
+
+	onDestroy(() => {
+		if (deleteConfirmTimer !== null) {
+			clearTimeout(deleteConfirmTimer);
+			deleteConfirmTimer = null;
+		}
+	});
 
 	// Svelte action: mounts content into document.body so it's outside the table
 	function portal(node: HTMLElement) {

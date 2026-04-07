@@ -55,7 +55,7 @@ function createToastStore(): ToastStore {
 		return toast.id;
 	}
 
-	function update(id: string, kind: ToastKind, message: string, duration = kind === "error" ? 6000 : 4000): void {
+	function update(id: string, kind: ToastKind, message: string, duration = kind === "error" ? 6000 : kind === "loading" ? 0 : 4000): void {
 		const existing = timers.get(id);
 		if (existing !== undefined) {
 			clearScheduledTimeout(existing);

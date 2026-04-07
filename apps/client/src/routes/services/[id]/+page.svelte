@@ -40,17 +40,16 @@
 		return "container" as const;
 	});
 
-	const missingRuntimeLabel = $derived(runtimeContainer === null ? "service" : runtimeKind);
-	const missingTitle = $derived(missingRuntimeLabel === "compose service" ? "Compose service not found" : `${missingRuntimeLabel[0].toUpperCase()}${missingRuntimeLabel.slice(1)} not found`);
+	const missingTitle = $derived(runtimeKind === "compose service" ? "Compose service not found" : `${runtimeKind[0].toUpperCase()}${runtimeKind.slice(1)} not found`);
 	const missingSubtitle = $derived(
-		missingRuntimeLabel === "compose service"
+		runtimeKind === "compose service"
 			? "This compose service may have been removed."
-			: `This ${missingRuntimeLabel} may have been removed.`
+			: `This ${runtimeKind} may have been removed.`
 	);
 	const errorTitle = $derived(
-		missingRuntimeLabel === "compose service"
+		runtimeKind === "compose service"
 			? "Unable to load compose service"
-			: `Unable to load ${missingRuntimeLabel}`
+			: `Unable to load ${runtimeKind}`
 	);
 
 	async function refreshData(options?: RefreshOptions): Promise<void> {
