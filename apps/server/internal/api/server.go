@@ -550,10 +550,7 @@ func (s *Server) buildImageStream(c *gin.Context) {
 		return
 	}
 
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Accept-Encoding", "identity")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
+	setSSEHeaders(c)
 
 	mu := &sync.Mutex{}
 	if err := streamDockerBuildOutput(c, mu, resp.Body); err != nil {
@@ -744,10 +741,7 @@ func (s *Server) composeUp(c *gin.Context) {
 		return
 	}
 
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Accept-Encoding", "identity")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
+	setSSEHeaders(c)
 
 	mu := &sync.Mutex{}
 	stdoutWriter := &sseChunkWriter{ctx: c, stream: "stdout", mu: mu}
@@ -1584,6 +1578,15 @@ func emitSSE(c *gin.Context, mu *sync.Mutex, event string, data string) {
 		_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", scanner.Text())
 	}
 	flusher.Flush()
+}
+
+func setSSEHeaders(c *gin.Context) {
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Accept-Encoding", "identity")
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("Connection", "keep-alive")
+	c.Header("Pragma", "no-cache")
+	c.Header("X-Accel-Buffering", "no")
 }
 
 func buildComposeArgs(project composeProjectContext, req ComposeRequest, cmd string, extra ...string) []string {

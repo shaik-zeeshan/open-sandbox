@@ -1,10 +1,18 @@
 http:
+  middlewares:
+    server-streaming:
+      headers:
+        customResponseHeaders:
+          X-Accel-Buffering: "no"
+
   routers:
     server:
       entryPoints:
         - web
       rule: "PathPrefix(`/api`) || PathPrefix(`/auth`) || PathPrefix(`/health`) || PathPrefix(`/metrics`) || PathPrefix(`/swagger`)"
       service: server
+      middlewares:
+        - server-streaming
       priority: 100
     client:
       entryPoints:

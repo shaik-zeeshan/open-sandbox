@@ -896,10 +896,7 @@ func (s *Server) streamLogsForContainer(c *gin.Context, workerID string, contain
 	}
 	defer reader.Close()
 
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Accept-Encoding", "identity")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
+	setSSEHeaders(c)
 
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
