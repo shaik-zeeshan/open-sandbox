@@ -423,7 +423,6 @@
 				readLoading = true;
 			});
 
-			const toastId = yield* feedback.loadingToast("Loading...");
 			try {
 				const payload = yield* fileIo.read(normalizedPath);
 				yield* Effect.sync(() => {
@@ -431,9 +430,8 @@
 					browsePath = normalizedPath;
 					editorContent = payload.kind === "file" ? payload.content ?? "" : "";
 				});
-				yield* feedback.updateToast(toastId, "ok", "Loaded.");
 			} catch (error) {
-				yield* feedback.updateToast(toastId, "error", formatApiFailure(error));
+				yield* feedback.error(new Error(formatApiFailure(error)));
 			} finally {
 				yield* Effect.sync(() => {
 					readLoading = false;
