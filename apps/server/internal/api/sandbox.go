@@ -44,6 +44,7 @@ type ContainerSummary struct {
 	ProjectName  string            `json:"project_name,omitempty"`
 	ServiceName  string            `json:"service_name,omitempty"`
 	Resettable   bool              `json:"resettable"`
+	PortSpecs    []string          `json:"port_specs,omitempty"`
 	Ports        []PortSummary     `json:"ports,omitempty"`
 	PreviewURLs  []PreviewURL      `json:"preview_urls,omitempty"`
 }
@@ -71,6 +72,7 @@ type SandboxResponse struct {
 	Status        string                             `json:"status"`
 	OwnerUsername string                             `json:"owner_username,omitempty"`
 	ProxyConfig   map[string]*SandboxPortProxyConfig `json:"proxy_config,omitempty"`
+	PortSpecs     []string                           `json:"port_specs,omitempty"`
 	Ports         []PortSummary                      `json:"ports,omitempty"`
 	PreviewURLs   []PreviewURL                       `json:"preview_urls,omitempty"`
 	CreatedAt     int64                              `json:"created_at"`
@@ -187,6 +189,7 @@ func (s *Server) listContainers(c *gin.Context) {
 	visible := make([]ContainerSummary, 0, len(containers))
 	for _, item := range containers {
 		if s.runtimeContainerVisibleToIdentity(item, identity, ownedContainerIDs, ownedComposeProjects) {
+			item.PortSpecs = s.portSpecsForContainer(item)
 			item.PreviewURLs = s.previewURLsForContainer(item)
 			visible = append(visible, item)
 		}
@@ -545,6 +548,7 @@ func (s *Server) createSandbox(c *gin.Context) {
 		WorkerID:      workerID,
 		WorkspaceDir:  workspaceDir,
 		RepoURL:       strings.TrimSpace(req.RepoURL),
+		PortSpecs:     append([]string(nil), req.Ports...),
 		Status:        "running",
 		OwnerID:       identity.UserID,
 		OwnerUsername: identity.Username,
@@ -1444,6 +1448,7 @@ func sandboxToResponse(sandbox store.Sandbox) SandboxResponse {
 		Status:        sandbox.Status,
 		OwnerUsername: sandbox.OwnerUsername,
 		ProxyConfig:   sandboxProxyConfigToResponse(sandbox.ProxyConfig),
+		PortSpecs:     append([]string(nil), sandbox.PortSpecs...),
 		Ports:         nil,
 		PreviewURLs:   nil,
 		CreatedAt:     sandbox.CreatedAt,
@@ -1608,6 +1613,24 @@ func previewURLsForPorts(ports []PortSummary, buildURL func(privatePort int) str
 		return nil
 	}
 	return previewURLs
+}
+
+func (s *Server) portSpecsForContainer(item ContainerSummary) []string {
+	if strings.TrimSpace(s.workspaceRoot) == "" {
+		return nil
+	}
+	managedID := strings.TrimSpace(item.Labels[labelOpenSandboxManagedID])
+	if managedID == "" || strings.TrimSpace(item.Labels[labelOpenSandboxKind]) != managedKindDirect {
+		return nil
+	}
+	req, err := s.readDirectContainerSpec(managedID)
+	if err != nil {
+		return nil
+	}
+	if len(req.Ports) == 0 {
+		return nil
+	}
+	return append([]string(nil), req.Ports...)
 }
 
 func extractSingleFileFromTar(reader io.Reader) (string, string, error) {

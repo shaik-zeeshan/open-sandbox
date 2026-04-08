@@ -20,19 +20,35 @@
 		const lines = v.split("\n").map(l => l.trim()).filter(Boolean);
 		if (lines.length === 0) return [];
 		return lines.map(line => {
-			const [host = "", container = ""] = line.split(":").map(s => s.trim());
+			const parts = line.split(":").map(s => s.trim());
+			const [host, container] = parts.length === 1 ? ["", parts[0] ?? ""] : [parts[0] ?? "", parts[1] ?? ""];
 			return { id: nextId++, host, container };
 		});
 	}
 
+	function serializeRows(items: PortRow[]): string {
+		return items
+			.filter(r => r.host.trim() || r.container.trim())
+			.map(r => {
+				const host = r.host.trim();
+				const container = r.container.trim();
+				return host === "" && container !== "" ? container : `${host}:${container}`;
+			})
+			.join("\n");
+	}
+
 	let rows = $state<PortRow[]>(parseValue(value));
+
+	$effect(() => {
+		if (value === serializeRows(rows)) {
+			return;
+		}
+		rows = parseValue(value);
+	});
 
 	// Sync rows → value string
 	function commit(): void {
-		value = rows
-			.filter(r => r.host.trim() || r.container.trim())
-			.map(r => `${r.host.trim()}:${r.container.trim()}`)
-			.join("\n");
+		value = serializeRows(rows);
 	}
 
 	function addRow(): void {

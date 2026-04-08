@@ -4,7 +4,8 @@
 	import { authController, checkHealth, signOut } from "$lib/auth-controller.svelte";
 	import PageShell from "$lib/components/PageShell.svelte";
 	import SandboxWorkspace from "$lib/components/SandboxWorkspace.svelte";
-	import { clientState } from "$lib/stores.svelte";
+	import { buildSandboxDuplicateDraft } from "$lib/duplicate-drafts";
+	import { clientState, setPendingDuplicateCreateDraft } from "$lib/stores.svelte";
 	import { formatApiFailure, listContainers, listSandboxes, runApiEffect, type ContainerSummary, type Sandbox } from "$lib/api";
 	import { toast } from "$lib/toast.svelte";
 
@@ -134,6 +135,13 @@
 				runtimeContainer={null}
 				config={clientState.config}
 				onBack={() => void goto("/")}
+				onDuplicate={() => {
+					if (!sandbox) {
+						return;
+					}
+					setPendingDuplicateCreateDraft(buildSandboxDuplicateDraft(sandbox));
+					void goto("/");
+				}}
 				onRefresh={() => refreshData({ showLoading: false, notifyOnError: true })}
 				onContainerReplaced={() => {}}
 				onDeleted={() => { void goto("/"); }}

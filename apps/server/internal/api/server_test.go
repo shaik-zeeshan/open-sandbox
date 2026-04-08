@@ -1446,6 +1446,41 @@ func TestListContainersIncludesServerGeneratedPreviewURLs(t *testing.T) {
 	}
 }
 
+func TestListContainersIncludesPersistedDirectContainerPortSpecs(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return `{"ID":"direct-container","Image":"nginx:latest","Names":"direct-one","Ports":"0.0.0.0:8080->80/tcp,3000/tcp","Status":"Up 5 minutes","Labels":"open-sandbox.kind=direct,open-sandbox.managed_id=ctr-123,open-sandbox.owner_id=member-1"}` + "\n", "", nil
+	}
+
+	s := newTestServer(&mockDocker{})
+	s.workspaceRoot = t.TempDir()
+	if err := s.writeDirectContainerSpec("ctr-123", CreateContainerRequest{Image: "nginx:latest", Ports: []string{"127.0.0.1:48080:80", "3000"}}); err != nil {
+		t.Fatalf("write direct container spec: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/containers", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+
+	var containers []ContainerSummary
+	if err := json.Unmarshal(w.Body.Bytes(), &containers); err != nil {
+		t.Fatalf("decode containers response: %v", err)
+	}
+	if len(containers) != 1 {
+		t.Fatalf("expected 1 visible container, got %d", len(containers))
+	}
+	if len(containers[0].PortSpecs) != 2 || containers[0].PortSpecs[0] != "127.0.0.1:48080:80" || containers[0].PortSpecs[1] != "3000" {
+		t.Fatalf("unexpected direct container port specs: %+v", containers[0].PortSpecs)
+	}
+}
+
 func TestListContainersFiltersToCurrentUser(t *testing.T) {
 	original := commandRunner
 	defer func() { commandRunner = original }()
@@ -2271,6 +2306,7 @@ func TestListSandboxesIncludesPersistedProxyConfig(t *testing.T) {
 			return []store.Sandbox{{
 				ID:            "sandbox-1",
 				Name:          "mine",
+				Image:         "ubuntu:24.04",
 				ContainerID:   "sandbox-container",
 				OwnerID:       "member-1",
 				OwnerUsername: "alice",
@@ -2550,6 +2586,44 @@ func TestUpdateSandboxProxyConfigEndpointAllowsClearingConfig(t *testing.T) {
 	}
 	if !updatedCalled {
 		t.Fatal("expected proxy config update to be called")
+	}
+}
+
+func TestSandboxResponseIncludesPortSpecs(t *testing.T) {
+	sandboxStore := &mockSandboxStore{
+		listSandboxesFn: func(context.Context) ([]store.Sandbox, error) {
+			return []store.Sandbox{{
+				ID:            "sandbox-1",
+				Name:          "mine",
+				ContainerID:   "sandbox-container",
+				OwnerID:       "member-1",
+				OwnerUsername: "alice",
+				Status:        "running",
+				PortSpecs:     []string{"127.0.0.1:8080:80", "3000"},
+			}}, nil
+		},
+	}
+
+	s := newTestServerWithStore(&mockDocker{}, sandboxStore)
+	req := httptest.NewRequest(http.MethodGet, "/api/sandboxes", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+
+	var sandboxes []SandboxResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &sandboxes); err != nil {
+		t.Fatalf("decode sandboxes response: %v", err)
+	}
+	if len(sandboxes) != 1 {
+		t.Fatalf("expected 1 sandbox, got %d", len(sandboxes))
+	}
+	if len(sandboxes[0].PortSpecs) != 2 || sandboxes[0].PortSpecs[0] != "127.0.0.1:8080:80" || sandboxes[0].PortSpecs[1] != "3000" {
+		t.Fatalf("unexpected sandbox port specs: %+v", sandboxes[0].PortSpecs)
 	}
 }
 

@@ -13,12 +13,14 @@
 		config,
 		loading,
 		onOpen,
+		onDuplicateSandbox,
 		onRestart,
 		onReset,
 		onResetContainer,
 		onStop,
 		onDelete,
 		onOpenContainer,
+		onDuplicateContainer,
 		onRestartContainer,
 		onStopContainer,
 		onRemoveContainer,
@@ -45,12 +47,14 @@
 		config: ApiConfig;
 		loading: boolean;
 		onOpen: (id: string) => void;
+		onDuplicateSandbox: (id: string) => void;
 		onRestart: (id: string) => void;
 		onReset: (id: string) => void;
 		onResetContainer: (id: string) => void;
 		onStop: (id: string) => void;
 		onDelete: (id: string) => void;
 		onOpenContainer: (id: string) => void;
+		onDuplicateContainer: (id: string) => void;
 		onRestartContainer: (id: string) => void;
 		onStopContainer: (id: string) => void;
 		onRemoveContainer: (id: string) => void;
@@ -610,6 +614,7 @@
 							isSelected={false}
 							showReset={workload.canReset}
 							showActions={workload.showActions}
+							showDuplicate={workload.showActions}
 							deleteLabel={workload.kind === "sandbox" ? "Delete" : "Remove"}
 							deleteTitle={workload.kind === "sandbox" ? "Delete sandbox" : "Remove container"}
 							animDelay={i * 0.035}
@@ -618,6 +623,11 @@
 								: workload.kind === "compose" && workload.id.startsWith("compose-project:")
 									? openComposePage(workload.composeProjectName)
 									: onOpenContainer(workload.id)}
+							onDuplicate={() => workload.kind === "sandbox"
+								? onDuplicateSandbox(workload.id)
+								: workload.kind === "compose" && workload.id.startsWith("compose-project:")
+									? openComposePage(workload.composeProjectName)
+									: onDuplicateContainer(workload.id)}
 							onRestart={() => workload.kind === "sandbox"
 								? onRestart(workload.id)
 								: workload.kind === "compose" && workload.id.startsWith("compose-project:")

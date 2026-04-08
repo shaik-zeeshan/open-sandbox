@@ -5,6 +5,10 @@
 	import SandboxesPanel from "$lib/components/SandboxesPanel.svelte";
 	import SandboxWorkspace from "$lib/components/SandboxWorkspace.svelte";
 	import {
+		buildContainerDuplicateDraft,
+		buildSandboxDuplicateDraft
+	} from "$lib/duplicate-drafts";
+	import {
 		getCachedComposeProjects,
 		getCachedContainers,
 		getCachedImages,
@@ -39,7 +43,16 @@
 		type SandboxPortProxyConfig
 	} from "$lib/api";
 	import { Effect } from "effect";
-	import { clientState, setAuthSession, setBaseUrl } from "$lib/stores.svelte";
+	import {
+		clearPendingDuplicateCreateDraft,
+		clientState,
+		consumePendingDuplicateCreateDraft,
+		getPendingDuplicateCreateDraft,
+		type PendingDuplicateCreateDraft,
+		setAuthSession,
+		setBaseUrl,
+		setPendingDuplicateCreateDraft
+	} from "$lib/stores.svelte";
 	import { toast } from "$lib/toast.svelte";
 	import { scheduleTimeout } from "$lib/client/browser";
 
@@ -180,6 +193,26 @@
 	let createProxyConfig = $state<Record<string, SandboxPortProxyConfig>>({});
 	let createLoading = $state(false);
 
+	function resetCreateFormState(): void {
+		createName = "";
+		createExistingImage = "";
+		createRepoUrl = "";
+		createBranch = "";
+		createWorkdir = "";
+		createPorts = "";
+		createProxyConfig = {};
+	}
+
+	function applyCreateDraft(draft: PendingDuplicateCreateDraft): void {
+		createName = draft.name;
+		createExistingImage = draft.image;
+		createRepoUrl = draft.repoUrl;
+		createBranch = draft.branch;
+		createWorkdir = draft.workdir;
+		createPorts = draft.ports;
+		createProxyConfig = { ...draft.proxyConfig };
+	}
+
 	async function resolveSetupStatus(): Promise<void> {
 		try {
 			const setup = await runApiEffect(getSetupStatus({ baseUrl: clientState.baseUrl }), { notifyAuthError: false });
@@ -266,6 +299,7 @@
 
 	async function signOut(revoke = true): Promise<void> {
 		await signOutSession(revoke);
+		clearPendingDuplicateCreateDraft();
 		loginUsername = "";
 		loginPassword = "";
 		loginError = "";
@@ -278,8 +312,30 @@
 	}
 
 	function toggleCreateForm(): void {
+		if (showCreateForm) {
+			clearPendingDuplicateCreateDraft();
+		}
 		showCreateForm = !showCreateForm;
 	}
+
+	$effect(() => {
+		if (!clientState.isAuthenticated || activeWorkload !== null || showCreateForm) {
+			return;
+		}
+
+		if (getPendingDuplicateCreateDraft() === null) {
+			return;
+		}
+
+		const draft = consumePendingDuplicateCreateDraft();
+		if (draft === null) {
+			return;
+		}
+
+		resetCreateFormState();
+		applyCreateDraft(draft);
+		showCreateForm = true;
+	});
 
 	// ── Data actions ───────────────────────────────────────────────────────────
 	const refreshDataProgram = (options: ResolvedRefreshOptions): Effect.Effect<void, unknown> =>
@@ -451,6 +507,66 @@
 	function applyPreset(name: string, image: string): void {
 		createName = name;
 		createExistingImage = image;
+	}
+
+	function duplicateSandboxToCreateDraft(sandbox: Sandbox): void {
+		const draft = buildSandboxDuplicateDraft(sandbox);
+		setPendingDuplicateCreateDraft(draft);
+		if (showCreateForm) {
+			resetCreateFormState();
+			applyCreateDraft(draft);
+			clearPendingDuplicateCreateDraft();
+		}
+	}
+
+	function duplicateContainerToCreateDraft(container: ContainerSummary): void {
+		const draft = buildContainerDuplicateDraft(container);
+		setPendingDuplicateCreateDraft(draft);
+		if (showCreateForm) {
+			resetCreateFormState();
+			applyCreateDraft(draft);
+			clearPendingDuplicateCreateDraft();
+		}
+	}
+
+	function handleDuplicateSandbox(id: string): void {
+		const sandbox = sandboxes.find((item) => item.id === id);
+		if (!sandbox) {
+			toast.error("Unable to prepare duplicate draft.");
+			return;
+		}
+
+		duplicateSandboxToCreateDraft(sandbox);
+		activeWorkload = null;
+		pendingContainerActivationId = null;
+		activeRuntimeContainerSnapshot = null;
+	}
+
+	function handleDuplicateContainer(id: string): void {
+		const container = containers.find((item) => item.id === id);
+		if (!container) {
+			toast.error("Unable to prepare duplicate draft.");
+			return;
+		}
+
+		duplicateContainerToCreateDraft(container);
+		activeWorkload = null;
+		pendingContainerActivationId = null;
+		activeRuntimeContainerSnapshot = null;
+	}
+
+	function handleDuplicateActiveWorkload(): void {
+		if (activeSandbox) {
+			handleDuplicateSandbox(activeSandbox.id);
+			return;
+		}
+
+		if (activeVisibleRuntimeContainer) {
+			handleDuplicateContainer(activeVisibleRuntimeContainer.id);
+			return;
+		}
+
+		toast.error("Unable to prepare duplicate draft.");
 	}
 
 	// Sandbox list actions
@@ -647,6 +763,7 @@
 				runtimeContainer={activeVisibleRuntimeContainer}
 				config={clientState.config}
 				onBack={() => { activeWorkload = null; pendingContainerActivationId = null; activeRuntimeContainerSnapshot = null; }}
+				onDuplicate={handleDuplicateActiveWorkload}
 				onRefresh={() => refreshData({ force: true })}
 				onContainerReplaced={(id) => replaceActiveContainer(id)}
 				onDeleted={() => { activeWorkload = null; pendingContainerActivationId = null; activeRuntimeContainerSnapshot = null; void refreshData({ force: true }); }}
@@ -661,7 +778,9 @@
 				config={clientState.config}
 				loading={dataLoading}
 				onOpen={(id) => openSandbox(id)}
+				onDuplicateSandbox={(id) => handleDuplicateSandbox(id)}
 				onOpenContainer={(id) => openContainer(id)}
+				onDuplicateContainer={(id) => handleDuplicateContainer(id)}
 				onRestart={(id) => void handleRestart(id)}
 				onReset={(id) => void handleReset(id)}
 				onResetContainer={(id) => void handleResetContainer(id)}

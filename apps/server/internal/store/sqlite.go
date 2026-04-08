@@ -32,6 +32,7 @@ type Sandbox struct {
 	WorkerID      string
 	WorkspaceDir  string
 	RepoURL       string
+	PortSpecs     []string
 	Status        string
 	OwnerID       string
 	OwnerUsername string
@@ -202,6 +203,9 @@ CREATE INDEX IF NOT EXISTS idx_runtime_workers_last_heartbeat_at ON runtime_work
 	if err := s.ensureColumn(ctx, "sandboxes", "proxy_config_json", "TEXT NOT NULL DEFAULT '{}'"); err != nil {
 		return err
 	}
+	if err := s.ensureColumn(ctx, "sandboxes", "port_specs_json", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -256,11 +260,15 @@ func (s *SQLiteStore) CreateSandbox(ctx context.Context, sandbox Sandbox) error 
 	if err != nil {
 		return err
 	}
+	portSpecsJSON, err := marshalStringSlice(sandbox.PortSpecs)
+	if err != nil {
+		return fmt.Errorf("marshal sandbox port specs: %w", err)
+	}
 
 	_, err = s.db.ExecContext(
 		ctx,
-		`INSERT INTO sandboxes (id, name, image, container_id, worker_id, workspace_dir, repo_url, status, owner_id, owner_username, proxy_config_json, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO sandboxes (id, name, image, container_id, worker_id, workspace_dir, repo_url, port_specs_json, status, owner_id, owner_username, proxy_config_json, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sandbox.ID,
 		sandbox.Name,
 		sandbox.Image,
@@ -268,6 +276,7 @@ func (s *SQLiteStore) CreateSandbox(ctx context.Context, sandbox Sandbox) error 
 		normalizeWorkerID(sandbox.WorkerID),
 		sandbox.WorkspaceDir,
 		sandbox.RepoURL,
+		portSpecsJSON,
 		sandbox.Status,
 		sandbox.OwnerID,
 		sandbox.OwnerUsername,
@@ -284,7 +293,7 @@ func (s *SQLiteStore) CreateSandbox(ctx context.Context, sandbox Sandbox) error 
 
 func (s *SQLiteStore) ListSandboxes(ctx context.Context) ([]Sandbox, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, image, container_id, worker_id, workspace_dir, repo_url, status, owner_id, owner_username, proxy_config_json, created_at, updated_at
+		SELECT id, name, image, container_id, worker_id, workspace_dir, repo_url, port_specs_json, status, owner_id, owner_username, proxy_config_json, created_at, updated_at
 		FROM sandboxes
 		ORDER BY created_at DESC`)
 	if err != nil {
@@ -311,7 +320,7 @@ func (s *SQLiteStore) ListSandboxes(ctx context.Context) ([]Sandbox, error) {
 func (s *SQLiteStore) GetSandbox(ctx context.Context, sandboxID string) (Sandbox, error) {
 	row := s.db.QueryRowContext(
 		ctx,
-		`SELECT id, name, image, container_id, worker_id, workspace_dir, repo_url, status, owner_id, owner_username, proxy_config_json, created_at, updated_at
+		`SELECT id, name, image, container_id, worker_id, workspace_dir, repo_url, port_specs_json, status, owner_id, owner_username, proxy_config_json, created_at, updated_at
 		 FROM sandboxes
 		 WHERE id = ?`,
 		sandboxID,
@@ -431,6 +440,7 @@ type sandboxScanner interface {
 
 func scanSandbox(scanner sandboxScanner) (Sandbox, error) {
 	var sandbox Sandbox
+	var portSpecsJSON string
 	var proxyConfigJSON string
 	if err := scanner.Scan(
 		&sandbox.ID,
@@ -440,6 +450,7 @@ func scanSandbox(scanner sandboxScanner) (Sandbox, error) {
 		&sandbox.WorkerID,
 		&sandbox.WorkspaceDir,
 		&sandbox.RepoURL,
+		&portSpecsJSON,
 		&sandbox.Status,
 		&sandbox.OwnerID,
 		&sandbox.OwnerUsername,
@@ -452,6 +463,12 @@ func scanSandbox(scanner sandboxScanner) (Sandbox, error) {
 		}
 		return Sandbox{}, fmt.Errorf("scan sandbox row: %w", err)
 	}
+
+	portSpecs, err := unmarshalStringSlice(portSpecsJSON)
+	if err != nil {
+		return Sandbox{}, fmt.Errorf("unmarshal sandbox port specs: %w", err)
+	}
+	sandbox.PortSpecs = portSpecs
 
 	proxyConfig, err := unmarshalSandboxProxyConfig(proxyConfigJSON)
 	if err != nil {
@@ -517,6 +534,32 @@ func parseSandboxProxyConfigPort(raw string) (int, bool) {
 		return 0, false
 	}
 	return port, true
+}
+
+func marshalStringSlice(values []string) (string, error) {
+	if len(values) == 0 {
+		return "[]", nil
+	}
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+func unmarshalStringSlice(raw string) ([]string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, nil
+	}
+	var values []string
+	if err := json.Unmarshal([]byte(trimmed), &values); err != nil {
+		return nil, err
+	}
+	if len(values) == 0 {
+		return nil, nil
+	}
+	return values, nil
 }
 
 func (s *SQLiteStore) UpsertRuntimeWorker(ctx context.Context, worker RuntimeWorker) error {

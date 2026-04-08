@@ -180,6 +180,7 @@ export interface ContainerSummary {
 	project_name?: string;
 	service_name?: string;
 	resettable: boolean;
+	port_specs?: string[];
 	ports?: PortSummary[];
 	preview_urls?: PreviewUrl[];
 }
@@ -233,6 +234,7 @@ export interface Sandbox {
 	status: string;
 	owner_username?: string;
 	proxy_config?: Record<string, SandboxPortProxyConfig>;
+	port_specs?: string[];
 	ports?: PortSummary[];
 	preview_urls?: PreviewUrl[];
 	created_at: number;
@@ -367,6 +369,25 @@ const StringRecordSchema: Schema.Schema<Record<string, string>> = Schema.Record(
 	value: Schema.String
 }) as unknown as Schema.Schema<Record<string, string>>;
 
+const ContainerSummarySchema: Schema.Schema<ContainerSummary> = Schema.Struct({
+	id: Schema.String,
+	container_id: Schema.String,
+	worker_id: Schema.optional(Schema.String),
+	names: Schema.Array(Schema.String),
+	image: Schema.String,
+	state: Schema.String,
+	status: Schema.String,
+	created: Schema.Number,
+	labels: StringRecordSchema,
+	workload_kind: Schema.optional(Schema.String),
+	project_name: Schema.optional(Schema.String),
+	service_name: Schema.optional(Schema.String),
+	resettable: Schema.Boolean,
+	port_specs: Schema.optional(Schema.Array(Schema.String)),
+	ports: Schema.optional(Schema.Array(PortSummarySchema)),
+	preview_urls: Schema.optional(Schema.Array(PreviewUrlSchema))
+}) as unknown as Schema.Schema<ContainerSummary>;
+
 const SandboxPortCORSConfigSchema: Schema.Schema<SandboxPortCORSConfig> = Schema.Struct({
 	allow_origins: Schema.optional(Schema.Array(Schema.String)),
 	allow_methods: Schema.optional(Schema.Array(Schema.String)),
@@ -406,6 +427,7 @@ const SandboxSchema: Schema.Schema<Sandbox> = Schema.Struct({
 	status: Schema.String,
 	owner_username: Schema.optional(Schema.String),
 	proxy_config: Schema.optional(SandboxProxyConfigSchema),
+	port_specs: Schema.optional(Schema.Array(Schema.String)),
 	ports: Schema.optional(Schema.Array(PortSummarySchema)),
 	preview_urls: Schema.optional(Schema.Array(PreviewUrlSchema)),
 	created_at: Schema.Number,
@@ -1116,7 +1138,11 @@ export const execInContainer = (
 export const listContainers = (
 	config: ApiConfig
 ): Effect.Effect<ContainerSummary[], ApiFailure, HttpClient.HttpClient> =>
-	requestJson(config, HttpClientRequest.get("/api/containers"));
+	requestJson(
+		config,
+		HttpClientRequest.get("/api/containers"),
+		Schema.Array(ContainerSummarySchema) as unknown as Schema.Schema<ContainerSummary[]>
+	);
 
 export const stopContainer = (
 	config: ApiConfig,

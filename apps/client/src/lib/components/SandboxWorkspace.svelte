@@ -49,6 +49,7 @@
 		showTerminal = true,
 		config,
 		onBack,
+		onDuplicate,
 		onRefresh,
 		onContainerReplaced,
 		onDeleted
@@ -59,6 +60,7 @@
 		showTerminal?: boolean;
 		config: ApiConfig;
 		onBack: () => void;
+		onDuplicate: () => void;
 		onRefresh: () => Promise<void> | void;
 		onContainerReplaced: (id: string) => void;
 		onDeleted: () => void;
@@ -748,6 +750,9 @@
 				</div>
 			{/if}
 			<div class="ws-actions">
+				<button class="action-btn" type="button" onclick={onDuplicate} disabled={actionLoading !== null}>
+					Duplicate
+				</button>
 				<button class="action-btn" type="button" onclick={() => void handleAction("restart")} disabled={actionLoading !== null}>
 					{actionLoading === "restart" ? "..." : "Restart"}
 				</button>

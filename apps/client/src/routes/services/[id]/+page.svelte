@@ -4,7 +4,8 @@
 	import { authController, checkHealth, signOut } from "$lib/auth-controller.svelte";
 	import PageShell from "$lib/components/PageShell.svelte";
 	import SandboxWorkspace from "$lib/components/SandboxWorkspace.svelte";
-	import { clientState } from "$lib/stores.svelte";
+	import { buildContainerDuplicateDraft } from "$lib/duplicate-drafts";
+	import { clientState, setPendingDuplicateCreateDraft } from "$lib/stores.svelte";
 	import {
 		formatApiFailure,
 		listContainers,
@@ -173,6 +174,13 @@
 				showTerminal={false}
 				config={clientState.config}
 				onBack={() => void goto("/")}
+				onDuplicate={() => {
+					if (!runtimeContainer) {
+						return;
+					}
+					setPendingDuplicateCreateDraft(buildContainerDuplicateDraft(runtimeContainer));
+					void goto("/");
+				}}
 				onRefresh={() => refreshData({ showLoading: false, notifyOnError: true })}
 				onContainerReplaced={(id) => { void goto(`/services/${encodeURIComponent(id)}`); }}
 				onDeleted={() => { void goto("/"); }}

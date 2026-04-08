@@ -14,10 +14,12 @@
 		isSelected,
 		showReset = true,
 		showActions = true,
+		showDuplicate = true,
 		deleteLabel = "Delete",
 		deleteTitle = "Delete workload",
 		animDelay = 0,
 		onOpen,
+		onDuplicate,
 		onRestart,
 		onReset,
 		onStop,
@@ -34,10 +36,12 @@
 		isSelected: boolean;
 		showReset?: boolean;
 		showActions?: boolean;
+		showDuplicate?: boolean;
 		deleteLabel?: string;
 		deleteTitle?: string;
 		animDelay?: number;
 		onOpen: () => void;
+		onDuplicate: () => void;
 		onRestart: () => void;
 		onReset: () => void;
 		onStop: () => void;
@@ -181,6 +185,22 @@
 			<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
 			Open
 		</button>
+		{#if showDuplicate}
+			<button
+				class="menu-item"
+				role="menuitem"
+				type="button"
+				disabled={actionInProgress !== null}
+				onclick={(e) => {
+					e.stopPropagation();
+					menuOpen = false;
+					onDuplicate();
+				}}
+			>
+				<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+				Duplicate
+			</button>
+		{/if}
 		<button
 			class="menu-item"
 			role="menuitem"

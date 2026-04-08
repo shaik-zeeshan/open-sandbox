@@ -1,6 +1,6 @@
 import { browser } from "$app/environment";
 import { invalidateAllApiCachesSync } from "$lib/api-cache";
-import type { ApiConfig } from "$lib/api";
+import type { ApiConfig, SandboxPortProxyConfig } from "$lib/api";
 import { readStorageItem, writeStorageItem } from "$lib/client/browser";
 
 const BASE_URL_KEY = "open-sandbox.base-url";
@@ -45,6 +45,16 @@ const writeStorage = (key: string, value: string): void => {
 	writeStorageItem(key, value);
 };
 
+export interface PendingDuplicateCreateDraft {
+	name: string;
+	image: string;
+	repoUrl: string;
+	branch: string;
+	workdir: string;
+	ports: string;
+	proxyConfig: Record<string, SandboxPortProxyConfig>;
+}
+
 class ClientState {
 	baseUrl = $state(readStorage(BASE_URL_KEY, DEFAULT_BASE_URL));
 	token = $state("");
@@ -54,6 +64,7 @@ class ClientState {
 	tokenExpiresAt = $state<number | null>(null);
 	authResolved = $state(false);
 	authenticated = $state(false);
+	pendingDuplicateCreateDraft = $state<PendingDuplicateCreateDraft | null>(null);
 
 	get config(): ApiConfig {
 		return {
@@ -65,9 +76,28 @@ class ClientState {
 	get isAuthenticated(): boolean {
 		return this.authenticated;
 	}
+
 }
 
 export const clientState = new ClientState();
+
+export const setPendingDuplicateCreateDraft = (draft: PendingDuplicateCreateDraft): void => {
+	clientState.pendingDuplicateCreateDraft = draft;
+};
+
+export const clearPendingDuplicateCreateDraft = (): void => {
+	clientState.pendingDuplicateCreateDraft = null;
+};
+
+export const getPendingDuplicateCreateDraft = (): PendingDuplicateCreateDraft | null => {
+	return clientState.pendingDuplicateCreateDraft;
+};
+
+export const consumePendingDuplicateCreateDraft = (): PendingDuplicateCreateDraft | null => {
+	const draft = clientState.pendingDuplicateCreateDraft;
+	clientState.pendingDuplicateCreateDraft = null;
+	return draft;
+};
 
 export const setBaseUrl = (value: string): void => {
 	invalidateAllApiCachesSync();

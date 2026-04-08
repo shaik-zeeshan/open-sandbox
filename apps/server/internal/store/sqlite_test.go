@@ -133,6 +133,41 @@ func TestCreateSandboxDefaultsWorkerIDToLocal(t *testing.T) {
 	}
 }
 
+func TestSandboxPortSpecsRoundTrip(t *testing.T) {
+	s := newSQLiteStoreForTest(t)
+
+	if err := s.CreateSandbox(t.Context(), Sandbox{
+		ID:            "sb-ports-1",
+		Name:          "ports-test",
+		Image:         "alpine:3.20",
+		ContainerID:   "ctr-ports-1",
+		WorkspaceDir:  "/workspace",
+		RepoURL:       "",
+		PortSpecs:     []string{"127.0.0.1:8080:80", "3000"},
+		Status:        "running",
+		OwnerID:       "user-1",
+		OwnerUsername: "alice",
+	}); err != nil {
+		t.Fatalf("failed to create sandbox: %v", err)
+	}
+
+	stored, err := s.GetSandbox(t.Context(), "sb-ports-1")
+	if err != nil {
+		t.Fatalf("failed to read sandbox: %v", err)
+	}
+	if len(stored.PortSpecs) != 2 || stored.PortSpecs[0] != "127.0.0.1:8080:80" || stored.PortSpecs[1] != "3000" {
+		t.Fatalf("expected persisted port specs, got %+v", stored.PortSpecs)
+	}
+
+	list, err := s.ListSandboxes(t.Context())
+	if err != nil {
+		t.Fatalf("failed to list sandboxes: %v", err)
+	}
+	if len(list) != 1 || len(list[0].PortSpecs) != 2 {
+		t.Fatalf("expected listed port specs, got %+v", list)
+	}
+}
+
 func TestRuntimeWorkerLifecycle(t *testing.T) {
 	s := newSQLiteStoreForTest(t)
 	now := time.Now().Unix()
