@@ -2253,7 +2253,9 @@ func buildAllowOriginFunc(allowedOrigins []string) func(string) bool {
 func buildAllowOriginWithContextFunc(allowedOrigins []string) func(*gin.Context, string) bool {
 	allowOrigin := buildAllowOriginFunc(allowedOrigins)
 	return func(c *gin.Context, origin string) bool {
-		return allowOrigin(origin) || requestOriginMatchesForwardedHost(c.Request, origin)
+		return allowOrigin(origin) ||
+			requestOriginMatchesForwardedHost(c.Request, origin) ||
+			requestOriginHostMatchesForwardedHost(c.Request, origin)
 	}
 }
 

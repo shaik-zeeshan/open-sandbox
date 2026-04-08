@@ -48,6 +48,23 @@ func TestProxyAuthorizeRejectsMissingCredentials(t *testing.T) {
 	}
 }
 
+func TestProxyAuthorizeAllowsHTTPSOriginWhenForwardedProtoIsHTTP(t *testing.T) {
+	s := newTestServerWithStore(&mockDocker{}, &mockSandboxStore{})
+	req := httptest.NewRequest(http.MethodGet, "/auth/proxy/authorize", nil)
+	req.Host = "sbx-sandbox-1-p3000.preview.shaiks.space"
+	req.Header.Set("Origin", "https://sbx-sandbox-1-p3000.preview.shaiks.space")
+	req.Header.Set("X-Forwarded-Host", "sbx-sandbox-1-p3000.preview.shaiks.space")
+	req.Header.Set("X-Forwarded-Proto", "http")
+	setSandboxProxyHeaders(req, "sandbox-1", 3000)
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 instead of CORS 403, got %d (%s)", w.Code, w.Body.String())
+	}
+}
+
 func TestProxyAuthorizeAllowsOwnedSandboxPublishedPort(t *testing.T) {
 	original := commandRunner
 	defer func() { commandRunner = original }()
