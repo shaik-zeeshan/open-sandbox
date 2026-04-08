@@ -1489,8 +1489,8 @@ func parseSandboxPortProxyConfigs(input map[string]*SandboxPortProxyConfig) map[
 		if cfg == nil {
 			continue
 		}
-		var port int
-		if _, err := fmt.Sscanf(portStr, "%d", &port); err != nil || port <= 0 {
+		port, ok := parseProxyConfigPort(portStr)
+		if !ok {
 			continue
 		}
 		spc := traefikcfg.ServiceProxyConfig{
@@ -1514,6 +1514,14 @@ func parseSandboxPortProxyConfigs(input map[string]*SandboxPortProxyConfig) map[
 		return nil
 	}
 	return result
+}
+
+func parseProxyConfigPort(raw string) (int, bool) {
+	port, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || port <= 0 {
+		return 0, false
+	}
+	return port, true
 }
 
 func (s *Server) previewURLsForContainer(item ContainerSummary) []PreviewURL {

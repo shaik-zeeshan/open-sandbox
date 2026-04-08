@@ -19,9 +19,12 @@
 	type KVRow = { id: number; key: string; val: string };
 	let nextId = 0;
 
-	function parseHeaders(map: Record<string, string> | undefined): KVRow[] {
+	function parseHeaders(map: Record<string, string> | undefined, previousRows: KVRow[] = []): KVRow[] {
 		if (!map) return [];
-		return Object.entries(map).map(([key, val]) => ({ id: nextId++, key, val }));
+		return Object.entries(map).map(([key, val], index) => {
+			const existing = previousRows[index];
+			return existing ? { id: existing.id, key, val } : { id: nextId++, key, val };
+		});
 	}
 
 	function rowsToMap(rows: KVRow[]): Record<string, string> | undefined {
@@ -32,8 +35,8 @@
 
 	function applyValue(nextValue: SandboxPortProxyConfig | null): void {
 		const next = nextValue ?? {};
-		reqRows = parseHeaders(next.request_headers);
-		respRows = parseHeaders(next.response_headers);
+		reqRows = parseHeaders(next.request_headers, reqRows);
+		respRows = parseHeaders(next.response_headers, respRows);
 		pathStrip = next.path_prefix_strip ?? "";
 		skipAuth = next.skip_auth ?? false;
 		corsEnabled = next.cors != null;

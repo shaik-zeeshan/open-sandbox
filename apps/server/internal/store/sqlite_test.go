@@ -342,3 +342,16 @@ func TestUpdateSandboxProxyConfig(t *testing.T) {
 		t.Fatalf("expected cleared proxy config, got %+v", cleared.ProxyConfig)
 	}
 }
+
+func TestUnmarshalSandboxProxyConfigRejectsMalformedPortKeys(t *testing.T) {
+	got, err := unmarshalSandboxProxyConfig(`{"3000/tcp":{"PathPrefixStrip":"/bad"},"3000abc":{"PathPrefixStrip":"/bad"}," 8080 ":{"PathPrefixStrip":"/api"}}`)
+	if err != nil {
+		t.Fatalf("unmarshal sandbox proxy config: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected only strictly numeric ports to be accepted, got %+v", got)
+	}
+	if got[8080].PathPrefixStrip != "/api" {
+		t.Fatalf("expected parsed config for port 8080, got %+v", got[8080])
+	}
+}

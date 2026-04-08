@@ -2553,6 +2553,27 @@ func TestUpdateSandboxProxyConfigEndpointAllowsClearingConfig(t *testing.T) {
 	}
 }
 
+func TestParseSandboxPortProxyConfigsRejectsMalformedPortKeys(t *testing.T) {
+	got := parseSandboxPortProxyConfigs(map[string]*SandboxPortProxyConfig{
+		"3000/tcp": {
+			SkipAuth: true,
+		},
+		"3000abc": {
+			RequestHeaders: map[string]string{"X-Test": "bad"},
+		},
+		" 8080 ": {
+			PathPrefixStrip: " /api ",
+		},
+	})
+
+	if len(got) != 1 {
+		t.Fatalf("expected only strictly numeric ports to be accepted, got %+v", got)
+	}
+	if got[8080].PathPrefixStrip != "/api" {
+		t.Fatalf("expected trimmed config for port 8080, got %+v", got[8080])
+	}
+}
+
 func TestDeleteSandboxRemovesRecordWhenContainerAlreadyMissing(t *testing.T) {
 	deletedSandboxID := ""
 	m := &mockDocker{

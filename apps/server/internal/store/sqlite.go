@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -501,13 +502,21 @@ func unmarshalSandboxProxyConfig(raw string) (map[int]traefikcfg.ServiceProxyCon
 		return nil, fmt.Errorf("unmarshal sandbox proxy config: %w", err)
 	}
 	for k, v := range strKeyed {
-		var port int
-		if _, scanErr := fmt.Sscanf(k, "%d", &port); scanErr != nil || port <= 0 {
+		port, ok := parseSandboxProxyConfigPort(k)
+		if !ok {
 			continue
 		}
 		result[port] = v
 	}
 	return result, nil
+}
+
+func parseSandboxProxyConfigPort(raw string) (int, bool) {
+	port, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || port <= 0 {
+		return 0, false
+	}
+	return port, true
 }
 
 func (s *SQLiteStore) UpsertRuntimeWorker(ctx context.Context, worker RuntimeWorker) error {
