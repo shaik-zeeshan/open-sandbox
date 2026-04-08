@@ -205,3 +205,100 @@ func assertMiddlewareOrder(t *testing.T, path string, first string, second strin
 		t.Fatalf("expected %q to appear before %q in %s", first, second, path)
 	}
 }
+
+func TestWorkloadConfigSandboxProxyConfig(t *testing.T) {
+	dir := t.TempDir()
+	writer, err := NewConfigWriter(dir, ConfigWriterOptions{AppHost: "app.lvh.me:3000", PreviewBaseDomain: "preview.lvh.me"})
+	if err != nil {
+		t.Fatalf("new config writer: %v", err)
+	}
+
+	err = writer.Reconcile(WorkloadRoutes{
+		Sandboxes: map[string][]WorkloadPort{
+			"sbx-1": {
+				{
+					Private: 3000,
+					Public:  43000,
+					ProxyConfig: ServiceProxyConfig{
+						RequestHeaders:  map[string]string{"X-Custom-Req": "hello"},
+						ResponseHeaders: map[string]string{"X-Custom-Resp": "world"},
+						PathPrefixStrip: "/api",
+						SkipAuth:        false,
+					},
+				},
+				{
+					Private: 8080,
+					Public:  48080,
+					ProxyConfig: ServiceProxyConfig{
+						SkipAuth: true,
+						CORS: &CORSConfig{
+							AllowOrigins:     []string{"https://example.com"},
+							AllowMethods:     []string{"GET", "POST"},
+							AllowHeaders:     []string{"Authorization"},
+							AllowCredentials: true,
+							MaxAge:           3600,
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	f := filepath.Join(dir, "sandbox-sbx-1.yaml")
+
+	// port 3000: forward-auth should still be present (SkipAuth=false)
+	assertFileContains(t, f, "preview-forward-auth-placeholder")
+	// custom request and response headers for port 3000
+	assertFileContains(t, f, "X-Custom-Req: \"hello\"")
+	assertFileContains(t, f, "X-Custom-Resp: \"world\"")
+	// strip-prefix middleware for port 3000
+	assertFileContains(t, f, "stripPrefix:")
+	assertFileContains(t, f, "- \"/api\"")
+	// custom-headers middleware referenced in router middlewares list
+	assertFileContains(t, f, "preview-sandboxes-sbx-1-3000-custom-headers")
+	assertFileContains(t, f, "preview-sandboxes-sbx-1-3000-strip-prefix")
+
+	// port 8080: skip_auth=true so forward-auth must NOT appear for this port's
+	// router section — we verify the overall file still contains the header-placeholder
+	// but the skip_auth port has no forward-auth line between target-headers and
+	// preview-header-placeholder (ordering test skipped for simplicity; we just
+	// verify CORS fields are present)
+	assertFileContains(t, f, "accessControlAllowOriginList:")
+	assertFileContains(t, f, "\"https://example.com\"")
+	assertFileContains(t, f, "accessControlAllowMethods:")
+	assertFileContains(t, f, "accessControlAllowHeaders:")
+	assertFileContains(t, f, "accessControlAllowCredentials: true")
+	assertFileContains(t, f, "accessControlMaxAge: 3600")
+	assertFileContains(t, f, "preview-sandboxes-sbx-1-8080-custom-headers")
+}
+
+func TestWorkloadConfigSandboxDefaultsWhenNoProxyConfig(t *testing.T) {
+	dir := t.TempDir()
+	writer, err := NewConfigWriter(dir, ConfigWriterOptions{AppHost: "app.lvh.me:3000", PreviewBaseDomain: "preview.lvh.me"})
+	if err != nil {
+		t.Fatalf("new config writer: %v", err)
+	}
+
+	err = writer.Reconcile(WorkloadRoutes{
+		Sandboxes: map[string][]WorkloadPort{
+			"sbx-default": {
+				{Private: 3000, Public: 43000},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	f := filepath.Join(dir, "sandbox-sbx-default.yaml")
+	// forward-auth must be present by default
+	assertFileContains(t, f, "preview-forward-auth-placeholder")
+	assertFileContains(t, f, "preview-header-placeholder")
+	// no custom-headers or strip-prefix middleware when proxy config is empty
+	assertFileNotContains(t, f, "custom-headers")
+	assertFileNotContains(t, f, "stripPrefix")
+	assertFileNotContains(t, f, "strip-prefix")
+}

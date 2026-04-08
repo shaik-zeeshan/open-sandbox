@@ -355,6 +355,8 @@ body {
 }
 
 /* ─── Checkbox ───────────────────────────────────────────────────────────────── */
+/* Custom checkboxes are handled by Checkbox.svelte.
+   .checkbox-label is kept as a layout helper for any wrapper elements. */
 .checkbox-label {
 	display: inline-flex;
 	align-items: center;
@@ -370,16 +372,6 @@ body {
 
 .checkbox-label:hover {
 	color: var(--text-primary);
-}
-
-.checkbox-label input[type="checkbox"] {
-	width: 13px;
-	height: 13px;
-	accent-color: var(--text-primary);
-	cursor: pointer;
-	flex-shrink: 0;
-	vertical-align: middle;
-	margin: 0;
 }
 
 /* ─── Animations ─────────────────────────────────────────────────────────────── */

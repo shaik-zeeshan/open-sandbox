@@ -71,6 +71,7 @@ type SandboxStore interface {
 	CreateSandbox(ctx context.Context, sandbox store.Sandbox) error
 	ListSandboxes(ctx context.Context) ([]store.Sandbox, error)
 	GetSandbox(ctx context.Context, sandboxID string) (store.Sandbox, error)
+	UpdateSandboxProxyConfig(ctx context.Context, sandboxID string, proxyConfig map[int]traefikcfg.ServiceProxyConfig) error
 	UpdateSandboxStatus(ctx context.Context, sandboxID string, status string) error
 	UpdateSandboxStatusByContainerID(ctx context.Context, containerID string, status string) error
 	DeleteSandbox(ctx context.Context, sandboxID string) error
@@ -415,6 +416,7 @@ func (s *Server) registerRoutes() {
 		api.POST("/sandboxes", s.createSandbox)
 		api.GET("/sandboxes", s.listSandboxes)
 		api.GET("/sandboxes/:id", s.getSandbox)
+		api.PATCH("/sandboxes/:id/proxy-config", s.updateSandboxProxyConfig)
 		api.POST("/sandboxes/:id/restart", s.restartSandbox)
 		api.POST("/sandboxes/:id/reset", s.resetSandbox)
 		api.POST("/sandboxes/:id/stop", s.stopSandbox)

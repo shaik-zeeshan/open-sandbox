@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -167,6 +168,15 @@ func (s *Server) currentTraefikRoutes(ctx context.Context) (traefikcfg.WorkloadR
 		ComposeProjects: map[string][]traefikcfg.ComposeServicePort{},
 	}
 
+	// Pre-load per-sandbox proxy configs so we can attach them to each port.
+	var sandboxProxyConfigs map[string]map[int]traefikcfg.ServiceProxyConfig
+	if s.sandboxStore != nil {
+		sandboxProxyConfigs = s.loadSandboxProxyConfigs(ctx)
+	}
+
+	// Pre-load per-project proxy configs so we can attach them to each port.
+	composeProxyConfigs := s.loadComposeProjectProxyConfigs(managedComposeProjects)
+
 	for _, item := range containers {
 		publishedPorts := publishedPorts(item.Ports)
 		if len(publishedPorts) == 0 {
@@ -174,7 +184,13 @@ func (s *Server) currentTraefikRoutes(ctx context.Context) (traefikcfg.WorkloadR
 		}
 
 		if sandboxID := strings.TrimSpace(item.Labels[labelOpenSandboxSandboxID]); sandboxID != "" {
-			routes.Sandboxes[sandboxID] = append(routes.Sandboxes[sandboxID], publishedPorts...)
+			portProxyConfigs := sandboxProxyConfigs[sandboxID]
+			for _, port := range publishedPorts {
+				if portProxyConfigs != nil {
+					port.ProxyConfig = portProxyConfigs[port.Private]
+				}
+				routes.Sandboxes[sandboxID] = append(routes.Sandboxes[sandboxID], port)
+			}
 			continue
 		}
 
@@ -197,16 +213,73 @@ func (s *Server) currentTraefikRoutes(ctx context.Context) (traefikcfg.WorkloadR
 			continue
 		}
 
+		// Look up per-service proxy config (zero value = defaults)
+		var svcProxyConfig traefikcfg.ServiceProxyConfig
+		if projectCfgs, ok := composeProxyConfigs[projectName]; ok {
+			svcProxyConfig = projectCfgs[serviceName]
+		}
+
 		for _, port := range publishedPorts {
 			routes.ComposeProjects[projectName] = append(routes.ComposeProjects[projectName], traefikcfg.ComposeServicePort{
-				Service: serviceName,
-				Private: port.Private,
-				Public:  port.Public,
+				Service:     serviceName,
+				Private:     port.Private,
+				Public:      port.Public,
+				ProxyConfig: svcProxyConfig,
 			})
 		}
 	}
 
 	return routes, nil
+}
+
+// loadSandboxProxyConfigs reads proxy config for all sandboxes from the store.
+// Returns a map of sandbox ID → (private port → ServiceProxyConfig).
+// Errors are silently ignored (worst outcome is missing custom headers).
+func (s *Server) loadSandboxProxyConfigs(ctx context.Context) map[string]map[int]traefikcfg.ServiceProxyConfig {
+	result := map[string]map[int]traefikcfg.ServiceProxyConfig{}
+	if s.sandboxStore == nil {
+		return result
+	}
+	sandboxes, err := s.sandboxStore.ListSandboxes(ctx)
+	if err != nil {
+		return result
+	}
+	for _, sb := range sandboxes {
+		if len(sb.ProxyConfig) > 0 {
+			result[sb.ID] = sb.ProxyConfig
+		}
+	}
+	return result
+}
+
+// loadComposeProjectProxyConfigs reads each managed compose file on disk and
+// parses the per-service x-open-sandbox proxy extension. It returns a map of
+// project name → service name → ServiceProxyConfig. Errors are silently
+// ignored (the worst outcome is missing custom headers, which is safe).
+func (s *Server) loadComposeProjectProxyConfigs(managedProjects map[string]struct{}) map[string]map[string]traefikcfg.ServiceProxyConfig {
+	result := map[string]map[string]traefikcfg.ServiceProxyConfig{}
+	if len(managedProjects) == 0 {
+		return result
+	}
+	composeRoot := strings.TrimSpace(s.workspaceRoot)
+	for projectName := range managedProjects {
+		composeFile := composeFilePathForProject(composeRoot, projectName)
+		content, err := os.ReadFile(composeFile)
+		if err != nil {
+			continue
+		}
+		cfgs := parseComposeServiceProxyConfigs(string(content))
+		if len(cfgs) > 0 {
+			result[projectName] = cfgs
+		}
+	}
+	return result
+}
+
+// composeFilePathForProject returns the expected path of the managed compose
+// file for a given project name under the workspace root.
+func composeFilePathForProject(workspaceRoot string, projectName string) string {
+	return strings.Join([]string{workspaceRoot, ".open-sandbox", "compose", projectName, "docker-compose.yml"}, string(os.PathSeparator))
 }
 
 func (s *Server) getTraefikRouteState(c *gin.Context) {

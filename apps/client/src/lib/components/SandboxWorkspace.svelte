@@ -9,6 +9,8 @@
 	} from "$lib/client/browser";
 	import { toast, type ToastKind } from "$lib/toast.svelte";
 	import SandboxTerminal from "$lib/components/SandboxTerminal.svelte";
+	import ProxyConfigEditor from "$lib/components/ProxyConfigEditor.svelte";
+	import Checkbox from "$lib/components/Checkbox.svelte";
 	import AnsiToHtml from "ansi-to-html";
 	import {
 		deleteSandbox,
@@ -24,8 +26,10 @@
 		runApiEffect,
 		saveContainerFile,
 		saveSandboxFile,
+		type SandboxPortProxyConfig,
 		stopContainer,
 		stopSandbox,
+		updateSandboxProxyConfig,
 		uploadContainerFile,
 		uploadSandboxFile,
 		type ApiConfig,
@@ -36,7 +40,7 @@
 	} from "$lib/api";
 	import { Context, Effect, Fiber, Layer, type Scope } from "effect";
 
-	type WorkspaceTab = "overview" | "terminal" | "files" | "logs";
+	type WorkspaceTab = "overview" | "terminal" | "files" | "logs" | "proxy";
 
 	let {
 		sandbox = null,
@@ -103,6 +107,17 @@
 	let actionLoading = $state<string | null>(null);
 	let deleteConfirm = $state(false);
 	let deleteConfirmTimer: TimeoutHandle | null = null;
+	let editableProxyConfig = $state<Record<string, SandboxPortProxyConfig>>({});
+	let savingProxyConfig = $state(false);
+
+	function cloneProxyConfig(
+		value: Record<string, SandboxPortProxyConfig> | undefined
+	): Record<string, SandboxPortProxyConfig> {
+		if (!value) {
+			return {};
+		}
+		return JSON.parse(JSON.stringify(value)) as Record<string, SandboxPortProxyConfig>;
+	}
 
 	function requestDelete(): void {
 		if (deleteConfirm) {
@@ -311,6 +326,10 @@
 		privatePort: number;
 	};
 
+	type EditablePreviewProxy = PreviewLink & {
+		config: SandboxPortProxyConfig | null;
+	};
+
 	const previewLinks = (entries?: PreviewUrl[]): PreviewLink[] =>
 		Array.from(
 			new Map(
@@ -377,6 +396,17 @@
 		return activeContainer?.resettable ?? false;
 	});
 	const canBrowseFiles = $derived(backingContainerId.length > 0);
+	const editablePreviews = $derived.by<EditablePreviewProxy[]>(() =>
+		workloadKind !== "sandbox"
+			? []
+			: previews.map((preview) => ({
+				...preview,
+				config: editableProxyConfig[String(preview.privatePort)] ?? null
+			}))
+	);
+	const proxyConfigDirty = $derived.by(
+		() => JSON.stringify(editableProxyConfig) !== JSON.stringify(cloneProxyConfig(sandbox?.proxy_config))
+	);
 
 	const formatDate = (unixSeconds: number): string =>
 		new Date(unixSeconds * 1000).toLocaleString(undefined, {
@@ -406,6 +436,12 @@
 		void tick().then(() => {
 			if (logsViewport) logsViewport.scrollTop = logsViewport.scrollHeight;
 		});
+	});
+
+	$effect(() => {
+		sandbox?.id;
+		sandbox?.updated_at;
+		editableProxyConfig = cloneProxyConfig(sandbox?.proxy_config);
 	});
 
 	const loadPathProgram = (pathToLoad: string): Effect.Effect<void, unknown> =>
@@ -585,6 +621,31 @@
 		logsFiber = launchedFiber;
 	}
 
+	async function saveProxySettings(): Promise<void> {
+		if (workloadKind !== "sandbox" || !sandbox || savingProxyConfig) {
+			return;
+		}
+
+		savingProxyConfig = true;
+		const toastId = toast.loading("Saving proxy settings...");
+		try {
+			const savedSandbox = await runApiEffect(
+				updateSandboxProxyConfig(config, sandbox.id, editableProxyConfig)
+			);
+			sandbox = savedSandbox;
+			toast.update(toastId, "ok", "Proxy settings saved.");
+			await Promise.resolve(onRefresh());
+		} catch (error) {
+			toast.update(toastId, "error", formatApiFailure(error));
+		} finally {
+			savingProxyConfig = false;
+		}
+	}
+
+	function clearProxySettings(): void {
+		editableProxyConfig = {};
+	}
+
 	async function handleAction(action: "restart" | "reset" | "stop" | "delete"): Promise<void> {
 		actionLoading = action;
 		try {
@@ -645,7 +706,8 @@
 		{ id: "overview", label: "Overview" },
 		...(showTerminal ? [{ id: "terminal" as const, label: "Terminal" }] : []),
 		{ id: "files", label: "Files" },
-		{ id: "logs", label: "Logs" }
+		{ id: "logs", label: "Logs" },
+		...(workloadKind === "sandbox" && editablePreviews.length > 0 ? [{ id: "proxy" as const, label: "Proxy" }] : [])
 	]);
 
 	$effect(() => {
@@ -764,7 +826,7 @@
 							</div>
 						</div>
 					{/if}
-				</div>
+					</div>
 
 				<!-- Quick actions -->
 				<div class="quick-actions">
@@ -791,6 +853,13 @@
 						<span class="quick-btn-label">Stream Logs</span>
 						<span class="quick-btn-sub">Live {workloadLabel} output</span>
 					</button>
+					{#if workloadKind === "sandbox" && editablePreviews.length > 0}
+						<button class="quick-btn" type="button" onclick={() => activeTab = "proxy"}>
+							<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
+							<span class="quick-btn-label">Proxy Settings</span>
+							<span class="quick-btn-sub">Configure headers, auth, CORS for preview ports</span>
+						</button>
+					{/if}
 				</div>
 			</div>
 		{/if}
@@ -923,10 +992,7 @@
 						<span class="section-label">Tail</span>
 						<input class="field" bind:value={logTail} />
 					</label>
-					<label class="checkbox-label">
-						<input type="checkbox" bind:checked={logFollow} />
-						Follow
-					</label>
+					<Checkbox bind:checked={logFollow} label="Follow" />
 					<div class="logs-btns">
 						<button class="btn-primary btn-sm" type="button" onclick={() => void startLogs()} disabled={streaming}>
 							{streaming ? "Streaming..." : "Start"}
@@ -963,6 +1029,52 @@
 							{/each}
 						{/if}
 					</div>
+				</div>
+			</div>
+		{/if}
+
+		<!-- Proxy settings -->
+		{#if activeTab === "proxy"}
+			<div class="proxy-view anim-fade-up">
+				<div class="proxy-view-header">
+					<div>
+						<h2 class="proxy-view-title">Per-port proxy settings</h2>
+						<p class="proxy-view-sub">Customize headers, auth, path stripping, and CORS for preview ports.</p>
+					</div>
+					<div class="proxy-view-actions">
+						<button class="btn-ghost btn-xs" type="button" onclick={clearProxySettings} disabled={savingProxyConfig || !proxyConfigDirty}>
+							Clear all
+						</button>
+						<button class="btn-primary btn-xs" type="button" onclick={() => void saveProxySettings()} disabled={savingProxyConfig || !proxyConfigDirty}>
+							{savingProxyConfig ? "Saving..." : "Save settings"}
+						</button>
+					</div>
+				</div>
+				<div class="proxy-port-list">
+					{#each editablePreviews as preview (preview.privatePort)}
+						<div class="proxy-port-block">
+							<div class="proxy-port-row">
+								<div class="proxy-port-label">
+									<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
+									Port <code class="inline-code">{preview.privatePort}</code>
+								</div>
+								<a class="proxy-port-link" href={preview.url} target="_blank" rel="noreferrer">Open preview</a>
+							</div>
+							<ProxyConfigEditor
+								value={preview.config}
+								onchange={(v: SandboxPortProxyConfig | null) => {
+									const key = String(preview.privatePort);
+									if (v === null) {
+										const next = { ...editableProxyConfig };
+										delete next[key];
+										editableProxyConfig = next;
+									} else {
+										editableProxyConfig = { ...editableProxyConfig, [key]: v };
+									}
+								}}
+							/>
+						</div>
+					{/each}
 				</div>
 			</div>
 		{/if}
@@ -1227,6 +1339,112 @@
 		transition: color 0.12s;
 	}
 	.port-chip:hover { color: var(--text-primary); }
+
+	.proxy-config-card {
+		gap: 0.9rem;
+	}
+
+	.proxy-config-head {
+		display: flex;
+		justify-content: space-between;
+		align-items: flex-start;
+		gap: 0.75rem;
+		flex-wrap: wrap;
+	}
+
+	.proxy-config-subtitle {
+		margin: 0.3rem 0 0;
+		font-family: var(--font-mono);
+		font-size: 0.66rem;
+		color: var(--text-muted);
+	}
+
+	.proxy-config-actions {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		flex-wrap: wrap;
+	}
+
+	/* Proxy tab view */
+	.proxy-view {
+		padding: 1.5rem;
+		display: flex;
+		flex-direction: column;
+		gap: 1.25rem;
+	}
+
+	.proxy-view-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: flex-start;
+		gap: 0.75rem;
+		flex-wrap: wrap;
+	}
+
+	.proxy-view-title {
+		margin: 0;
+		font-family: var(--font-display);
+		font-size: 1rem;
+		font-weight: 400;
+		font-style: italic;
+		color: var(--text-primary);
+		letter-spacing: -0.01em;
+	}
+
+	.proxy-view-sub {
+		margin: 0.3rem 0 0;
+		font-family: var(--font-mono);
+		font-size: 0.66rem;
+		color: var(--text-muted);
+	}
+
+	.proxy-view-actions {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		flex-wrap: wrap;
+	}
+
+	.proxy-port-list {
+		display: flex;
+		flex-direction: column;
+		gap: 0.9rem;
+	}
+
+	.proxy-port-block {
+		display: flex;
+		flex-direction: column;
+		gap: 0.45rem;
+	}
+
+	.proxy-port-row {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+	}
+
+	.proxy-port-label {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+		font-family: var(--font-mono);
+		font-size: 0.62rem;
+		color: var(--text-muted);
+	}
+
+	.proxy-port-link {
+		font-family: var(--font-mono);
+		font-size: 0.62rem;
+		color: var(--text-secondary);
+		text-decoration: none;
+	}
+
+	.proxy-port-link:hover {
+		color: var(--text-primary);
+	}
 
 	.quick-actions {
 		display: grid;

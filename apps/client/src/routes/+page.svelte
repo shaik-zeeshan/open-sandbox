@@ -35,7 +35,8 @@
 		type ComposeProjectPreview,
 		type ContainerSummary,
 		type ImageSummary,
-		type Sandbox
+		type Sandbox,
+		type SandboxPortProxyConfig
 	} from "$lib/api";
 	import { Effect } from "effect";
 	import { clientState, setAuthSession, setBaseUrl } from "$lib/stores.svelte";
@@ -176,6 +177,7 @@
 	let createBranch = $state("");
 	let createWorkdir = $state("");
 	let createPorts = $state("");
+	let createProxyConfig = $state<Record<string, SandboxPortProxyConfig>>({});
 	let createLoading = $state(false);
 
 	async function resolveSetupStatus(): Promise<void> {
@@ -426,13 +428,15 @@
 				repo_url: createRepoUrl.trim() || undefined,
 				branch: createBranch.trim() || undefined,
 				workdir: workdir || undefined,
-				ports: parseLines(createPorts)
+				ports: parseLines(createPorts),
+				proxy_config: Object.keys(createProxyConfig).length > 0 ? createProxyConfig : undefined
 			}));
 			showCreateForm = false;
 			createRepoUrl = "";
 			createBranch = "";
 			createWorkdir = "";
 			createPorts = "";
+			createProxyConfig = {};
 			await runProgram(invalidateWorkloadCaches(clientState.config));
 			await refreshData();
 			toast.update(toastId, "ok", "Sandbox created.");
@@ -675,6 +679,7 @@
 				bind:createBranch
 				bind:createWorkdir
 				bind:createPorts
+				bind:createProxyConfig
 				{createLoading}
 				createImageHref="/images"
 				onToggleCreate={toggleCreateForm}

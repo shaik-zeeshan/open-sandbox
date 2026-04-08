@@ -76,6 +76,74 @@ When `SANDBOX_WORKSPACE_DIR` is not set, the workspace root defaults to the curr
 - URL: `http://localhost:8080/swagger/index.html`
 - Use a Bearer token from `/auth/login` in requests.
 
+## Proxy customization
+
+Preview routes for sandboxes, managed containers, and compose services can be customized per port or per service. Customization is applied as Traefik middleware on the preview subdomain — the upstream container is unaffected.
+
+### Supported fields
+
+| Field | Type | Description |
+|---|---|---|
+| `request_headers` | `map[string]string` | Headers injected into every proxied request |
+| `response_headers` | `map[string]string` | Headers added to every proxied response |
+| `cors.allow_origins` | `[]string` | Allowed CORS origins |
+| `cors.allow_methods` | `[]string` | Allowed HTTP methods |
+| `cors.allow_headers` | `[]string` | Allowed request headers |
+| `cors.allow_credentials` | `bool` | Whether credentials are allowed |
+| `cors.max_age` | `int` | Preflight cache duration in seconds |
+| `path_prefix_strip` | `string` | Path prefix stripped before forwarding upstream |
+| `skip_auth` | `bool` | Skip sandbox forward-auth (makes preview public) |
+
+All fields are optional. A service or port with no config uses the default platform middleware (forward-auth + preview header injection).
+
+### Compose service proxy config
+
+Embed `x-open-sandbox.proxy` under each service in the compose YAML passed to `POST /api/compose/up`:
+
+```yaml
+services:
+  api:
+    image: myapp:latest
+    ports:
+      - "3000:3000"
+    x-open-sandbox:
+      proxy:
+        request_headers:
+          X-Real-Tenant: "acme"
+        response_headers:
+          X-Frame-Options: "DENY"
+        cors:
+          allow_origins:
+            - "https://app.example.com"
+          allow_methods: ["GET", "POST", "OPTIONS"]
+          allow_headers: ["Authorization", "Content-Type"]
+          allow_credentials: true
+          max_age: 3600
+        path_prefix_strip: "/api"
+        skip_auth: false
+
+  public-cdn:
+    image: nginx:latest
+    ports:
+      - "8080:80"
+    x-open-sandbox:
+      proxy:
+        skip_auth: true
+```
+
+### Sandbox per-port proxy config
+
+Supply `proxy_config` keyed by private port string in `POST /api/sandboxes`. Config is persisted with the sandbox record and applied to the Traefik route on every sync.
+
+See the [Create sandbox with proxy config](#create-sandbox-with-proxy-config) example below.
+
+### Limitations
+
+- Proxy config applies only to preview routes. Direct host-port access is not affected.
+- Header names are validated against RFC 7230 token rules; invalid names are silently dropped.
+- `path_prefix_strip` always receives a leading `/` even if omitted in input.
+- Only ports published to the host (`HOST:CONTAINER`) produce preview routes. Internal-only ports are not routable.
+
 ## API examples
 
 Set helper variables:
@@ -252,6 +320,40 @@ curl -X POST "$BASE_URL/api/git/clone" \
     "repo_url": "https://github.com/example/repo.git",
     "target_path": "/workspace/repo",
     "branch": "main"
+  }'
+```
+
+### Create sandbox with proxy config
+
+Attach per-port proxy customization via `proxy_config` when creating a sandbox. Keys are the private port number as a string.
+
+```bash
+curl -X POST "$BASE_URL/api/sandboxes" \
+  -H "$AUTH_HEADER" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "workspace",
+    "image": "node:20",
+    "ports": ["3000/tcp"],
+    "proxy_config": {
+      "3000": {
+        "request_headers": {
+          "X-Internal-Token": "secret"
+        },
+        "response_headers": {
+          "X-Content-Type-Options": "nosniff"
+        },
+        "cors": {
+          "allow_origins": ["https://app.example.com"],
+          "allow_methods": ["GET", "POST", "OPTIONS"],
+          "allow_headers": ["Authorization", "Content-Type"],
+          "allow_credentials": true,
+          "max_age": 3600
+        },
+        "path_prefix_strip": "/app",
+        "skip_auth": false
+      }
+    }
   }'
 ```
 
