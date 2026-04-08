@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { untrack } from "svelte";
 	/**
 	 * ProxyConfigEditor – editable proxy settings for a single service / port.
 	 * Emits config via the bindable `value` prop (null = no config).
@@ -33,20 +34,6 @@
 		return Object.fromEntries(entries.map(r => [r.key.trim(), r.val]));
 	}
 
-	function applyValue(nextValue: SandboxPortProxyConfig | null): void {
-		const next = nextValue ?? {};
-		reqRows = parseHeaders(next.request_headers, reqRows);
-		respRows = parseHeaders(next.response_headers, respRows);
-		pathStrip = next.path_prefix_strip ?? "";
-		skipAuth = next.skip_auth ?? false;
-		corsEnabled = next.cors != null;
-		corsOrigins = next.cors?.allow_origins?.join(", ") ?? "";
-		corsMethods = next.cors?.allow_methods?.join(", ") ?? "";
-		corsHeaders = next.cors?.allow_headers?.join(", ") ?? "";
-		corsCreds = next.cors?.allow_credentials ?? false;
-		corsMaxAge = String(next.cors?.max_age ?? "");
-	}
-
 	let reqRows    = $state<KVRow[]>([]);
 	let respRows   = $state<KVRow[]>([]);
 	let pathStrip  = $state("");
@@ -61,7 +48,21 @@
 	let corsMaxAge  = $state("");
 
 	$effect(() => {
-		applyValue(value);
+		const nextValue = value;
+		const previousReqRows = untrack(() => reqRows);
+		const previousRespRows = untrack(() => respRows);
+		const next = nextValue ?? {};
+
+		reqRows = parseHeaders(next.request_headers, previousReqRows);
+		respRows = parseHeaders(next.response_headers, previousRespRows);
+		pathStrip = next.path_prefix_strip ?? "";
+		skipAuth = next.skip_auth ?? false;
+		corsEnabled = next.cors != null;
+		corsOrigins = next.cors?.allow_origins?.join(", ") ?? "";
+		corsMethods = next.cors?.allow_methods?.join(", ") ?? "";
+		corsHeaders = next.cors?.allow_headers?.join(", ") ?? "";
+		corsCreds = next.cors?.allow_credentials ?? false;
+		corsMaxAge = String(next.cors?.max_age ?? "");
 	});
 
 	function splitCSV(s: string): string[] {
