@@ -13,20 +13,33 @@ import (
 	"sync"
 )
 
+// sortedStringMap returns the keys of a map[string]string in sorted order.
+// Used to produce deterministic YAML output.
+func sortedStringMap(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 const (
 	coreConfigFileName = "00-core.yaml"
 	hostGatewayURL     = "http://host.docker.internal"
 )
 
 type WorkloadPort struct {
-	Private int
-	Public  int
+	Private     int
+	Public      int
+	ProxyConfig ServiceProxyConfig
 }
 
 type ComposeServicePort struct {
-	Service string
-	Private int
-	Public  int
+	Service     string
+	Private     int
+	Public      int
+	ProxyConfig ServiceProxyConfig
 }
 
 type WorkloadRoutes struct {
@@ -248,8 +261,25 @@ func workloadConfig(workloadType string, workloadID string, ports []WorkloadPort
 		buf.WriteString("        - ")
 		buf.WriteString(targetHeadersName)
 		buf.WriteString("\n")
-		buf.WriteString("        - preview-forward-auth-placeholder\n")
+		// auth middleware: omit forward-auth if skip_auth is set
+		if !port.ProxyConfig.SkipAuth {
+			buf.WriteString("        - preview-forward-auth-placeholder\n")
+		}
 		buf.WriteString("        - preview-header-placeholder\n")
+		// custom headers middleware (request/response/CORS)
+		if !port.ProxyConfig.IsEmpty() {
+			customHeadersMWName := fmt.Sprintf("preview-%s-%s-%d-custom-headers", workloadType, safeID, port.Private)
+			buf.WriteString("        - ")
+			buf.WriteString(customHeadersMWName)
+			buf.WriteString("\n")
+		}
+		// path rewrite middleware
+		if strings.TrimSpace(port.ProxyConfig.PathPrefixStrip) != "" {
+			stripMWName := fmt.Sprintf("preview-%s-%s-%d-strip-prefix", workloadType, safeID, port.Private)
+			buf.WriteString("        - ")
+			buf.WriteString(stripMWName)
+			buf.WriteString("\n")
+		}
 		buf.WriteString("      priority: 200\n")
 	}
 
@@ -286,6 +316,95 @@ func workloadConfig(workloadType string, workloadID string, ports []WorkloadPort
 		buf.WriteString("          X-Open-Sandbox-Proxy-Private-Port: \"")
 		buf.WriteString(strconv.Itoa(port.Private))
 		buf.WriteString("\"\n")
+
+		// emit per-port custom headers middleware when any custom headers or CORS are set
+		if !port.ProxyConfig.IsEmpty() {
+			customHeadersMWName := fmt.Sprintf("preview-%s-%s-%d-custom-headers", workloadType, safeID, port.Private)
+			buf.WriteString("    ")
+			buf.WriteString(customHeadersMWName)
+			buf.WriteString(":\n")
+			buf.WriteString("      headers:\n")
+
+			// custom request headers
+			if len(port.ProxyConfig.RequestHeaders) > 0 {
+				buf.WriteString("        customRequestHeaders:\n")
+				for _, hk := range sortedStringMap(port.ProxyConfig.RequestHeaders) {
+					if !isValidHeaderName(hk) {
+						continue
+					}
+					buf.WriteString("          ")
+					buf.WriteString(hk)
+					buf.WriteString(": \"")
+					buf.WriteString(escapeYAMLDoubleQuotedString(port.ProxyConfig.RequestHeaders[hk]))
+					buf.WriteString("\"\n")
+				}
+			}
+
+			// custom response headers
+			if len(port.ProxyConfig.ResponseHeaders) > 0 {
+				buf.WriteString("        customResponseHeaders:\n")
+				for _, hk := range sortedStringMap(port.ProxyConfig.ResponseHeaders) {
+					if !isValidHeaderName(hk) {
+						continue
+					}
+					buf.WriteString("          ")
+					buf.WriteString(hk)
+					buf.WriteString(": \"")
+					buf.WriteString(escapeYAMLDoubleQuotedString(port.ProxyConfig.ResponseHeaders[hk]))
+					buf.WriteString("\"\n")
+				}
+			}
+
+			// CORS settings
+			if port.ProxyConfig.CORS != nil {
+				cors := port.ProxyConfig.CORS
+				if len(cors.AllowOrigins) > 0 {
+					buf.WriteString("        accessControlAllowOriginList:\n")
+					for _, origin := range cors.AllowOrigins {
+						buf.WriteString("          - \"")
+						buf.WriteString(escapeYAMLDoubleQuotedString(origin))
+						buf.WriteString("\"\n")
+					}
+				}
+				if len(cors.AllowMethods) > 0 {
+					buf.WriteString("        accessControlAllowMethods:\n")
+					for _, method := range cors.AllowMethods {
+						buf.WriteString("          - \"")
+						buf.WriteString(escapeYAMLDoubleQuotedString(method))
+						buf.WriteString("\"\n")
+					}
+				}
+				if len(cors.AllowHeaders) > 0 {
+					buf.WriteString("        accessControlAllowHeaders:\n")
+					for _, header := range cors.AllowHeaders {
+						buf.WriteString("          - \"")
+						buf.WriteString(escapeYAMLDoubleQuotedString(header))
+						buf.WriteString("\"\n")
+					}
+				}
+				if cors.AllowCredentials {
+					buf.WriteString("        accessControlAllowCredentials: true\n")
+				}
+				if cors.MaxAge > 0 {
+					buf.WriteString("        accessControlMaxAge: ")
+					buf.WriteString(strconv.Itoa(cors.MaxAge))
+					buf.WriteString("\n")
+				}
+			}
+		}
+
+		// strip prefix middleware
+		if prefix := strings.TrimSpace(port.ProxyConfig.PathPrefixStrip); prefix != "" {
+			stripMWName := fmt.Sprintf("preview-%s-%s-%d-strip-prefix", workloadType, safeID, port.Private)
+			buf.WriteString("    ")
+			buf.WriteString(stripMWName)
+			buf.WriteString(":\n")
+			buf.WriteString("      stripPrefix:\n")
+			buf.WriteString("        prefixes:\n")
+			buf.WriteString("          - \"")
+			buf.WriteString(escapeYAMLDoubleQuotedString(ensureLeadingSlash(prefix)))
+			buf.WriteString("\"\n")
+		}
 	}
 
 	return buf.Bytes()
@@ -347,8 +466,25 @@ func composeConfig(projectName string, ports []ComposeServicePort, previewBaseDo
 		buf.WriteString("        - ")
 		buf.WriteString(targetHeadersName)
 		buf.WriteString("\n")
-		buf.WriteString("        - preview-forward-auth-placeholder\n")
+		// auth middleware: omit forward-auth if skip_auth is set
+		if !item.ProxyConfig.SkipAuth {
+			buf.WriteString("        - preview-forward-auth-placeholder\n")
+		}
 		buf.WriteString("        - preview-header-placeholder\n")
+		// custom headers middleware (request/response/CORS)
+		if !item.ProxyConfig.IsEmpty() {
+			customHeadersMWName := fmt.Sprintf("preview-compose-%s-%s-%d-custom-headers", safeProject, safeService, item.Private)
+			buf.WriteString("        - ")
+			buf.WriteString(customHeadersMWName)
+			buf.WriteString("\n")
+		}
+		// path rewrite middleware
+		if strings.TrimSpace(item.ProxyConfig.PathPrefixStrip) != "" {
+			stripMWName := fmt.Sprintf("preview-compose-%s-%s-%d-strip-prefix", safeProject, safeService, item.Private)
+			buf.WriteString("        - ")
+			buf.WriteString(stripMWName)
+			buf.WriteString("\n")
+		}
 		buf.WriteString("      priority: 200\n")
 	}
 
@@ -388,25 +524,150 @@ func composeConfig(projectName string, ports []ComposeServicePort, previewBaseDo
 		buf.WriteString("          X-Open-Sandbox-Proxy-Private-Port: \"")
 		buf.WriteString(strconv.Itoa(item.Private))
 		buf.WriteString("\"\n")
+
+		// emit per-service custom headers middleware when any custom headers or CORS are set
+		if !item.ProxyConfig.IsEmpty() {
+			customHeadersMWName := fmt.Sprintf("preview-compose-%s-%s-%d-custom-headers", safeProject, safeService, item.Private)
+			buf.WriteString("    ")
+			buf.WriteString(customHeadersMWName)
+			buf.WriteString(":\n")
+			buf.WriteString("      headers:\n")
+
+			// custom request headers
+			if len(item.ProxyConfig.RequestHeaders) > 0 {
+				buf.WriteString("        customRequestHeaders:\n")
+				for _, hk := range sortedStringMap(item.ProxyConfig.RequestHeaders) {
+					if !isValidHeaderName(hk) {
+						continue
+					}
+					buf.WriteString("          ")
+					buf.WriteString(hk)
+					buf.WriteString(": \"")
+					buf.WriteString(escapeYAMLDoubleQuotedString(item.ProxyConfig.RequestHeaders[hk]))
+					buf.WriteString("\"\n")
+				}
+			}
+
+			// custom response headers
+			if len(item.ProxyConfig.ResponseHeaders) > 0 {
+				buf.WriteString("        customResponseHeaders:\n")
+				for _, hk := range sortedStringMap(item.ProxyConfig.ResponseHeaders) {
+					if !isValidHeaderName(hk) {
+						continue
+					}
+					buf.WriteString("          ")
+					buf.WriteString(hk)
+					buf.WriteString(": \"")
+					buf.WriteString(escapeYAMLDoubleQuotedString(item.ProxyConfig.ResponseHeaders[hk]))
+					buf.WriteString("\"\n")
+				}
+			}
+
+			// CORS settings
+			if item.ProxyConfig.CORS != nil {
+				cors := item.ProxyConfig.CORS
+				if len(cors.AllowOrigins) > 0 {
+					buf.WriteString("        accessControlAllowOriginList:\n")
+					for _, origin := range cors.AllowOrigins {
+						buf.WriteString("          - \"")
+						buf.WriteString(escapeYAMLDoubleQuotedString(origin))
+						buf.WriteString("\"\n")
+					}
+				}
+				if len(cors.AllowMethods) > 0 {
+					buf.WriteString("        accessControlAllowMethods:\n")
+					for _, method := range cors.AllowMethods {
+						buf.WriteString("          - \"")
+						buf.WriteString(escapeYAMLDoubleQuotedString(method))
+						buf.WriteString("\"\n")
+					}
+				}
+				if len(cors.AllowHeaders) > 0 {
+					buf.WriteString("        accessControlAllowHeaders:\n")
+					for _, header := range cors.AllowHeaders {
+						buf.WriteString("          - \"")
+						buf.WriteString(escapeYAMLDoubleQuotedString(header))
+						buf.WriteString("\"\n")
+					}
+				}
+				if cors.AllowCredentials {
+					buf.WriteString("        accessControlAllowCredentials: true\n")
+				}
+				if cors.MaxAge > 0 {
+					buf.WriteString("        accessControlMaxAge: ")
+					buf.WriteString(strconv.Itoa(cors.MaxAge))
+					buf.WriteString("\n")
+				}
+			}
+		}
+
+		// strip prefix middleware
+		if prefix := strings.TrimSpace(item.ProxyConfig.PathPrefixStrip); prefix != "" {
+			stripMWName := fmt.Sprintf("preview-compose-%s-%s-%d-strip-prefix", safeProject, safeService, item.Private)
+			buf.WriteString("    ")
+			buf.WriteString(stripMWName)
+			buf.WriteString(":\n")
+			buf.WriteString("      stripPrefix:\n")
+			buf.WriteString("        prefixes:\n")
+			buf.WriteString("          - \"")
+			buf.WriteString(escapeYAMLDoubleQuotedString(ensureLeadingSlash(prefix)))
+			buf.WriteString("\"\n")
+		}
 	}
 
 	return buf.Bytes()
 }
 
+// escapeYAMLDoubleQuotedString escapes characters that would break a YAML
+// double-quoted scalar: backslash and double-quote.
+func escapeYAMLDoubleQuotedString(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return s
+}
+
+// isValidHeaderName reports whether name is a valid HTTP header field-name as
+// defined by RFC 7230 §3.2 token: one or more visible ASCII characters
+// excluding the following separators: ( ) < > @ , ; : \ " / [ ] ? = { } SP HT
+// An empty name is also rejected.
+// This is used to guard user-supplied header keys before writing them as YAML
+// map keys, preventing colon-injection or newline-injection attacks.
+func isValidHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	const separators = "()<>@,;:\\\"/[]?={} \t"
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		// Must be printable ASCII (0x21–0x7E) and not a separator.
+		if c < 0x21 || c > 0x7E {
+			return false
+		}
+		if strings.IndexByte(separators, c) >= 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func normalizedWorkloadPorts(ports []WorkloadPort) []WorkloadPort {
-	byPrivate := map[int]int{}
+	type entry struct {
+		public int
+		config ServiceProxyConfig
+	}
+	byPrivate := map[int]entry{}
 	for _, port := range ports {
 		if port.Private <= 0 || port.Public <= 0 {
 			continue
 		}
-		if existing, ok := byPrivate[port.Private]; !ok || port.Public < existing {
-			byPrivate[port.Private] = port.Public
+		if existing, ok := byPrivate[port.Private]; !ok || port.Public < existing.public {
+			byPrivate[port.Private] = entry{public: port.Public, config: port.ProxyConfig}
 		}
 	}
 
 	normalized := make([]WorkloadPort, 0, len(byPrivate))
-	for private, public := range byPrivate {
-		normalized = append(normalized, WorkloadPort{Private: private, Public: public})
+	for private, e := range byPrivate {
+		normalized = append(normalized, WorkloadPort{Private: private, Public: e.public, ProxyConfig: e.config})
 	}
 	sort.Slice(normalized, func(i, j int) bool {
 		if normalized[i].Private != normalized[j].Private {
@@ -423,21 +684,25 @@ func normalizedComposePorts(ports []ComposeServicePort) []ComposeServicePort {
 		service string
 		private int
 	}
-	byKey := map[key]int{}
+	type entry struct {
+		public int
+		config ServiceProxyConfig
+	}
+	byKey := map[key]entry{}
 	for _, port := range ports {
 		service := strings.TrimSpace(port.Service)
 		if service == "" || port.Private <= 0 || port.Public <= 0 {
 			continue
 		}
 		k := key{service: service, private: port.Private}
-		if existing, ok := byKey[k]; !ok || port.Public < existing {
-			byKey[k] = port.Public
+		if existing, ok := byKey[k]; !ok || port.Public < existing.public {
+			byKey[k] = entry{public: port.Public, config: port.ProxyConfig}
 		}
 	}
 
 	normalized := make([]ComposeServicePort, 0, len(byKey))
-	for k, public := range byKey {
-		normalized = append(normalized, ComposeServicePort{Service: k.service, Private: k.private, Public: public})
+	for k, v := range byKey {
+		normalized = append(normalized, ComposeServicePort{Service: k.service, Private: k.private, Public: v.public, ProxyConfig: v.config})
 	}
 	sort.Slice(normalized, func(i, j int) bool {
 		if normalized[i].Service != normalized[j].Service {

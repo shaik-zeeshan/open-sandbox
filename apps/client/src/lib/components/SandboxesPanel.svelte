@@ -2,7 +2,8 @@
 	import SandboxCard from "./SandboxCard.svelte";
 	import Combobox from "./Combobox.svelte";
 	import PortsEditor from "./PortsEditor.svelte";
-	import { resolveApiUrl, type ApiConfig, type ComposeProjectPreview, type ContainerSummary, type ImageSummary, type PreviewUrl, type Sandbox } from "$lib/api";
+	import ProxyConfigEditor from "./ProxyConfigEditor.svelte";
+	import { resolveApiUrl, type ApiConfig, type ComposeProjectPreview, type ContainerSummary, type ImageSummary, type PreviewUrl, type Sandbox, type SandboxPortProxyConfig } from "$lib/api";
 
 	let {
 		sandboxes,
@@ -30,6 +31,7 @@
 		createBranch = $bindable(),
 		createWorkdir = $bindable(),
 		createPorts = $bindable(),
+		createProxyConfig = $bindable(),
 		createLoading,
 		createImageHref = "/images",
 		onToggleCreate,
@@ -61,6 +63,7 @@
 		createBranch: string;
 		createWorkdir: string;
 		createPorts: string;
+		createProxyConfig: Record<string, SandboxPortProxyConfig>;
 		createLoading: boolean;
 		createImageHref?: string;
 		onToggleCreate: () => void;
@@ -84,6 +87,20 @@
 	let workloadSearch = $state("");
 	let workloadKindFilter = $state<"all" | "sandbox" | "container" | "compose">("all");
 	let workloadStatusFilter = $state("all");
+
+	// Parse distinct container port numbers from createPorts string for per-port proxy config
+	const parsedProxyPorts = $derived.by(() => {
+		const lines = createPorts.split("\n").map((l: string) => l.trim()).filter(Boolean);
+		const ports: string[] = [];
+		for (const line of lines) {
+			const parts = line.split(":");
+			const containerPort = (parts[1] ?? parts[0] ?? "").trim();
+			if (containerPort.length > 0 && !ports.includes(containerPort)) {
+				ports.push(containerPort);
+			}
+		}
+		return ports;
+	});
 
 	// Inline validation state for the create drawer
 	let nameError = $state("");
@@ -794,6 +811,35 @@
 				</div>
 			</div>
 
+			<div class="form-section">
+				<span class="section-label form-section-title">Proxy settings <span class="opt">(optional)</span></span>
+				{#if parsedProxyPorts.length === 0}
+					<p class="field-help">Add port mappings above to configure per-port proxy settings.</p>
+				{:else}
+					{#each parsedProxyPorts as port}
+						<div class="proxy-port-block">
+							<div class="proxy-port-label">
+								<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
+								Port <code class="inline-code">{port}</code>
+							</div>
+							<ProxyConfigEditor
+								value={createProxyConfig[port] ?? null}
+								onchange={(v: SandboxPortProxyConfig | null) => {
+									if (v === null) {
+										const next = { ...createProxyConfig };
+										delete next[port];
+										createProxyConfig = next;
+									} else {
+										createProxyConfig = { ...createProxyConfig, [port]: v };
+									}
+								}}
+							/>
+						</div>
+					{/each}
+				{/if}
+
+		</div>
+
 		</fieldset>
 	</div>
 
@@ -813,6 +859,22 @@
 </div>
 
 <style>
+	/* Proxy port block */
+	.proxy-port-block {
+		display: flex;
+		flex-direction: column;
+		gap: 0.4rem;
+	}
+
+	.proxy-port-label {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+		font-family: var(--font-mono);
+		font-size: 0.62rem;
+		color: var(--text-muted);
+	}
+
 	/* Inline validation */
 	.field--error {
 		border-color: var(--status-error-border) !important;

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	traefikcfg "github.com/shaik-zeeshan/open-sandbox/internal/traefik"
 )
 
 func newSQLiteStoreForTest(t *testing.T) *SQLiteStore {
@@ -178,5 +180,107 @@ func TestRuntimeWorkerLifecycle(t *testing.T) {
 	}
 	if len(workers) != 1 {
 		t.Fatalf("expected one worker, got %d", len(workers))
+	}
+}
+
+func TestSandboxProxyConfigRoundTrip(t *testing.T) {
+	s := newSQLiteStoreForTest(t)
+
+	proxyConfig := map[int]traefikcfg.ServiceProxyConfig{
+		3000: {
+			RequestHeaders:  map[string]string{"X-Tenant": "acme"},
+			ResponseHeaders: map[string]string{"X-Frame-Options": "DENY"},
+			PathPrefixStrip: "/api",
+			SkipAuth:        false,
+		},
+		8080: {
+			SkipAuth: true,
+			CORS: &traefikcfg.CORSConfig{
+				AllowOrigins:     []string{"https://example.com"},
+				AllowMethods:     []string{"GET", "POST"},
+				AllowHeaders:     []string{"Authorization"},
+				AllowCredentials: true,
+				MaxAge:           3600,
+			},
+		},
+	}
+
+	if err := s.CreateSandbox(t.Context(), Sandbox{
+		ID:            "sb-proxy-1",
+		Name:          "proxy-test",
+		Image:         "alpine:3.20",
+		ContainerID:   "ctr-proxy-1",
+		WorkspaceDir:  "/workspace",
+		Status:        "running",
+		OwnerID:       "user-1",
+		OwnerUsername: "alice",
+		ProxyConfig:   proxyConfig,
+	}); err != nil {
+		t.Fatalf("failed to create sandbox: %v", err)
+	}
+
+	// GetSandbox round-trip
+	got, err := s.GetSandbox(t.Context(), "sb-proxy-1")
+	if err != nil {
+		t.Fatalf("failed to get sandbox: %v", err)
+	}
+	if len(got.ProxyConfig) != 2 {
+		t.Fatalf("expected 2 proxy config entries, got %d", len(got.ProxyConfig))
+	}
+	cfg3000 := got.ProxyConfig[3000]
+	if cfg3000.RequestHeaders["X-Tenant"] != "acme" {
+		t.Fatalf("expected request header X-Tenant=acme, got %q", cfg3000.RequestHeaders["X-Tenant"])
+	}
+	if cfg3000.PathPrefixStrip != "/api" {
+		t.Fatalf("expected path_prefix_strip /api, got %q", cfg3000.PathPrefixStrip)
+	}
+	cfg8080 := got.ProxyConfig[8080]
+	if !cfg8080.SkipAuth {
+		t.Fatal("expected skip_auth=true for port 8080")
+	}
+	if cfg8080.CORS == nil || cfg8080.CORS.MaxAge != 3600 {
+		t.Fatalf("expected CORS max_age=3600 for port 8080, got %v", cfg8080.CORS)
+	}
+
+	// ListSandboxes round-trip
+	list, err := s.ListSandboxes(t.Context())
+	if err != nil {
+		t.Fatalf("failed to list sandboxes: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("expected 1 sandbox, got %d", len(list))
+	}
+	if len(list[0].ProxyConfig) != 2 {
+		t.Fatalf("expected 2 proxy config entries in list, got %d", len(list[0].ProxyConfig))
+	}
+}
+
+func TestSandboxProxyConfigEmptyByDefault(t *testing.T) {
+	s := newSQLiteStoreForTest(t)
+
+	if err := s.CreateSandbox(t.Context(), Sandbox{
+		ID:            "sb-no-proxy",
+		Name:          "no-proxy-test",
+		Image:         "alpine:3.20",
+		ContainerID:   "ctr-no-proxy-1",
+		WorkspaceDir:  "/workspace",
+		Status:        "running",
+		OwnerID:       "user-1",
+		OwnerUsername: "alice",
+		// ProxyConfig intentionally nil/empty
+	}); err != nil {
+		t.Fatalf("failed to create sandbox: %v", err)
+	}
+
+	got, err := s.GetSandbox(t.Context(), "sb-no-proxy")
+	if err != nil {
+		t.Fatalf("failed to get sandbox: %v", err)
+	}
+	if got.ProxyConfig == nil {
+		// nil is acceptable; just check length is 0
+		return
+	}
+	if len(got.ProxyConfig) != 0 {
+		t.Fatalf("expected empty proxy config, got %d entries", len(got.ProxyConfig))
 	}
 }

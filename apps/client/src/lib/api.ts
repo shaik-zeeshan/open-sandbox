@@ -191,6 +191,22 @@ export interface PortSummary {
 	ip?: string;
 }
 
+export interface SandboxPortCORSConfig {
+	allow_origins?: string[];
+	allow_methods?: string[];
+	allow_headers?: string[];
+	allow_credentials?: boolean;
+	max_age?: number;
+}
+
+export interface SandboxPortProxyConfig {
+	request_headers?: Record<string, string>;
+	response_headers?: Record<string, string>;
+	cors?: SandboxPortCORSConfig;
+	path_prefix_strip?: string;
+	skip_auth?: boolean;
+}
+
 export interface CreateSandboxRequest {
 	name: string;
 	image: string;
@@ -204,6 +220,7 @@ export interface CreateSandboxRequest {
 	tty?: boolean;
 	user?: string;
 	ports?: string[];
+	proxy_config?: Record<string, SandboxPortProxyConfig>;
 }
 
 export interface Sandbox {

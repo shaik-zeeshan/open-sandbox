@@ -12,6 +12,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	traefikcfg "github.com/shaik-zeeshan/open-sandbox/internal/traefik"
 )
 
 var ErrSandboxNotFound = errors.New("sandbox not found")
@@ -32,6 +34,7 @@ type Sandbox struct {
 	Status        string
 	OwnerID       string
 	OwnerUsername string
+	ProxyConfig   map[int]traefikcfg.ServiceProxyConfig
 	CreatedAt     int64
 	UpdatedAt     int64
 }
@@ -195,6 +198,9 @@ CREATE INDEX IF NOT EXISTS idx_runtime_workers_last_heartbeat_at ON runtime_work
 	if err := s.ensureColumn(ctx, "sandboxes", "worker_id", "TEXT NOT NULL DEFAULT 'local'"); err != nil {
 		return err
 	}
+	if err := s.ensureColumn(ctx, "sandboxes", "proxy_config_json", "TEXT NOT NULL DEFAULT '{}'"); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -245,10 +251,15 @@ func (s *SQLiteStore) CreateSandbox(ctx context.Context, sandbox Sandbox) error 
 		sandbox.UpdatedAt = sandbox.CreatedAt
 	}
 
-	_, err := s.db.ExecContext(
+	proxyConfigJSON, err := marshalSandboxProxyConfig(sandbox.ProxyConfig)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.db.ExecContext(
 		ctx,
-		`INSERT INTO sandboxes (id, name, image, container_id, worker_id, workspace_dir, repo_url, status, owner_id, owner_username, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO sandboxes (id, name, image, container_id, worker_id, workspace_dir, repo_url, status, owner_id, owner_username, proxy_config_json, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sandbox.ID,
 		sandbox.Name,
 		sandbox.Image,
@@ -259,6 +270,7 @@ func (s *SQLiteStore) CreateSandbox(ctx context.Context, sandbox Sandbox) error 
 		sandbox.Status,
 		sandbox.OwnerID,
 		sandbox.OwnerUsername,
+		proxyConfigJSON,
 		sandbox.CreatedAt,
 		sandbox.UpdatedAt,
 	)
@@ -271,7 +283,7 @@ func (s *SQLiteStore) CreateSandbox(ctx context.Context, sandbox Sandbox) error 
 
 func (s *SQLiteStore) ListSandboxes(ctx context.Context) ([]Sandbox, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, image, container_id, worker_id, workspace_dir, repo_url, status, owner_id, owner_username, created_at, updated_at
+		SELECT id, name, image, container_id, worker_id, workspace_dir, repo_url, status, owner_id, owner_username, proxy_config_json, created_at, updated_at
 		FROM sandboxes
 		ORDER BY created_at DESC`)
 	if err != nil {
@@ -298,7 +310,7 @@ func (s *SQLiteStore) ListSandboxes(ctx context.Context) ([]Sandbox, error) {
 func (s *SQLiteStore) GetSandbox(ctx context.Context, sandboxID string) (Sandbox, error) {
 	row := s.db.QueryRowContext(
 		ctx,
-		`SELECT id, name, image, container_id, worker_id, workspace_dir, repo_url, status, owner_id, owner_username, created_at, updated_at
+		`SELECT id, name, image, container_id, worker_id, workspace_dir, repo_url, status, owner_id, owner_username, proxy_config_json, created_at, updated_at
 		 FROM sandboxes
 		 WHERE id = ?`,
 		sandboxID,
@@ -390,6 +402,7 @@ type sandboxScanner interface {
 
 func scanSandbox(scanner sandboxScanner) (Sandbox, error) {
 	var sandbox Sandbox
+	var proxyConfigJSON string
 	if err := scanner.Scan(
 		&sandbox.ID,
 		&sandbox.Name,
@@ -401,6 +414,7 @@ func scanSandbox(scanner sandboxScanner) (Sandbox, error) {
 		&sandbox.Status,
 		&sandbox.OwnerID,
 		&sandbox.OwnerUsername,
+		&proxyConfigJSON,
 		&sandbox.CreatedAt,
 		&sandbox.UpdatedAt,
 	); err != nil {
@@ -409,6 +423,12 @@ func scanSandbox(scanner sandboxScanner) (Sandbox, error) {
 		}
 		return Sandbox{}, fmt.Errorf("scan sandbox row: %w", err)
 	}
+
+	proxyConfig, err := unmarshalSandboxProxyConfig(proxyConfigJSON)
+	if err != nil {
+		return Sandbox{}, err
+	}
+	sandbox.ProxyConfig = proxyConfig
 
 	return sandbox, nil
 }
@@ -419,6 +439,47 @@ func normalizeWorkerID(workerID string) string {
 		return "local"
 	}
 	return trimmed
+}
+
+// marshalSandboxProxyConfig serialises the proxy config map to JSON.
+// The map keys (private port numbers) are converted to string keys for JSON
+// compatibility. A nil or empty map serialises to "{}".
+func marshalSandboxProxyConfig(cfg map[int]traefikcfg.ServiceProxyConfig) (string, error) {
+	if len(cfg) == 0 {
+		return "{}", nil
+	}
+	// JSON object keys must be strings; convert int keys.
+	strKeyed := make(map[string]traefikcfg.ServiceProxyConfig, len(cfg))
+	for port, v := range cfg {
+		strKeyed[fmt.Sprintf("%d", port)] = v
+	}
+	encoded, err := json.Marshal(strKeyed)
+	if err != nil {
+		return "", fmt.Errorf("marshal sandbox proxy config: %w", err)
+	}
+	return string(encoded), nil
+}
+
+// unmarshalSandboxProxyConfig deserialises a JSON proxy config map.
+// Empty / blank input returns an empty (non-nil) map.
+func unmarshalSandboxProxyConfig(raw string) (map[int]traefikcfg.ServiceProxyConfig, error) {
+	trimmed := strings.TrimSpace(raw)
+	result := make(map[int]traefikcfg.ServiceProxyConfig)
+	if trimmed == "" || trimmed == "{}" {
+		return result, nil
+	}
+	strKeyed := make(map[string]traefikcfg.ServiceProxyConfig)
+	if err := json.Unmarshal([]byte(trimmed), &strKeyed); err != nil {
+		return nil, fmt.Errorf("unmarshal sandbox proxy config: %w", err)
+	}
+	for k, v := range strKeyed {
+		var port int
+		if _, scanErr := fmt.Sscanf(k, "%d", &port); scanErr != nil || port <= 0 {
+			continue
+		}
+		result[port] = v
+	}
+	return result, nil
 }
 
 func (s *SQLiteStore) UpsertRuntimeWorker(ctx context.Context, worker RuntimeWorker) error {

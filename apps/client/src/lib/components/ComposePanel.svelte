@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { untrack } from "svelte";
+	import * as yaml from "js-yaml";
 	import CodeEditor from "./CodeEditor.svelte";
+	import ProxyConfigEditor from "./ProxyConfigEditor.svelte";
 	import {
 		formatApiFailure,
 		getComposeProject,
@@ -8,7 +10,8 @@
 		runApiEffect,
 		type ApiConfig,
 		type ComposeProjectPreview,
-		type ComposeRequest
+		type ComposeRequest,
+		type SandboxPortProxyConfig
 	} from "$lib/api";
 	import { runComposeAction, type ComposeAction } from "$lib/compose-panel-runtime";
 	import { toast } from "$lib/toast.svelte";
@@ -36,6 +39,9 @@
 	let statusServiceNames = $state<string[]>([]);
 	let composeProjectPreview = $state<ComposeProjectPreview | null>(null);
 	let logsViewport = $state<HTMLPreElement | null>(null);
+
+	// Per-service proxy config (keyed by service name)
+	let serviceProxyConfigs = $state<Record<string, SandboxPortProxyConfig | null>>({});
 
 	const stripAnsi = (value: string): string => value.replace(/\x1b\[[0-9;]*[mGKHF]/g, "");
 
@@ -139,9 +145,158 @@
 		selectedServices = [...selectedServices, service];
 	}
 
+	/**
+	 * Build a plain object representing the proxy config, suitable for
+	 * structured YAML serialization. Only defined, non-empty fields are included.
+	 */
+	function buildProxyConfigObject(cfg: SandboxPortProxyConfig): Record<string, unknown> | null {
+		const proxy: Record<string, unknown> = {};
+
+		if (cfg.request_headers && Object.keys(cfg.request_headers).length > 0) {
+			proxy.request_headers = { ...cfg.request_headers };
+		}
+		if (cfg.response_headers && Object.keys(cfg.response_headers).length > 0) {
+			proxy.response_headers = { ...cfg.response_headers };
+		}
+		if (cfg.path_prefix_strip) {
+			proxy.path_prefix_strip = cfg.path_prefix_strip;
+		}
+		if (cfg.skip_auth) {
+			proxy.skip_auth = true;
+		}
+		if (cfg.cors) {
+			const cors: Record<string, unknown> = {};
+			if (cfg.cors.allow_origins && cfg.cors.allow_origins.length > 0) {
+				cors.allow_origins = [...cfg.cors.allow_origins];
+			}
+			if (cfg.cors.allow_methods && cfg.cors.allow_methods.length > 0) {
+				cors.allow_methods = [...cfg.cors.allow_methods];
+			}
+			if (cfg.cors.allow_headers && cfg.cors.allow_headers.length > 0) {
+				cors.allow_headers = [...cfg.cors.allow_headers];
+			}
+			if (cfg.cors.allow_credentials) {
+				cors.allow_credentials = true;
+			}
+			if (cfg.cors.max_age && cfg.cors.max_age > 0) {
+				cors.max_age = cfg.cors.max_age;
+			}
+			if (Object.keys(cors).length > 0) {
+				proxy.cors = cors;
+			}
+		}
+
+		return Object.keys(proxy).length > 0 ? proxy : null;
+	}
+
+	/**
+	 * Inject or remove x-open-sandbox.proxy extensions in compose YAML content using
+	 * structured YAML parse/modify/serialize. This avoids raw string interpolation
+	 * and brittle line-surgery. Falls back to original content if YAML cannot be
+	 * parsed (e.g. content is empty or malformed).
+	 *
+	 * - Apply (cfg !== null): merges `proxy` into any existing `x-open-sandbox`
+	 *   object so unrelated sibling fields are preserved.
+	 * - Remove (cfg === null): deletes only the `proxy` key; removes
+	 *   `x-open-sandbox` only when it becomes empty.
+	 *
+	 * Limitation: js-yaml round-trips lose YAML comments and anchors; this is an
+	 * inherent constraint of the parse/dump approach and cannot be avoided without
+	 * a comment-preserving YAML library.
+	 */
+	function injectProxyConfigsIntoYaml(
+		content: string,
+		configs: Record<string, SandboxPortProxyConfig | null>
+	): string {
+		if (Object.keys(configs).length === 0) return content;
+
+		let doc: unknown;
+		try {
+			doc = yaml.load(content);
+		} catch {
+			// Unparseable YAML — return as-is, the server will reject it anyway
+			return content;
+		}
+
+		if (doc === null || typeof doc !== "object" || Array.isArray(doc)) {
+			return content;
+		}
+
+		const root = doc as Record<string, unknown>;
+
+		// Ensure services is an object
+		if (typeof root.services !== "object" || root.services === null || Array.isArray(root.services)) {
+			return content;
+		}
+
+		const services = root.services as Record<string, unknown>;
+
+		for (const [serviceName, cfg] of Object.entries(configs)) {
+			const svc = services[serviceName];
+			const isSvcObject = svc !== null && typeof svc === "object" && !Array.isArray(svc);
+
+			if (cfg === null) {
+				// Removal: only delete the `proxy` key; delete `x-open-sandbox` only
+				// if no other sibling keys remain.
+				if (!isSvcObject) continue;
+				const svcRecord = svc as Record<string, unknown>;
+				const existing = svcRecord["x-open-sandbox"];
+				if (existing !== null && typeof existing === "object" && !Array.isArray(existing)) {
+					const xos = existing as Record<string, unknown>;
+					delete xos["proxy"];
+					if (Object.keys(xos).length === 0) {
+						delete svcRecord["x-open-sandbox"];
+					}
+				}
+				continue;
+			}
+
+			const proxyObj = buildProxyConfigObject(cfg);
+			if (proxyObj === null) continue;
+
+			if (!(serviceName in services)) continue;
+
+			// Coerce null/missing service definition to an object
+			if (services[serviceName] === null || services[serviceName] === undefined) {
+				services[serviceName] = {};
+			}
+
+			const svcAfterCoerce = services[serviceName];
+			if (typeof svcAfterCoerce !== "object" || Array.isArray(svcAfterCoerce)) continue;
+
+			const svcRecord = svcAfterCoerce as Record<string, unknown>;
+
+			// Merge: preserve existing x-open-sandbox sibling fields, only set proxy.
+			const existingXos = svcRecord["x-open-sandbox"];
+			const mergedXos: Record<string, unknown> =
+				existingXos !== null && typeof existingXos === "object" && !Array.isArray(existingXos)
+					? { ...(existingXos as Record<string, unknown>) }
+					: {};
+			mergedXos["proxy"] = proxyObj;
+			svcRecord["x-open-sandbox"] = mergedXos;
+		}
+
+		try {
+			return yaml.dump(root, {
+				indent: 2,
+				lineWidth: -1,
+				noRefs: true,
+				quotingType: '"',
+				forceQuotes: false
+			});
+		} catch {
+			return content;
+		}
+	}
+
 	function buildComposeRequest(): ComposeRequest {
+		// Pass all configs including null entries so removals are also processed.
+		const contentWithProxy = Object.keys(serviceProxyConfigs).length > 0
+			? injectProxyConfigsIntoYaml(composeContent.trim(), serviceProxyConfigs)
+			: composeContent.trim();
+
 		const request: ComposeRequest = {
-			content: composeContent.trim(),
+			content: contentWithProxy,
 			project_name: projectName.trim() || undefined
 		};
 
@@ -287,6 +442,33 @@
 					</div>
 				{/if}
 			</div>
+
+			{#if inferredServices.length > 0}
+				<div class="field-col">
+					<span class="section-label">Proxy settings <span class="opt">(optional, per service)</span></span>
+					<div class="proxy-services-list">
+						{#each inferredServices as service}
+							<details class="proxy-service-details">
+								<summary class="proxy-service-summary">
+									<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="proxy-service-chevron"><polyline points="9 18 15 12 9 6"/></svg>
+									<code class="proxy-service-name">{service}</code>
+									{#if serviceProxyConfigs[service] != null}
+										<span class="proxy-service-badge">configured</span>
+									{/if}
+								</summary>
+								<div class="proxy-service-body">
+									<ProxyConfigEditor
+										value={serviceProxyConfigs[service] ?? null}
+										onchange={(v: SandboxPortProxyConfig | null) => {
+											serviceProxyConfigs = { ...serviceProxyConfigs, [service]: v };
+										}}
+									/>
+								</div>
+							</details>
+						{/each}
+					</div>
+				</div>
+			{/if}
 
 			<div class="compose-actions">
 				<label class="checkbox-row">
@@ -596,5 +778,71 @@
 		border-color: var(--border-strong);
 		color: var(--text-primary);
 		background: var(--bg-raised);
+	}
+
+	/* Proxy settings per-service */
+	.proxy-services-list {
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+	}
+
+	.proxy-service-details {
+		border: 1px solid var(--border-dim);
+		border-radius: var(--radius-md);
+		overflow: hidden;
+	}
+
+	.proxy-service-summary {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		padding: 0.5rem 0.65rem;
+		cursor: pointer;
+		list-style: none;
+		user-select: none;
+		background: var(--bg-raised);
+		font-family: var(--font-mono);
+		font-size: 0.68rem;
+		color: var(--text-secondary);
+		transition: background 0.1s;
+	}
+
+	.proxy-service-summary::-webkit-details-marker { display: none; }
+
+	.proxy-service-summary:hover {
+		background: var(--bg-overlay);
+	}
+
+	.proxy-service-chevron {
+		flex-shrink: 0;
+		transition: transform 0.15s;
+	}
+
+	.proxy-service-details[open] .proxy-service-chevron {
+		transform: rotate(90deg);
+	}
+
+	.proxy-service-name {
+		font-family: var(--font-mono);
+		font-size: 0.68rem;
+		color: var(--text-primary);
+	}
+
+	.proxy-service-badge {
+		margin-left: auto;
+		font-family: var(--font-mono);
+		font-size: 0.58rem;
+		color: var(--text-muted);
+		background: var(--accent-dim);
+		border: 1px solid var(--border-mid);
+		border-radius: 999px;
+		padding: 0.08rem 0.4rem;
+	}
+
+	.proxy-service-body {
+		padding: 0.65rem;
+		background: var(--bg-surface);
+		border-top: 1px solid var(--border-dim);
 	}
 </style>

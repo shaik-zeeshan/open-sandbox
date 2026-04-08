@@ -27,6 +27,7 @@ import (
 	"github.com/docker/go-connections/nat"
 	"github.com/gin-gonic/gin"
 	"github.com/shaik-zeeshan/open-sandbox/internal/store"
+	traefikcfg "github.com/shaik-zeeshan/open-sandbox/internal/traefik"
 )
 
 type ContainerSummary struct {
@@ -76,18 +77,39 @@ type SandboxResponse struct {
 }
 
 type CreateSandboxRequest struct {
-	Name               string   `json:"name" binding:"required"`
-	Image              string   `json:"image" binding:"required"`
-	RepoURL            string   `json:"repo_url"`
-	Branch             string   `json:"branch"`
-	RepoTargetPath     string   `json:"repo_target_path"`
-	UseImageDefaultCmd bool     `json:"use_image_default_cmd"`
-	Env                []string `json:"env"`
-	Cmd                []string `json:"cmd"`
-	Workdir            string   `json:"workdir"`
-	TTY                bool     `json:"tty"`
-	User               string   `json:"user"`
-	Ports              []string `json:"ports"`
+	Name               string                             `json:"name" binding:"required"`
+	Image              string                             `json:"image" binding:"required"`
+	RepoURL            string                             `json:"repo_url"`
+	Branch             string                             `json:"branch"`
+	RepoTargetPath     string                             `json:"repo_target_path"`
+	UseImageDefaultCmd bool                               `json:"use_image_default_cmd"`
+	Env                []string                           `json:"env"`
+	Cmd                []string                           `json:"cmd"`
+	Workdir            string                             `json:"workdir"`
+	TTY                bool                               `json:"tty"`
+	User               string                             `json:"user"`
+	Ports              []string                           `json:"ports"`
+	ProxyConfig        map[string]*SandboxPortProxyConfig `json:"proxy_config,omitempty"`
+}
+
+// SandboxPortProxyConfig holds proxy customization for a single preview port.
+// The map key in CreateSandboxRequest.ProxyConfig is the string representation
+// of the private port number (e.g. "3000").
+type SandboxPortProxyConfig struct {
+	RequestHeaders  map[string]string      `json:"request_headers,omitempty"`
+	ResponseHeaders map[string]string      `json:"response_headers,omitempty"`
+	CORS            *SandboxPortCORSConfig `json:"cors,omitempty"`
+	PathPrefixStrip string                 `json:"path_prefix_strip,omitempty"`
+	SkipAuth        bool                   `json:"skip_auth,omitempty"`
+}
+
+// SandboxPortCORSConfig holds CORS settings for a sandbox preview port.
+type SandboxPortCORSConfig struct {
+	AllowOrigins     []string `json:"allow_origins,omitempty"`
+	AllowMethods     []string `json:"allow_methods,omitempty"`
+	AllowHeaders     []string `json:"allow_headers,omitempty"`
+	AllowCredentials bool     `json:"allow_credentials,omitempty"`
+	MaxAge           int      `json:"max_age,omitempty"`
 }
 
 type FileEntry struct {
@@ -521,6 +543,7 @@ func (s *Server) createSandbox(c *gin.Context) {
 		Status:        "running",
 		OwnerID:       identity.UserID,
 		OwnerUsername: identity.Username,
+		ProxyConfig:   parseSandboxPortProxyConfigs(req.ProxyConfig),
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}
@@ -1369,6 +1392,45 @@ func sandboxToResponse(sandbox store.Sandbox) SandboxResponse {
 		CreatedAt:     sandbox.CreatedAt,
 		UpdatedAt:     sandbox.UpdatedAt,
 	}
+}
+
+// parseSandboxPortProxyConfigs converts the JSON-friendly string-keyed map
+// from CreateSandboxRequest into the int-keyed traefik config map stored in
+// the Sandbox record.
+func parseSandboxPortProxyConfigs(input map[string]*SandboxPortProxyConfig) map[int]traefikcfg.ServiceProxyConfig {
+	if len(input) == 0 {
+		return nil
+	}
+	result := make(map[int]traefikcfg.ServiceProxyConfig, len(input))
+	for portStr, cfg := range input {
+		if cfg == nil {
+			continue
+		}
+		var port int
+		if _, err := fmt.Sscanf(portStr, "%d", &port); err != nil || port <= 0 {
+			continue
+		}
+		spc := traefikcfg.ServiceProxyConfig{
+			RequestHeaders:  cfg.RequestHeaders,
+			ResponseHeaders: cfg.ResponseHeaders,
+			PathPrefixStrip: strings.TrimSpace(cfg.PathPrefixStrip),
+			SkipAuth:        cfg.SkipAuth,
+		}
+		if cfg.CORS != nil {
+			spc.CORS = &traefikcfg.CORSConfig{
+				AllowOrigins:     cfg.CORS.AllowOrigins,
+				AllowMethods:     cfg.CORS.AllowMethods,
+				AllowHeaders:     cfg.CORS.AllowHeaders,
+				AllowCredentials: cfg.CORS.AllowCredentials,
+				MaxAge:           cfg.CORS.MaxAge,
+			}
+		}
+		result[port] = spc
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 func (s *Server) previewURLsForContainer(item ContainerSummary) []PreviewURL {
