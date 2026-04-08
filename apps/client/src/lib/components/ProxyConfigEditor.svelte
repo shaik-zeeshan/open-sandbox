@@ -5,6 +5,7 @@
 	 * Optionally also calls `onchange(value)` after each commit.
 	 */
 	import type { SandboxPortProxyConfig } from "$lib/api";
+	import Checkbox from "$lib/components/Checkbox.svelte";
 
 	let {
 		value = $bindable<SandboxPortProxyConfig | null>(null),
@@ -29,19 +30,36 @@
 		return Object.fromEntries(entries.map(r => [r.key.trim(), r.val]));
 	}
 
-	const init = value ?? {};
-	let reqRows    = $state<KVRow[]>(parseHeaders(init.request_headers));
-	let respRows   = $state<KVRow[]>(parseHeaders(init.response_headers));
-	let pathStrip  = $state(init.path_prefix_strip ?? "");
-	let skipAuth   = $state(init.skip_auth ?? false);
-	let corsEnabled = $state(init.cors != null);
+	function applyValue(nextValue: SandboxPortProxyConfig | null): void {
+		const next = nextValue ?? {};
+		reqRows = parseHeaders(next.request_headers);
+		respRows = parseHeaders(next.response_headers);
+		pathStrip = next.path_prefix_strip ?? "";
+		skipAuth = next.skip_auth ?? false;
+		corsEnabled = next.cors != null;
+		corsOrigins = next.cors?.allow_origins?.join(", ") ?? "";
+		corsMethods = next.cors?.allow_methods?.join(", ") ?? "";
+		corsHeaders = next.cors?.allow_headers?.join(", ") ?? "";
+		corsCreds = next.cors?.allow_credentials ?? false;
+		corsMaxAge = String(next.cors?.max_age ?? "");
+	}
+
+	let reqRows    = $state<KVRow[]>([]);
+	let respRows   = $state<KVRow[]>([]);
+	let pathStrip  = $state("");
+	let skipAuth   = $state(false);
+	let corsEnabled = $state(false);
 
 	// CORS sub-fields
-	let corsOrigins = $state(init.cors?.allow_origins?.join(", ") ?? "");
-	let corsMethods = $state(init.cors?.allow_methods?.join(", ") ?? "");
-	let corsHeaders = $state(init.cors?.allow_headers?.join(", ") ?? "");
-	let corsCreds   = $state(init.cors?.allow_credentials ?? false);
-	let corsMaxAge  = $state(String(init.cors?.max_age ?? ""));
+	let corsOrigins = $state("");
+	let corsMethods = $state("");
+	let corsHeaders = $state("");
+	let corsCreds   = $state(false);
+	let corsMaxAge  = $state("");
+
+	$effect(() => {
+		applyValue(value);
+	});
 
 	function splitCSV(s: string): string[] {
 		return s.split(",").map(x => x.trim()).filter(Boolean);
@@ -175,10 +193,9 @@
 			<input class="field pce-field" type="text" placeholder="/api" bind:value={pathStrip}
 				oninput={commit} />
 		</label>
-		<label class="pce-checkbox-row">
-			<input type="checkbox" bind:checked={skipAuth} onchange={commit} />
-			<span class="pce-label">Skip auth</span>
-		</label>
+		<div class="pce-checkbox-row">
+			<Checkbox bind:checked={skipAuth} onchange={commit} label="Skip auth" />
+		</div>
 	</div>
 
 	<!-- CORS -->
@@ -207,10 +224,7 @@
 						bind:value={corsHeaders} oninput={commit} />
 				</label>
 				<div class="pce-cors-bottom">
-					<label class="pce-checkbox-row pce-checkbox-row--plain">
-						<input type="checkbox" bind:checked={corsCreds} onchange={commit} />
-						<span class="pce-sublabel">Allow credentials</span>
-					</label>
+					<Checkbox bind:checked={corsCreds} onchange={commit} label="Allow credentials" />
 					<label class="pce-cors-field pce-cors-field--narrow">
 						<span class="pce-sublabel">Max age (s)</span>
 						<input class="field pce-field" type="number" min="0" placeholder="3600"
@@ -376,15 +390,9 @@
 	}
 
 	.pce-checkbox-row {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.4rem;
+		display: flex;
+		align-items: flex-end;
 		padding-top: 1.1rem;
-		cursor: pointer;
-	}
-
-	.pce-checkbox-row--plain {
-		padding-top: 0;
 	}
 
 	.pce-cors-grid {

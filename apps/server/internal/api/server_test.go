@@ -33,6 +33,7 @@ import (
 	dockerspec "github.com/moby/docker-image-spec/specs-go/v1"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/shaik-zeeshan/open-sandbox/internal/store"
+	traefikcfg "github.com/shaik-zeeshan/open-sandbox/internal/traefik"
 )
 
 type mockDocker struct {
@@ -62,6 +63,7 @@ type mockSandboxStore struct {
 	createSandboxFn                  func(context.Context, store.Sandbox) error
 	listSandboxesFn                  func(context.Context) ([]store.Sandbox, error)
 	getSandboxFn                     func(context.Context, string) (store.Sandbox, error)
+	updateSandboxProxyConfigFn       func(context.Context, string, map[int]traefikcfg.ServiceProxyConfig) error
 	updateSandboxStatusFn            func(context.Context, string, string) error
 	updateSandboxStatusByContainerFn func(context.Context, string, string) error
 	deleteSandboxFn                  func(context.Context, string) error
@@ -234,6 +236,13 @@ func (m *mockSandboxStore) UpdateSandboxStatus(ctx context.Context, sandboxID st
 		return errors.New("not implemented")
 	}
 	return m.updateSandboxStatusFn(ctx, sandboxID, status)
+}
+
+func (m *mockSandboxStore) UpdateSandboxProxyConfig(ctx context.Context, sandboxID string, proxyConfig map[int]traefikcfg.ServiceProxyConfig) error {
+	if m.updateSandboxProxyConfigFn == nil {
+		return errors.New("not implemented")
+	}
+	return m.updateSandboxProxyConfigFn(ctx, sandboxID, proxyConfig)
 }
 
 func (m *mockSandboxStore) UpdateSandboxStatusByContainerID(ctx context.Context, containerID string, status string) error {
@@ -2256,6 +2265,67 @@ func TestListSandboxesIncludesServerGeneratedPreviewURLs(t *testing.T) {
 	}
 }
 
+func TestListSandboxesIncludesPersistedProxyConfig(t *testing.T) {
+	sandboxStore := &mockSandboxStore{
+		listSandboxesFn: func(context.Context) ([]store.Sandbox, error) {
+			return []store.Sandbox{{
+				ID:            "sandbox-1",
+				Name:          "mine",
+				ContainerID:   "sandbox-container",
+				OwnerID:       "member-1",
+				OwnerUsername: "alice",
+				Status:        "running",
+				ProxyConfig: map[int]traefikcfg.ServiceProxyConfig{
+					3000: {
+						RequestHeaders:  map[string]string{"X-Test": "one"},
+						ResponseHeaders: map[string]string{"X-Frame-Options": "DENY"},
+						PathPrefixStrip: "/api",
+						SkipAuth:        true,
+						CORS: &traefikcfg.CORSConfig{
+							AllowOrigins: []string{"https://example.com"},
+							MaxAge:       600,
+						},
+					},
+				},
+			}}, nil
+		},
+	}
+
+	s := newTestServerWithStore(&mockDocker{}, sandboxStore)
+	req := httptest.NewRequest(http.MethodGet, "/api/sandboxes", nil)
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+
+	var sandboxes []SandboxResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &sandboxes); err != nil {
+		t.Fatalf("decode sandboxes response: %v", err)
+	}
+	if len(sandboxes) != 1 {
+		t.Fatalf("expected 1 sandbox, got %d", len(sandboxes))
+	}
+	if sandboxes[0].ProxyConfig["3000"] == nil {
+		t.Fatalf("expected proxy config for port 3000, got %+v", sandboxes[0].ProxyConfig)
+	}
+	if sandboxes[0].ProxyConfig["3000"].RequestHeaders["X-Test"] != "one" {
+		t.Fatalf("unexpected request headers: %+v", sandboxes[0].ProxyConfig["3000"])
+	}
+	if sandboxes[0].ProxyConfig["3000"].CORS == nil || sandboxes[0].ProxyConfig["3000"].CORS.MaxAge != 600 {
+		t.Fatalf("unexpected cors config: %+v", sandboxes[0].ProxyConfig["3000"])
+	}
+	if !sandboxes[0].ProxyConfig["3000"].SkipAuth {
+		t.Fatalf("expected skip_auth in response: %+v", sandboxes[0].ProxyConfig["3000"])
+	}
+	if sandboxes[0].ProxyConfig["3000"].PathPrefixStrip != "/api" {
+		t.Fatalf("unexpected path_prefix_strip: %+v", sandboxes[0].ProxyConfig["3000"])
+	}
+}
+
 func TestListSandboxesDeletesOwnedRecordsForMissingContainers(t *testing.T) {
 	original := commandRunner
 	defer func() { commandRunner = original }()
@@ -2388,6 +2458,98 @@ func TestSandboxAccessRejectsOtherUsers(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestUpdateSandboxProxyConfigEndpointPersistsAndReturnsUpdatedSandbox(t *testing.T) {
+	updatedAt := int64(200)
+	updatedProxyConfig := map[int]traefikcfg.ServiceProxyConfig{}
+	sandboxStore := &mockSandboxStore{
+		getSandboxFn: func(_ context.Context, sandboxID string) (store.Sandbox, error) {
+			if sandboxID != "sandbox-1" {
+				t.Fatalf("unexpected sandbox id %q", sandboxID)
+			}
+			if len(updatedProxyConfig) == 0 {
+				return store.Sandbox{ID: "sandbox-1", ContainerID: "sandbox-container", OwnerID: "member-1", OwnerUsername: "alice", Status: "running", UpdatedAt: 100}, nil
+			}
+			return store.Sandbox{ID: "sandbox-1", ContainerID: "sandbox-container", OwnerID: "member-1", OwnerUsername: "alice", Status: "running", ProxyConfig: updatedProxyConfig, UpdatedAt: updatedAt}, nil
+		},
+		updateSandboxProxyConfigFn: func(_ context.Context, sandboxID string, proxyConfig map[int]traefikcfg.ServiceProxyConfig) error {
+			if sandboxID != "sandbox-1" {
+				t.Fatalf("unexpected sandbox id %q", sandboxID)
+			}
+			updatedProxyConfig = proxyConfig
+			if len(proxyConfig) != 2 {
+				t.Fatalf("expected 2 proxy config entries, got %d", len(proxyConfig))
+			}
+			if proxyConfig[3000].RequestHeaders["X-Test"] != "one" {
+				t.Fatalf("unexpected parsed request headers: %+v", proxyConfig[3000])
+			}
+			if proxyConfig[3000].CORS == nil || proxyConfig[3000].CORS.MaxAge != 120 {
+				t.Fatalf("unexpected parsed cors config: %+v", proxyConfig[3000])
+			}
+			if proxyConfig[8080].SkipAuth != true {
+				t.Fatalf("expected skip auth for 8080, got %+v", proxyConfig[8080])
+			}
+			return nil
+		},
+	}
+
+	s := newTestServerWithStore(&mockDocker{}, sandboxStore)
+	req := httptest.NewRequest(http.MethodPatch, "/api/sandboxes/sandbox-1/proxy-config", bytes.NewBufferString(`{"proxy_config":{"3000":{"request_headers":{"X-Test":"one"},"response_headers":{"X-Frame-Options":"DENY"},"cors":{"allow_origins":["https://example.com"],"max_age":120},"path_prefix_strip":"/api"},"8080":{"skip_auth":true}}}`))
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+
+	var response SandboxResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode sandbox response: %v", err)
+	}
+	if response.ProxyConfig["3000"] == nil || response.ProxyConfig["3000"].RequestHeaders["X-Test"] != "one" {
+		t.Fatalf("unexpected proxy config response: %+v", response.ProxyConfig)
+	}
+	if response.ProxyConfig["8080"] == nil || !response.ProxyConfig["8080"].SkipAuth {
+		t.Fatalf("expected skip_auth on 8080 in response: %+v", response.ProxyConfig)
+	}
+	if response.UpdatedAt != updatedAt {
+		t.Fatalf("expected updated_at %d, got %d", updatedAt, response.UpdatedAt)
+	}
+}
+
+func TestUpdateSandboxProxyConfigEndpointAllowsClearingConfig(t *testing.T) {
+	updatedCalled := false
+	sandboxStore := &mockSandboxStore{
+		getSandboxFn: func(context.Context, string) (store.Sandbox, error) {
+			return store.Sandbox{ID: "sandbox-1", ContainerID: "sandbox-container", OwnerID: "member-1", OwnerUsername: "alice", Status: "running"}, nil
+		},
+		updateSandboxProxyConfigFn: func(_ context.Context, _ string, proxyConfig map[int]traefikcfg.ServiceProxyConfig) error {
+			updatedCalled = true
+			if proxyConfig != nil {
+				t.Fatalf("expected nil proxy config when clearing, got %+v", proxyConfig)
+			}
+			return nil
+		},
+	}
+
+	s := newTestServerWithStore(&mockDocker{}, sandboxStore)
+	req := httptest.NewRequest(http.MethodPatch, "/api/sandboxes/sandbox-1/proxy-config", bytes.NewBufferString(`{"proxy_config":{}}`))
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if !updatedCalled {
+		t.Fatal("expected proxy config update to be called")
 	}
 }
 

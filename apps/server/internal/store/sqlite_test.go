@@ -284,3 +284,61 @@ func TestSandboxProxyConfigEmptyByDefault(t *testing.T) {
 		t.Fatalf("expected empty proxy config, got %d entries", len(got.ProxyConfig))
 	}
 }
+
+func TestUpdateSandboxProxyConfig(t *testing.T) {
+	s := newSQLiteStoreForTest(t)
+
+	if err := s.CreateSandbox(t.Context(), Sandbox{
+		ID:            "sb-update-proxy",
+		Name:          "update-proxy-test",
+		Image:         "alpine:3.20",
+		ContainerID:   "ctr-update-proxy-1",
+		WorkspaceDir:  "/workspace",
+		Status:        "running",
+		OwnerID:       "user-1",
+		OwnerUsername: "alice",
+		CreatedAt:     100,
+		UpdatedAt:     100,
+	}); err != nil {
+		t.Fatalf("failed to create sandbox: %v", err)
+	}
+
+	proxyConfig := map[int]traefikcfg.ServiceProxyConfig{
+		3000: {
+			RequestHeaders: map[string]string{"X-Test": "one"},
+			CORS: &traefikcfg.CORSConfig{
+				AllowOrigins: []string{"https://example.com"},
+				MaxAge:       60,
+			},
+		},
+	}
+	if err := s.UpdateSandboxProxyConfig(t.Context(), "sb-update-proxy", proxyConfig); err != nil {
+		t.Fatalf("failed to update sandbox proxy config: %v", err)
+	}
+
+	got, err := s.GetSandbox(t.Context(), "sb-update-proxy")
+	if err != nil {
+		t.Fatalf("failed to read updated sandbox: %v", err)
+	}
+	if got.ProxyConfig[3000].RequestHeaders["X-Test"] != "one" {
+		t.Fatalf("unexpected proxy config after update: %+v", got.ProxyConfig)
+	}
+	if got.ProxyConfig[3000].CORS == nil || got.ProxyConfig[3000].CORS.MaxAge != 60 {
+		t.Fatalf("unexpected cors config after update: %+v", got.ProxyConfig[3000])
+	}
+	if got.UpdatedAt <= 100 {
+		t.Fatalf("expected updated_at to advance, got %d", got.UpdatedAt)
+	}
+
+	if err := s.UpdateSandboxProxyConfig(t.Context(), "sb-update-proxy", nil); err != nil {
+		t.Fatalf("failed to clear sandbox proxy config: %v", err)
+	}
+
+	cleared, err := s.GetSandbox(t.Context(), "sb-update-proxy")
+	if err != nil {
+		t.Fatalf("failed to read cleared sandbox: %v", err)
+	}
+	if len(cleared.ProxyConfig) != 0 {
+		t.Fatalf("expected cleared proxy config, got %+v", cleared.ProxyConfig)
+	}
+}

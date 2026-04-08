@@ -232,6 +232,7 @@ export interface Sandbox {
 	repo_url?: string;
 	status: string;
 	owner_username?: string;
+	proxy_config?: Record<string, SandboxPortProxyConfig>;
 	ports?: PortSummary[];
 	preview_urls?: PreviewUrl[];
 	created_at: number;
@@ -361,6 +362,32 @@ const PortSummarySchema: Schema.Schema<PortSummary> = Schema.Struct({
 	ip: Schema.optional(Schema.String)
 }) as Schema.Schema<PortSummary>;
 
+const StringRecordSchema: Schema.Schema<Record<string, string>> = Schema.Record({
+	key: Schema.String,
+	value: Schema.String
+}) as unknown as Schema.Schema<Record<string, string>>;
+
+const SandboxPortCORSConfigSchema: Schema.Schema<SandboxPortCORSConfig> = Schema.Struct({
+	allow_origins: Schema.optional(Schema.Array(Schema.String)),
+	allow_methods: Schema.optional(Schema.Array(Schema.String)),
+	allow_headers: Schema.optional(Schema.Array(Schema.String)),
+	allow_credentials: Schema.optional(Schema.Boolean),
+	max_age: Schema.optional(Schema.Number)
+}) as Schema.Schema<SandboxPortCORSConfig>;
+
+const SandboxPortProxyConfigSchema: Schema.Schema<SandboxPortProxyConfig> = Schema.Struct({
+	request_headers: Schema.optional(StringRecordSchema),
+	response_headers: Schema.optional(StringRecordSchema),
+	cors: Schema.optional(SandboxPortCORSConfigSchema),
+	path_prefix_strip: Schema.optional(Schema.String),
+	skip_auth: Schema.optional(Schema.Boolean)
+}) as Schema.Schema<SandboxPortProxyConfig>;
+
+const SandboxProxyConfigSchema: Schema.Schema<Record<string, SandboxPortProxyConfig>> = Schema.Record({
+	key: Schema.String,
+	value: SandboxPortProxyConfigSchema
+}) as unknown as Schema.Schema<Record<string, SandboxPortProxyConfig>>;
+
 const ExecResponseSchema = Schema.Struct({
 	exec_id: Schema.String,
 	exit_code: Schema.optional(Schema.Number),
@@ -378,6 +405,7 @@ const SandboxSchema: Schema.Schema<Sandbox> = Schema.Struct({
 	repo_url: Schema.optional(Schema.String),
 	status: Schema.String,
 	owner_username: Schema.optional(Schema.String),
+	proxy_config: Schema.optional(SandboxProxyConfigSchema),
 	ports: Schema.optional(Schema.Array(PortSummarySchema)),
 	preview_urls: Schema.optional(Schema.Array(PreviewUrlSchema)),
 	created_at: Schema.Number,
@@ -1159,6 +1187,22 @@ export const stopSandbox = (
 	sandboxId: string
 ): Effect.Effect<Sandbox, ApiFailure, HttpClient.HttpClient> =>
 	postJson(config, `/api/sandboxes/${encodeURIComponent(sandboxId)}/stop`, {}, SandboxSchema);
+
+export const updateSandboxProxyConfig = (
+	config: ApiConfig,
+	sandboxId: string,
+	proxyConfig: Record<string, SandboxPortProxyConfig>
+): Effect.Effect<Sandbox, ApiFailure> =>
+	fetchJson(
+		config,
+		`/api/sandboxes/${encodeURIComponent(sandboxId)}/proxy-config`,
+		{
+			method: "PATCH",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ proxy_config: proxyConfig })
+		},
+		SandboxSchema
+	);
 
 export const deleteSandbox = (
 	config: ApiConfig,

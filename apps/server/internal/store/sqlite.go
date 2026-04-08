@@ -324,6 +324,34 @@ func (s *SQLiteStore) GetSandbox(ctx context.Context, sandboxID string) (Sandbox
 	return sandbox, nil
 }
 
+func (s *SQLiteStore) UpdateSandboxProxyConfig(ctx context.Context, sandboxID string, proxyConfig map[int]traefikcfg.ServiceProxyConfig) error {
+	proxyConfigJSON, err := marshalSandboxProxyConfig(proxyConfig)
+	if err != nil {
+		return err
+	}
+
+	result, err := s.db.ExecContext(
+		ctx,
+		`UPDATE sandboxes SET proxy_config_json = ?, updated_at = ? WHERE id = ?`,
+		proxyConfigJSON,
+		time.Now().Unix(),
+		sandboxID,
+	)
+	if err != nil {
+		return fmt.Errorf("update sandbox proxy config: %w", err)
+	}
+
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read rows affected: %w", err)
+	}
+	if changed == 0 {
+		return ErrSandboxNotFound
+	}
+
+	return nil
+}
+
 func (s *SQLiteStore) UpdateSandboxStatus(ctx context.Context, sandboxID string, status string) error {
 	result, err := s.db.ExecContext(
 		ctx,

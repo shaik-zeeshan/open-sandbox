@@ -144,6 +144,9 @@
 		}
 	}
 
+	// Drawer tab state
+	let activeDrawerTab = $state<"general" | "proxy">("general");
+
 	// Reset validation state when drawer closes
 	$effect(() => {
 		if (!showCreateForm) {
@@ -151,6 +154,7 @@
 			imageError = "";
 			repoUrlError = "";
 			formTouched = false;
+			activeDrawerTab = "general";
 		}
 	});
 
@@ -727,118 +731,151 @@
 		</div>
 	</div>
 
+	<!-- Drawer tab bar -->
+	<div class="drawer-tabs" role="tablist">
+		<button
+			class="drawer-tab"
+			class:drawer-tab--active={activeDrawerTab === "general"}
+			role="tab"
+			type="button"
+			aria-selected={activeDrawerTab === "general"}
+			onclick={() => activeDrawerTab = "general"}
+		>General</button>
+		<button
+			class="drawer-tab"
+			class:drawer-tab--active={activeDrawerTab === "proxy"}
+			role="tab"
+			type="button"
+			aria-selected={activeDrawerTab === "proxy"}
+			onclick={() => activeDrawerTab = "proxy"}
+		>
+			Proxy
+			{#if parsedProxyPorts.length > 0}
+				<span class="drawer-tab-badge">{parsedProxyPorts.length}</span>
+			{/if}
+		</button>
+	</div>
+
 	<div class="drawer-body">
 		<fieldset class="create-fieldset" disabled={createLoading}>
-			<div class="form-section">
-				<label class="field-col">
-					<span class="section-label">Sandbox name</span>
-					<input
-						class="field"
-						class:field--error={!!nameError}
-						bind:value={createName}
-						placeholder="my-workspace"
-						required
-						onblur={() => {
-							if (formTouched && createName.trim().length === 0) {
-								nameError = "Sandbox name is required.";
-							}
-						}}
-						oninput={() => {
-							if (createName.trim().length > 0) nameError = "";
-						}}
-					/>
-					{#if nameError}
-						<span class="field-inline-error">{nameError}</span>
-					{/if}
-				</label>
-			</div>
 
-			<div class="form-section">
-				<span class="section-label">Image</span>
-				<label class="field-col">
-					<div class:field--error={!!imageError} class="combobox-error-wrapper">
-						<Combobox
-							bind:value={createExistingImage}
-							options={localImageOptions}
-							placeholder="Search local images..."
-							emptyText={localImageOptions.length === 0 ? "No local images available." : "No matches"}
-						/>
-					</div>
-					{#if localImageOptions.length === 0}
-						<div class="create-image-empty">
-							<span class="field-help">No local images found. Create or pull one from the Images route.</span>
-							<a class="btn-ghost btn-xs" href={createImageHref}>Open Images</a>
-						</div>
-					{/if}
-					{#if imageError}
-						<span class="field-inline-error">{imageError}</span>
-					{/if}
-				</label>
-			</div>
-
-			<div class="form-section">
-				<span class="section-label form-section-title">Runtime options <span class="opt">(optional)</span></span>
-				<div class="form-row-2">
+			<!-- General tab -->
+			{#if activeDrawerTab === "general"}
+				<div class="form-section">
 					<label class="field-col">
-						<span class="section-label">Repo URL</span>
+						<span class="section-label">Sandbox name</span>
 						<input
 							class="field"
-							class:field--error={!!repoUrlError}
-							bind:value={createRepoUrl}
-							placeholder="https://github.com/org/repo.git"
+							class:field--error={!!nameError}
+							bind:value={createName}
+							placeholder="my-workspace"
+							required
+							onblur={() => {
+								if (formTouched && createName.trim().length === 0) {
+									nameError = "Sandbox name is required.";
+								}
+							}}
 							oninput={() => {
-								const v = createRepoUrl.trim();
-								if (v.length === 0 || isValidUrl(v)) repoUrlError = "";
+								if (createName.trim().length > 0) nameError = "";
 							}}
 						/>
-						{#if repoUrlError}
-							<span class="field-inline-error">{repoUrlError}</span>
+						{#if nameError}
+							<span class="field-inline-error">{nameError}</span>
 						{/if}
 					</label>
-					<label class="field-col">
-						<span class="section-label">Branch</span>
-						<input class="field" bind:value={createBranch} placeholder="main" />
-					</label>
 				</div>
-				<label class="field-col">
-					<span class="section-label">Workdir</span>
-					<input class="field" bind:value={createWorkdir} />
-					<span class="field-help">Leave empty to use the image <code class="inline-code">WORKDIR</code>. If the image does not define one, the sandbox keeps the container default working directory and skips the workspace volume.</span>
-				</label>
-				<div class="field-col">
-					<span class="section-label">Port mappings <span class="opt">(host → container)</span></span>
-					<PortsEditor bind:value={createPorts} />
-				</div>
-			</div>
 
-			<div class="form-section">
-				<span class="section-label form-section-title">Proxy settings <span class="opt">(optional)</span></span>
-				{#if parsedProxyPorts.length === 0}
-					<p class="field-help">Add port mappings above to configure per-port proxy settings.</p>
-				{:else}
-					{#each parsedProxyPorts as port}
-						<div class="proxy-port-block">
-							<div class="proxy-port-label">
-								<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
-								Port <code class="inline-code">{port}</code>
-							</div>
-							<ProxyConfigEditor
-								value={createProxyConfig[port] ?? null}
-								onchange={(v: SandboxPortProxyConfig | null) => {
-									if (v === null) {
-										const next = { ...createProxyConfig };
-										delete next[port];
-										createProxyConfig = next;
-									} else {
-										createProxyConfig = { ...createProxyConfig, [port]: v };
-									}
-								}}
+				<div class="form-section">
+					<span class="section-label">Image</span>
+					<label class="field-col">
+						<div class:field--error={!!imageError} class="combobox-error-wrapper">
+							<Combobox
+								bind:value={createExistingImage}
+								options={localImageOptions}
+								placeholder="Search local images..."
+								emptyText={localImageOptions.length === 0 ? "No local images available." : "No matches"}
 							/>
 						</div>
-					{/each}
-				{/if}
+						{#if localImageOptions.length === 0}
+							<div class="create-image-empty">
+								<span class="field-help">No local images found. Create or pull one from the Images route.</span>
+								<a class="btn-ghost btn-xs" href={createImageHref}>Open Images</a>
+							</div>
+						{/if}
+						{#if imageError}
+							<span class="field-inline-error">{imageError}</span>
+						{/if}
+					</label>
+				</div>
 
-		</div>
+				<div class="form-section">
+					<span class="section-label form-section-title">Runtime options <span class="opt">(optional)</span></span>
+					<div class="form-row-2">
+						<label class="field-col">
+							<span class="section-label">Repo URL</span>
+							<input
+								class="field"
+								class:field--error={!!repoUrlError}
+								bind:value={createRepoUrl}
+								placeholder="https://github.com/org/repo.git"
+								oninput={() => {
+									const v = createRepoUrl.trim();
+									if (v.length === 0 || isValidUrl(v)) repoUrlError = "";
+								}}
+							/>
+							{#if repoUrlError}
+								<span class="field-inline-error">{repoUrlError}</span>
+							{/if}
+						</label>
+						<label class="field-col">
+							<span class="section-label">Branch</span>
+							<input class="field" bind:value={createBranch} placeholder="main" />
+						</label>
+					</div>
+					<label class="field-col">
+						<span class="section-label">Workdir</span>
+						<input class="field" bind:value={createWorkdir} />
+						<span class="field-help">Leave empty to use the image <code class="inline-code">WORKDIR</code>. If the image does not define one, the sandbox keeps the container default working directory and skips the workspace volume.</span>
+					</label>
+					<div class="field-col">
+						<span class="section-label">Port mappings <span class="opt">(host → container)</span></span>
+						<PortsEditor bind:value={createPorts} />
+					</div>
+				</div>
+			{/if}
+
+			<!-- Proxy tab -->
+			{#if activeDrawerTab === "proxy"}
+				<div class="form-section proxy-tab-section">
+					{#if parsedProxyPorts.length === 0}
+						<div class="proxy-empty-state">
+							<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
+							<p class="field-help">No port mappings defined. Add port mappings on the <button type="button" class="tab-link" onclick={() => activeDrawerTab = "general"}>General</button> tab to configure per-port proxy settings.</p>
+						</div>
+					{:else}
+						{#each parsedProxyPorts as port}
+							<div class="proxy-port-block">
+								<div class="proxy-port-label">
+									<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
+									Port <code class="inline-code">{port}</code>
+								</div>
+								<ProxyConfigEditor
+									value={createProxyConfig[port] ?? null}
+									onchange={(v: SandboxPortProxyConfig | null) => {
+										if (v === null) {
+											const next = { ...createProxyConfig };
+											delete next[port];
+											createProxyConfig = next;
+										} else {
+											createProxyConfig = { ...createProxyConfig, [port]: v };
+										}
+									}}
+								/>
+							</div>
+						{/each}
+					{/if}
+				</div>
+			{/if}
 
 		</fieldset>
 	</div>
@@ -873,6 +910,98 @@
 		font-family: var(--font-mono);
 		font-size: 0.62rem;
 		color: var(--text-muted);
+	}
+
+	/* Drawer tab bar */
+	.drawer-tabs {
+		display: flex;
+		gap: 0;
+		border-bottom: 1px solid var(--border-dim);
+		padding: 0 1.25rem;
+		flex-shrink: 0;
+	}
+
+	.drawer-tab {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+		background: transparent;
+		border: none;
+		border-bottom: 2px solid transparent;
+		color: var(--text-muted);
+		font-family: var(--font-mono);
+		font-size: 0.68rem;
+		padding: 0.55rem 0.75rem 0.45rem;
+		cursor: pointer;
+		transition: color 0.12s, border-color 0.12s;
+		margin-bottom: -1px;
+		letter-spacing: 0.03em;
+	}
+
+	.drawer-tab:hover {
+		color: var(--text-secondary);
+	}
+
+	.drawer-tab--active {
+		color: var(--text-primary);
+		border-bottom-color: var(--accent, var(--text-primary));
+	}
+
+	.drawer-tab-badge {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 14px;
+		height: 14px;
+		padding: 0 3px;
+		background: var(--accent-dim, var(--bg-overlay));
+		border: 1px solid var(--border-mid);
+		border-radius: 3px;
+		font-family: var(--font-mono);
+		font-size: 0.55rem;
+		color: var(--text-secondary);
+		line-height: 1;
+	}
+
+	/* Proxy tab empty state */
+	.proxy-tab-section {
+		border-bottom: none;
+	}
+
+	.proxy-empty-state {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0.75rem;
+		padding: 2.5rem 1rem;
+		text-align: center;
+		color: var(--text-muted);
+	}
+
+	.proxy-empty-state svg {
+		opacity: 0.35;
+	}
+
+	.proxy-empty-state .field-help {
+		max-width: 260px;
+		text-align: center;
+	}
+
+	.tab-link {
+		background: none;
+		border: none;
+		padding: 0;
+		font-family: inherit;
+		font-size: inherit;
+		color: var(--text-secondary);
+		text-decoration: underline;
+		text-underline-offset: 2px;
+		cursor: pointer;
+		transition: color 0.12s;
+	}
+
+	.tab-link:hover {
+		color: var(--text-primary);
 	}
 
 	/* Inline validation */

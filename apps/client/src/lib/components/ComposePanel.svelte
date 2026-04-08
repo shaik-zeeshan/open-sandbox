@@ -3,6 +3,7 @@
 	import * as yaml from "js-yaml";
 	import CodeEditor from "./CodeEditor.svelte";
 	import ProxyConfigEditor from "./ProxyConfigEditor.svelte";
+	import Checkbox from "./Checkbox.svelte";
 	import {
 		formatApiFailure,
 		getComposeProject,
@@ -430,14 +431,12 @@
 				{:else}
 					<div class="services-grid">
 						{#each availableServices as service}
-							<label class="service-chip">
-								<input
-									type="checkbox"
-									checked={selectedServices.includes(service)}
-									onchange={() => toggleService(service)}
-								/>
-								<span>{service}</span>
-							</label>
+							<Checkbox
+								checked={selectedServices.includes(service)}
+								onchange={() => toggleService(service)}
+								label={service}
+								labelClass="service-chip{selectedServices.includes(service) ? ' service-chip--checked' : ''}"
+							/>
 						{/each}
 					</div>
 				{/if}
@@ -471,14 +470,8 @@
 			{/if}
 
 			<div class="compose-actions">
-				<label class="checkbox-row">
-					<input type="checkbox" bind:checked={removeVolumes} />
-					<span>Remove volumes</span>
-				</label>
-				<label class="checkbox-row">
-					<input type="checkbox" bind:checked={removeOrphans} />
-					<span>Remove orphans</span>
-				</label>
+				<Checkbox bind:checked={removeVolumes} label="Remove volumes" labelClass="checkbox-row" />
+				<Checkbox bind:checked={removeOrphans} label="Remove orphans" labelClass="checkbox-row" />
 				<div class="compose-actions-spacer"></div>
 				<button class="btn-primary" type="button" onclick={() => void runAction("up")} disabled={loading}>
 					{#if activeAction === "up"}
@@ -627,7 +620,7 @@
 		gap: 0.4rem;
 	}
 
-	.service-chip {
+	:global(.service-chip) {
 		display: inline-flex;
 		align-items: center;
 		gap: 0.35rem;
@@ -638,9 +631,21 @@
 		font-family: var(--font-mono);
 		font-size: 0.62rem;
 		color: var(--text-secondary);
+		transition: border-color 0.12s, background 0.12s, color 0.12s;
 	}
 
-	.checkbox-row {
+	:global(.service-chip:hover) {
+		border-color: var(--border-hi);
+		color: var(--text-primary);
+	}
+
+	:global(.service-chip--checked) {
+		border-color: var(--border-focus);
+		color: var(--text-primary);
+		background: var(--bg-overlay);
+	}
+
+	:global(.checkbox-row) {
 		display: inline-flex;
 		align-items: center;
 		gap: 0.4rem;

@@ -61,19 +61,24 @@ type PortSummary struct {
 }
 
 type SandboxResponse struct {
-	ID            string        `json:"id"`
-	Name          string        `json:"name"`
-	Image         string        `json:"image"`
-	ContainerID   string        `json:"container_id"`
-	WorkerID      string        `json:"worker_id,omitempty"`
-	WorkspaceDir  string        `json:"workspace_dir"`
-	RepoURL       string        `json:"repo_url,omitempty"`
-	Status        string        `json:"status"`
-	OwnerUsername string        `json:"owner_username,omitempty"`
-	Ports         []PortSummary `json:"ports,omitempty"`
-	PreviewURLs   []PreviewURL  `json:"preview_urls,omitempty"`
-	CreatedAt     int64         `json:"created_at"`
-	UpdatedAt     int64         `json:"updated_at"`
+	ID            string                             `json:"id"`
+	Name          string                             `json:"name"`
+	Image         string                             `json:"image"`
+	ContainerID   string                             `json:"container_id"`
+	WorkerID      string                             `json:"worker_id,omitempty"`
+	WorkspaceDir  string                             `json:"workspace_dir"`
+	RepoURL       string                             `json:"repo_url,omitempty"`
+	Status        string                             `json:"status"`
+	OwnerUsername string                             `json:"owner_username,omitempty"`
+	ProxyConfig   map[string]*SandboxPortProxyConfig `json:"proxy_config,omitempty"`
+	Ports         []PortSummary                      `json:"ports,omitempty"`
+	PreviewURLs   []PreviewURL                       `json:"preview_urls,omitempty"`
+	CreatedAt     int64                              `json:"created_at"`
+	UpdatedAt     int64                              `json:"updated_at"`
+}
+
+type UpdateSandboxProxyConfigRequest struct {
+	ProxyConfig map[string]*SandboxPortProxyConfig `json:"proxy_config"`
 }
 
 type CreateSandboxRequest struct {
@@ -636,6 +641,57 @@ func (s *Server) getSandbox(c *gin.Context) {
 			response.Status = runtime.Status
 			response.Ports = runtime.Ports
 			response.PreviewURLs = s.previewURLsForSandbox(sandbox.ID, runtime.Ports)
+		}
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+func (s *Server) updateSandboxProxyConfig(c *gin.Context) {
+	sandbox, ok := s.loadSandbox(c)
+	if !ok {
+		return
+	}
+
+	var req UpdateSandboxProxyConfigRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, err)
+		return
+	}
+
+	proxyConfig := parseSandboxPortProxyConfigs(req.ProxyConfig)
+	if err := s.sandboxStore.UpdateSandboxProxyConfig(c.Request.Context(), sandbox.ID, proxyConfig); err != nil {
+		if errors.Is(err, store.ErrSandboxNotFound) {
+			writeError(c, http.StatusNotFound, err)
+			return
+		}
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+
+	updated, err := s.sandboxStore.GetSandbox(c.Request.Context(), sandbox.ID)
+	if err != nil {
+		if errors.Is(err, store.ErrSandboxNotFound) {
+			writeError(c, http.StatusNotFound, err)
+			return
+		}
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+
+	s.syncTraefikRoutes(c.Request.Context())
+
+	response := sandboxToResponse(updated)
+	if runtimeByContainer, err := s.runtimeContainersByID(c.Request.Context()); err == nil {
+		if runtime, ok := runtimeByContainer[updated.ContainerID]; ok {
+			if liveState := strings.TrimSpace(runtime.State); liveState != "" {
+				response.Status = liveState
+			}
+			if liveStatus := strings.TrimSpace(runtime.Status); liveStatus != "" {
+				response.Status = liveStatus
+			}
+			response.Ports = runtime.Ports
+			response.PreviewURLs = s.previewURLsForSandbox(updated.ID, runtime.Ports)
 		}
 	}
 
@@ -1387,11 +1443,38 @@ func sandboxToResponse(sandbox store.Sandbox) SandboxResponse {
 		RepoURL:       sandbox.RepoURL,
 		Status:        sandbox.Status,
 		OwnerUsername: sandbox.OwnerUsername,
+		ProxyConfig:   sandboxProxyConfigToResponse(sandbox.ProxyConfig),
 		Ports:         nil,
 		PreviewURLs:   nil,
 		CreatedAt:     sandbox.CreatedAt,
 		UpdatedAt:     sandbox.UpdatedAt,
 	}
+}
+
+func sandboxProxyConfigToResponse(input map[int]traefikcfg.ServiceProxyConfig) map[string]*SandboxPortProxyConfig {
+	if len(input) == 0 {
+		return nil
+	}
+	result := make(map[string]*SandboxPortProxyConfig, len(input))
+	for port, cfg := range input {
+		responseCfg := &SandboxPortProxyConfig{
+			RequestHeaders:  cfg.RequestHeaders,
+			ResponseHeaders: cfg.ResponseHeaders,
+			PathPrefixStrip: strings.TrimSpace(cfg.PathPrefixStrip),
+			SkipAuth:        cfg.SkipAuth,
+		}
+		if cfg.CORS != nil {
+			responseCfg.CORS = &SandboxPortCORSConfig{
+				AllowOrigins:     cfg.CORS.AllowOrigins,
+				AllowMethods:     cfg.CORS.AllowMethods,
+				AllowHeaders:     cfg.CORS.AllowHeaders,
+				AllowCredentials: cfg.CORS.AllowCredentials,
+				MaxAge:           cfg.CORS.MaxAge,
+			}
+		}
+		result[strconv.Itoa(port)] = responseCfg
+	}
+	return result
 }
 
 // parseSandboxPortProxyConfigs converts the JSON-friendly string-keyed map
