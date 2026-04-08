@@ -264,7 +264,7 @@
 
 	.pce-section--inline {
 		flex-direction: row;
-		align-items: flex-start;
+		align-items: end;
 		flex-wrap: wrap;
 		gap: 0.75rem;
 	}
@@ -395,8 +395,8 @@
 
 	.pce-checkbox-row {
 		display: flex;
-		align-items: flex-end;
-		padding-top: 1.1rem;
+		align-items: center;
+		padding-bottom: 0.18rem;
 	}
 
 	.pce-cors-grid {

@@ -997,7 +997,7 @@
 						<span class="section-label">Tail</span>
 						<input class="field" bind:value={logTail} />
 					</label>
-					<Checkbox bind:checked={logFollow} label="Follow" />
+					<Checkbox bind:checked={logFollow} label="Follow" labelClass="logs-follow" />
 					<div class="logs-btns">
 						<button class="btn-primary btn-sm" type="button" onclick={() => void startLogs()} disabled={streaming}>
 							{streaming ? "Streaming..." : "Start"}
@@ -1644,6 +1644,12 @@
 		background: var(--bg-raised);
 		border: 1px solid var(--border-dim);
 		border-radius: var(--radius-md);
+	}
+	:global(.logs-follow) {
+		--cb-font-size: 0.64rem;
+		--cb-gap: 0.8rem;
+		--cb-box-size: 1.35em;
+		margin-bottom: 0.4rem;
 	}
 	.logs-btns { display: flex; gap: 0.4rem; align-items: center; }
 	.live-pill {

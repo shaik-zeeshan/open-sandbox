@@ -34,161 +34,162 @@
 		onchange?.(checked);
 	}
 
-	function onKeydown(e: KeyboardEvent): void {
-		if (e.key === " " || e.key === "Enter") {
-			e.preventDefault();
+	function onKeydown(event: KeyboardEvent): void {
+		if (event.key === " " || event.key === "Enter") {
+			event.preventDefault();
 			toggle();
 		}
 	}
 </script>
 
-<span
-	class="cb-root {labelClass}"
-	class:cb-disabled={disabled}
-	role="checkbox"
-	aria-checked={checked}
-	aria-disabled={disabled}
-	tabindex={disabled ? -1 : 0}
-	onclick={toggle}
-	onkeydown={onKeydown}
->
-	<!-- hidden native input keeps form semantics & accessibility tree correct -->
+<span class="cb-root {labelClass}">
 	<input
 		type="checkbox"
-		{checked}
+		bind:checked
 		{disabled}
+		class="cb-native"
 		tabindex="-1"
 		aria-hidden="true"
-		class="cb-native"
 		onchange={() => {}}
 	/>
 
-	<!-- visual box -->
-	<span class="cb-box" class:cb-checked={checked}>
-		{#if checked}
-			<svg
-				class="cb-mark"
-				viewBox="0 0 10 8"
-				fill="none"
-				xmlns="http://www.w3.org/2000/svg"
-				aria-hidden="true"
-			>
-				<polyline
-					points="1,4.2 3.8,7 9,1"
-					stroke="currentColor"
-					stroke-width="1.6"
-					stroke-linecap="round"
-					stroke-linejoin="round"
-				/>
-			</svg>
+	<span
+		class="cb-ui"
+		class:cb-disabled={disabled}
+		role="checkbox"
+		aria-checked={checked}
+		aria-disabled={disabled}
+		tabindex={disabled ? -1 : 0}
+		onclick={toggle}
+		onkeydown={onKeydown}
+	>
+		<span class="cb-box" aria-hidden="true">
+			<span class="cb-mark"></span>
+		</span>
+
+		{#if label || children}
+			<span class="cb-content">
+				{#if label}
+					<span class="cb-label">{label}</span>
+				{/if}
+
+				{#if children}
+					{@render children()}
+				{/if}
+			</span>
 		{/if}
 	</span>
-
-	{#if label}
-		<span class="cb-label">{label}</span>
-	{/if}
-
-	{#if children}
-		{@render children()}
-	{/if}
 </span>
 
 <style>
-	/* ── Root span ──────────────────────────────────────────────────────── */
 	.cb-root {
 		display: inline-flex;
+		position: relative;
+		font-size: var(--cb-font-size, 0.7rem);
+		line-height: 1.35;
+	}
+
+	.cb-ui {
+		display: inline-flex;
 		align-items: center;
-		gap: 0.45rem;
+		gap: var(--cb-gap, 1.05em);
 		cursor: pointer;
 		user-select: none;
 		outline: none;
 		font-family: var(--font-mono);
-		font-size: 0.7rem;
+		font-size: inherit;
+		line-height: inherit;
 		font-weight: 400;
-		color: var(--text-secondary);
-		transition: color 0.1s;
+		color: var(--cb-label-color, var(--text-secondary));
+		transition: color 0.12s var(--ease-out);
 	}
 
-	.cb-root:hover:not(.cb-disabled) {
-		color: var(--text-primary);
-	}
-
-	/* keyboard focus ring – same treatment as .field */
-	.cb-root:focus-visible .cb-box {
-		border-color: var(--border-focus);
-		box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.05);
+	.cb-ui:hover:not(.cb-disabled) {
+		color: var(--cb-label-hover, var(--text-primary));
 	}
 
 	.cb-disabled {
-		opacity: 0.3;
+		opacity: 0.45;
 		cursor: not-allowed;
 	}
 
-	/* ── Hide the native input completely ───────────────────────────────── */
 	.cb-native {
 		position: absolute;
+		left: 0;
+		top: 0;
 		opacity: 0;
-		width: 0;
-		height: 0;
+		width: 1px;
+		height: 1px;
+		margin: 0;
 		pointer-events: none;
 	}
 
-	/* ── Visual box ─────────────────────────────────────────────────────── */
 	.cb-box {
-		position: relative;
 		flex-shrink: 0;
-		width: 12px;
-		height: 12px;
-		border: 1px solid var(--border-hi);
-		border-radius: var(--radius-sm);
-		background: var(--bg-raised);
-		display: grid;
-		place-items: center;
+		width: var(--cb-box-size, 1.45em);
+		height: var(--cb-box-size, 1.45em);
+		border: 0.125em solid var(--cb-border, #4a4a4a);
+		border-radius: var(--cb-radius, 0.54em);
+		background: var(--cb-bg, #151515);
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		box-shadow: 0 0.04rem 0.18rem rgba(0, 0, 0, 0.16);
 		transition:
-			border-color 0.12s var(--ease-out),
-			background   0.12s var(--ease-out),
-			box-shadow   0.12s var(--ease-out);
+			border-color 0.14s var(--ease-out),
+			background 0.14s var(--ease-out),
+			box-shadow 0.14s var(--ease-out),
+			transform 0.14s var(--ease-out);
 	}
 
-	.cb-root:hover:not(.cb-disabled) .cb-box {
-		border-color: var(--border-focus);
-		background: var(--bg-overlay);
+	.cb-ui:hover:not(.cb-disabled) .cb-box {
+		border-color: var(--cb-border-hover, #5c5c5c);
+		background: var(--cb-bg-hover, #1a1a1a);
 	}
 
-	/* checked state */
-	.cb-box.cb-checked {
-		background: var(--text-primary);
-		border-color: var(--text-primary);
-		box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.06);
+	.cb-ui:focus-visible .cb-box {
+		box-shadow:
+			0 0 0 3px rgba(255, 255, 255, 0.12),
+			0 0.04rem 0.18rem rgba(0, 0, 0, 0.16);
 	}
 
-	.cb-root:hover:not(.cb-disabled) .cb-box.cb-checked {
-		background: var(--accent-solid);
-		border-color: var(--accent-solid);
+	.cb-native:checked + .cb-ui .cb-box {
+		background: var(--cb-checked-bg, #ededed);
+		border-color: var(--cb-checked-bg, #ededed);
+		box-shadow: 0 0.04rem 0.18rem rgba(0, 0, 0, 0.12);
 	}
 
-	/* ── SVG checkmark ──────────────────────────────────────────────────── */
+	.cb-native:checked + .cb-ui:hover:not(.cb-disabled) .cb-box {
+		background: var(--cb-checked-hover, #f4f4f4);
+		border-color: var(--cb-checked-hover, #f4f4f4);
+	}
+
 	.cb-mark {
-		display: block;
-		width: 10px;
-		height: 8px;
-		color: var(--bg-base);
-		animation: cb-pop 0.18s var(--ease-spring) both;
+		width: 0.4em;
+		height: 0.8em;
+		border-right: 0.2em solid #1f1f1f;
+		border-bottom: 0.2em solid #1f1f1f;
+		border-radius: 0.08em;
+		opacity: 0;
+		transform: translate(-4%, -12%) rotate(45deg) scale(0.62);
+		transition:
+			opacity 0.12s var(--ease-out),
+			transform 0.16s var(--ease-out);
 	}
 
-	@keyframes cb-pop {
-		from {
-			opacity: 0;
-			transform: scale(0.5);
-		}
-		to {
-			opacity: 1;
-			transform: scale(1);
-		}
+	.cb-native:checked + .cb-ui .cb-mark {
+		opacity: 1;
+		transform: translate(-4%, -12%) rotate(45deg) scale(1);
 	}
 
-	/* ── Label text ─────────────────────────────────────────────────────── */
+	.cb-content {
+		display: flex;
+		flex-direction: column;
+		gap: 0.18rem;
+		min-width: 0;
+	}
+
 	.cb-label {
-		line-height: 1;
+		line-height: 1.35;
 	}
 </style>
