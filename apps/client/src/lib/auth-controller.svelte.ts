@@ -32,60 +32,88 @@ export const clearAuthNotice = (): void => {
 	authController.authNotice = "";
 };
 
-export const checkHealth = async (): Promise<void> => {
-	authController.health = "checking";
-	authController.healthMessage = "Checking...";
-	try {
-		const result = await runClientEffect(healthCheck(clientState.config));
-		authController.health = result.status === "ok" ? "ok" : "error";
-		authController.healthMessage = result.status === "ok" ? "Reachable" : `Status: ${result.status}`;
-	} catch (error) {
-		authController.health = "error";
-		authController.healthMessage = formatApiFailure(error);
-	}
-};
+const checkHealthProgram = (): Effect.Effect<void, never, HttpClient.HttpClient> =>
+	Effect.gen(function* () {
+		yield* Effect.sync(() => {
+			authController.health = "checking";
+			authController.healthMessage = "Checking...";
+		});
 
-export const refreshAuthSession = async (): Promise<boolean> => {
-	try {
-		const refreshed = await runClientEffect(refreshSession({ baseUrl: clientState.baseUrl }));
-		applyAuthSession(refreshed);
-		return true;
-	} catch {
-		return false;
-	}
-};
+		const result = yield* Effect.match(healthCheck(clientState.config), {
+			onFailure: (error) => ({
+				health: "error" as const,
+				message: formatApiFailure(error)
+			}),
+			onSuccess: (status) => ({
+				health: status.status === "ok" ? ("ok" as const) : ("error" as const),
+				message: status.status === "ok" ? "Reachable" : `Status: ${status.status}`
+			})
+		});
 
-export const restoreSession = async (): Promise<void> => {
-	beginAuthCheck();
-	try {
-		const session = await runClientEffect(getSession({ baseUrl: clientState.baseUrl }));
-		applyAuthSession(session);
-	} catch (error) {
-		if (await refreshAuthSession()) {
+		yield* Effect.sync(() => {
+			authController.health = result.health;
+			authController.healthMessage = result.message;
+		});
+	});
+
+const refreshAuthSessionProgram = (): Effect.Effect<boolean, never, HttpClient.HttpClient> =>
+	Effect.match(refreshSession({ baseUrl: clientState.baseUrl }), {
+		onFailure: () => false,
+		onSuccess: (refreshed) => {
+			applyAuthSession(refreshed);
+			return true;
+		}
+	});
+
+const restoreSessionProgram = (): Effect.Effect<void, never, HttpClient.HttpClient> =>
+	Effect.gen(function* () {
+		yield* Effect.sync(beginAuthCheck);
+
+		const sessionResult = yield* Effect.either(getSession({ baseUrl: clientState.baseUrl }));
+		if (sessionResult._tag === "Right") {
+			applyAuthSession(sessionResult.right);
 			return;
 		}
 
-		const message = formatApiFailure(error);
-		clearAuth();
-		if (!message.startsWith("Unauthorized:")) {
-			toast.error(message);
+		const refreshed = yield* refreshAuthSessionProgram();
+		if (refreshed) {
+			return;
 		}
-	}
-};
 
-export const signOut = async (revoke = true): Promise<void> => {
-	if (revoke) {
-		try {
-			await runClientEffect(logout({ baseUrl: clientState.baseUrl }));
-		} catch {
-			// Always clear client auth state even if server-side revoke fails.
-			toast.warn("Sign out completed, but session cleanup failed.");
+		const message = formatApiFailure(sessionResult.left);
+
+		yield* Effect.sync(() => {
+			clearAuth();
+			if (!message.startsWith("Unauthorized:")) {
+				toast.error(message);
+			}
+		});
+	});
+
+const signOutProgram = (revoke: boolean): Effect.Effect<void, never, HttpClient.HttpClient> =>
+	Effect.gen(function* () {
+		if (revoke) {
+			yield* Effect.catchAll(logout({ baseUrl: clientState.baseUrl }), () =>
+				Effect.sync(() => {
+					// Always clear client auth state even if server-side revoke fails.
+					toast.warn("Sign out completed, but session cleanup failed.");
+				})
+			);
 		}
-	}
 
-	clearAuth();
-	clearAuthNotice();
-};
+		yield* Effect.sync(() => {
+			clearAuth();
+			clearAuthNotice();
+		});
+	});
+
+export const checkHealth = (): Promise<void> => runClientEffect(checkHealthProgram());
+
+export const refreshAuthSession = (): Promise<boolean> => runClientEffect(refreshAuthSessionProgram());
+
+export const restoreSession = (): Promise<void> => runClientEffect(restoreSessionProgram());
+
+export const signOut = (revoke = true): Promise<void> => runClientEffect(signOutProgram(revoke));
 
 export const handleAuthError = (message = "Session expired. Sign in again."): void => {
 	clearAuth();

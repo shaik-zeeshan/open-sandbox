@@ -13,6 +13,26 @@
 	const APP_NAME = "Open Sandbox";
 	const healthDebouncer = createDebouncer(400);
 
+	const redirectHome = (): void => {
+		if (page.url.pathname !== "/") {
+			void goto("/");
+		}
+	};
+
+	const refreshAndHandleFailure = (): Promise<void> =>
+		refreshAuthSession().then((ok) => {
+			if (ok) {
+				return;
+			}
+			handleAuthError();
+			redirectHome();
+		});
+
+	const handleAuthErrorAndRedirect = (): void => {
+		handleAuthError();
+		redirectHome();
+	};
+
 	const formatSegment = (segment: string): string => {
 		const decoded = decodeURIComponent(segment).replace(/[-_]+/g, " ").trim();
 		if (decoded.length === 0) {
@@ -72,17 +92,6 @@
 			return;
 		}
 
-		const refreshAndHandleFailure = async (): Promise<void> => {
-			if (await refreshAuthSession()) {
-				return;
-			}
-
-			handleAuthError();
-			if (page.url.pathname !== "/") {
-				await goto("/");
-			}
-		};
-
 		const delay = clientState.tokenExpiresAt * 1000 - Date.now() - 60_000;
 		if (delay <= 0) {
 			void refreshAndHandleFailure();
@@ -107,12 +116,7 @@
 
 	onMount(() => {
 		void restoreSession();
-		const cleanup = onAuthErrorEvent(() => {
-			handleAuthError();
-			if (page.url.pathname !== "/") {
-				void goto("/");
-			}
-		});
+		const cleanup = onAuthErrorEvent(handleAuthErrorAndRedirect);
 		return cleanup;
 	});
 </script>

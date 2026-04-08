@@ -7,8 +7,10 @@
 		runApiEffect,
 		updateUserPassword
 	} from "$lib/api";
+	import { isValidClientUrl, normalizeClientEndpointUrl } from "$lib/client/url";
 	import { clientState, setBaseUrl } from "$lib/stores.svelte";
 	import { toast } from "$lib/toast.svelte";
+	import { Effect } from "effect";
 
 	// Endpoint settings
 	let endpointValue = $state(clientState.baseUrl);
@@ -26,15 +28,12 @@
 	let passwordSuccess = $state(false);
 	let passwordSuccessTimer: TimeoutHandle | null = null;
 
-	const isValidUrl = (v: string): boolean => {
-		try { new URL(v); return true; } catch { return false; }
-	};
-
-	const endpointValid = $derived(isValidUrl(endpointValue));
+	const endpointValid = $derived(isValidClientUrl(endpointValue));
 
 	function applyEndpoint(): void {
-		if (!endpointValid) return;
-		setBaseUrl(endpointValue.replace(/\/$/, ""));
+		const normalizedEndpoint = normalizeClientEndpointUrl(endpointValue);
+		if (normalizedEndpoint === null) return;
+		setBaseUrl(normalizedEndpoint);
 		endpointSaved = true;
 		clearScheduledTimeout(endpointSavedTimer);
 		endpointSavedTimer = scheduleTimeout(() => {
@@ -43,47 +42,81 @@
 		}, 2000);
 	}
 
-	async function changePassword(): Promise<void> {
-		passwordError = "";
-		passwordFieldError = "";
-		passwordSuccess = false;
-		clearScheduledTimeout(passwordSuccessTimer);
-		if (newPassword !== confirmPassword) {
-			passwordFieldError = "Passwords do not match.";
-			return;
-		}
-		if (newPassword.length < 4) {
-			passwordFieldError = "Password must be at least 4 characters.";
-			return;
-		}
-		passwordLoading = true;
-		try {
-			await runApiEffect(updateUserPassword(clientState.config, clientState.userId, newPassword));
-			toast.ok("Password updated successfully.");
-			currentPassword = "";
-			newPassword = "";
-			confirmPassword = "";
-			passwordSuccess = true;
-			passwordSuccessTimer = scheduleTimeout(() => {
+	const changePasswordProgram = (): Effect.Effect<void, never> =>
+		Effect.gen(function* () {
+			yield* Effect.sync(() => {
+				passwordError = "";
+				passwordFieldError = "";
 				passwordSuccess = false;
-				passwordSuccessTimer = null;
-			}, 3000);
-		} catch (error) {
-			passwordError = formatApiFailure(error);
-		} finally {
-			passwordLoading = false;
-		}
+				clearScheduledTimeout(passwordSuccessTimer);
+			});
+
+			if (newPassword !== confirmPassword) {
+				yield* Effect.sync(() => {
+					passwordFieldError = "Passwords do not match.";
+				});
+				return;
+			}
+
+			if (newPassword.length < 4) {
+				yield* Effect.sync(() => {
+					passwordFieldError = "Password must be at least 4 characters.";
+				});
+				return;
+			}
+
+			yield* Effect.sync(() => {
+				passwordLoading = true;
+			});
+
+			const result = yield* Effect.match(
+				Effect.promise(() => runApiEffect(updateUserPassword(clientState.config, clientState.userId, newPassword))),
+				{
+					onFailure: (error) => ({ ok: false as const, error }),
+					onSuccess: () => ({ ok: true as const })
+				}
+			);
+
+			yield* Effect.sync(() => {
+				if (!result.ok) {
+					passwordError = formatApiFailure(result.error);
+					passwordLoading = false;
+					return;
+				}
+
+				toast.ok("Password updated successfully.");
+				currentPassword = "";
+				newPassword = "";
+				confirmPassword = "";
+				passwordSuccess = true;
+				passwordSuccessTimer = scheduleTimeout(() => {
+					passwordSuccess = false;
+					passwordSuccessTimer = null;
+				}, 3000);
+				passwordLoading = false;
+			});
+		});
+
+	async function changePassword(): Promise<void> {
+		await Effect.runPromise(changePasswordProgram());
 	}
 
+	const pingAndToastProgram = (): Effect.Effect<void, never> =>
+		Effect.gen(function* () {
+			const toastId = yield* Effect.sync(() => toast.loading("Testing connection..."));
+			yield* Effect.promise(() => checkHealth());
+			yield* Effect.sync(() => {
+				if (authController.health === "ok") {
+					toast.update(toastId, "ok", "Connected.");
+					return;
+				}
+
+				toast.update(toastId, "error", authController.healthMessage);
+			});
+		});
 
 	async function pingAndToast(): Promise<void> {
-		const toastId = toast.loading("Testing connection...");
-		await checkHealth();
-		if (authController.health === "ok") {
-			toast.update(toastId, "ok", "Connected.");
-		} else {
-			toast.update(toastId, "error", authController.healthMessage);
-		}
+		await Effect.runPromise(pingAndToastProgram());
 	}
 
 	$effect(() => {

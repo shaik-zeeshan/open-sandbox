@@ -572,13 +572,19 @@ const extractAuthReason = (payload: unknown): string | undefined => {
 	return undefined;
 };
 
-const decodeResponsePayload = <A, I = A>(
+function decodeResponsePayload(status: number, payload: unknown): Effect.Effect<unknown, never>;
+function decodeResponsePayload<A, I = A>(
+	status: number,
+	payload: unknown,
+	schema: Schema.Schema<A, I>
+): Effect.Effect<A, ApiFailure>;
+function decodeResponsePayload<A, I = A>(
 	status: number,
 	payload: unknown,
 	schema?: Schema.Schema<A, I>
-): Effect.Effect<A, ApiFailure> => {
+): Effect.Effect<unknown, ApiFailure> {
 	if (schema === undefined) {
-		return Effect.succeed(payload as A);
+		return Effect.succeed(payload);
 	}
 
 	return pipe(
@@ -592,24 +598,29 @@ const decodeResponsePayload = <A, I = A>(
 				})
 		)
 	);
-};
+}
 
 const readResponsePayload = (response: Response): Effect.Effect<unknown, never> =>
-	Effect.promise(async () => {
-		try {
-			const text = await response.text();
+	pipe(
+		Effect.tryPromise({
+			try: () => response.text(),
+			catch: () => undefined
+		}),
+		Effect.flatMap((text) => {
 			if (text.trim().length === 0) {
-				return "";
+				return Effect.succeed<unknown>("");
 			}
-			try {
-				return JSON.parse(text) as unknown;
-			} catch {
-				return text;
-			}
-		} catch {
-			return "";
-		}
-	});
+
+			return pipe(
+				Effect.try({
+					try: () => JSON.parse(text) as unknown,
+					catch: () => undefined
+				}),
+				Effect.orElseSucceed(() => text)
+			);
+		}),
+		Effect.orElseSucceed(() => "")
+	);
 
 const readClientPayload = (response: HttpClientResponse.HttpClientResponse): Effect.Effect<unknown, never> =>
 	pipe(response.json, Effect.orElse(() => response.text), Effect.orElseSucceed(() => ""));
@@ -617,8 +628,8 @@ const readClientPayload = (response: HttpClientResponse.HttpClientResponse): Eff
 const fetchJson = <A, I = A>(
 	config: ApiConfig,
 	path: string,
-	init?: RequestInit,
-	schema?: Schema.Schema<A, I>
+	schema: Schema.Schema<A, I>,
+	init?: RequestInit
 ): Effect.Effect<A, ApiFailure> =>
 	Effect.gen(function* () {
 		const headers = new Headers(init?.headers);
@@ -682,7 +693,7 @@ const configureRequest = (
 const requestJson = <A, I = A>(
 	config: ApiConfig,
 	request: HttpClientRequest.HttpClientRequest,
-	schema?: Schema.Schema<A, I>
+	schema: Schema.Schema<A, I>
 ): Effect.Effect<A, ApiFailure, HttpClient.HttpClient> =>
 	Effect.gen(function* () {
 		const client = yield* HttpClient.HttpClient;
@@ -719,7 +730,7 @@ const postJson = <TPayload, A, I = A>(
 	config: ApiConfig,
 	path: string,
 	payload: TPayload,
-	schema?: Schema.Schema<A, I>
+	schema: Schema.Schema<A, I>
 ): Effect.Effect<A, ApiFailure, HttpClient.HttpClient> => {
 	const request = pipe(HttpClientRequest.post(path), HttpClientRequest.bodyUnsafeJson(payload));
 	return requestJson(config, request, schema);
@@ -1222,12 +1233,12 @@ export const updateSandboxProxyConfig = (
 	fetchJson(
 		config,
 		`/api/sandboxes/${encodeURIComponent(sandboxId)}/proxy-config`,
+		SandboxSchema,
 		{
 			method: "PATCH",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ proxy_config: proxyConfig })
-		},
-		SandboxSchema
+		}
 	);
 
 export const deleteSandbox = (
@@ -1269,11 +1280,11 @@ export const uploadSandboxFile = (
 	return fetchJson(
 		config,
 		`/api/sandboxes/${encodeURIComponent(sandboxId)}/files`,
+		ItemUploadedResponseSchema,
 		{
 			method: "PUT",
 			body: formData
-		},
-		ItemUploadedResponseSchema
+		}
 	);
 };
 
@@ -1318,11 +1329,11 @@ export const uploadContainerFile = (
 	return fetchJson(
 		config,
 		`/api/containers/${encodeURIComponent(containerId)}/files`,
+		ContainerUploadedResponseSchema,
 		{
 			method: "PUT",
 			body: formData
-		},
-		ContainerUploadedResponseSchema
+		}
 	);
 };
 

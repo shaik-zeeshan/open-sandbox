@@ -55,6 +55,7 @@
 	} from "$lib/stores.svelte";
 	import { toast } from "$lib/toast.svelte";
 	import { scheduleTimeout } from "$lib/client/browser";
+	import { isValidClientUrl, normalizeClientEndpointUrl } from "$lib/client/url";
 
 	// ── Sidebar collapse ───────────────────────────────────────────────────────
 	// (managed in PageShell, but we need nothing here for +page.svelte)
@@ -130,17 +131,8 @@
 	let pendingContainerActivationId = $state<string | null>(null);
 	let activeRuntimeContainerSnapshot = $state<ContainerSummary | null>(null);
 
-	const isValidUrl = (value: string): boolean => {
-		try {
-			new URL(value);
-			return true;
-		} catch {
-			return false;
-		}
-	};
-
 	const endpointDirty = $derived(endpointValue !== clientState.baseUrl);
-	const endpointValid = $derived(isValidUrl(endpointValue));
+	const endpointValid = $derived(isValidClientUrl(endpointValue));
 
 	const activeSandbox = $derived.by(() => {
 		const currentActive = activeWorkload;
@@ -213,15 +205,29 @@
 		createProxyConfig = { ...draft.proxyConfig };
 	}
 
-	async function resolveSetupStatus(): Promise<void> {
-		try {
-			const setup = await runApiEffect(getSetupStatus({ baseUrl: clientState.baseUrl }), { notifyAuthError: false });
-			bootstrapRequired = setup.bootstrap_required;
-		} catch (error) {
-			bootstrapRequired = false;
-			loginError = formatApiFailure(error);
-		}
-	}
+	const resolveSetupStatusProgram = (baseUrl: string): Effect.Effect<void, never> =>
+		Effect.gen(function* () {
+			const result = yield* Effect.match(
+				runApiProgram(getSetupStatus({ baseUrl }), { notifyAuthError: false }),
+				{
+					onFailure: (error) => ({
+						bootstrapRequired: false,
+						loginError: formatApiFailure(error)
+					}),
+					onSuccess: (setup) => ({
+						bootstrapRequired: setup.bootstrap_required,
+						loginError: null as string | null
+					})
+				}
+			);
+
+			yield* Effect.sync(() => {
+				bootstrapRequired = result.bootstrapRequired;
+				if (result.loginError !== null) {
+					loginError = result.loginError;
+				}
+			});
+		});
 
 	$effect(() => {
 		clientState.baseUrl;
@@ -229,8 +235,9 @@
 	});
 
 	function applyEndpoint(): void {
-		if (!endpointValid) return;
-		setBaseUrl(endpointValue.replace(/\/$/, ""));
+		const normalizedEndpoint = normalizeClientEndpointUrl(endpointValue);
+		if (normalizedEndpoint === null) return;
+		setBaseUrl(normalizedEndpoint);
 		endpointSaved = true;
 		scheduleTimeout(() => {
 			endpointSaved = false;
@@ -258,43 +265,90 @@
 			return;
 		}
 		setupStatusCheckedBaseUrl = baseUrl;
-		void resolveSetupStatus();
+		void runProgram(resolveSetupStatusProgram(baseUrl));
 	});
 
 	// ── Auth actions ───────────────────────────────────────────────────────────
-	async function submitLogin(): Promise<void> {
+	const authenticateProgram = (options: {
+		baseUrl: string;
+		username: string;
+		password: string;
+		bootstrapMode: boolean;
+	}) =>
+		runApiProgram(
+			options.bootstrapMode
+				? bootstrap({ baseUrl: options.baseUrl }, options.username, options.password)
+				: login({ baseUrl: options.baseUrl }, options.username, options.password),
+			{ notifyAuthError: false }
+		);
+
+	const submitLoginProgram = (options: {
+		baseUrl: string;
+		username: string;
+		password: string;
+		bootstrapMode: boolean;
+	}): Effect.Effect<void, never> =>
+		Effect.gen(function* () {
+			yield* Effect.sync(() => {
+				loginLoading = true;
+			});
+			const toastId = yield* Effect.sync(() =>
+				toast.loading(options.bootstrapMode ? "Creating admin account..." : "Authenticating...")
+			);
+
+			const outcome = yield* Effect.matchEffect(authenticateProgram(options), {
+				onFailure: (error) => Effect.succeed({ ok: false as const, error }),
+				onSuccess: (response) =>
+					Effect.gen(function* () {
+						yield* Effect.sync(() => {
+							setAuthSession({
+								userId: response.user_id,
+								username: response.username,
+								role: response.role,
+								expiresAt: response.expires_at
+							});
+							bootstrapRequired = false;
+							loginUsername = "";
+							loginPassword = "";
+							toast.update(toastId, "ok", "Signed in.");
+						});
+
+						const refreshResult = yield* Effect.matchEffect(Effect.promise(() => refreshData()), {
+							onFailure: (error) => Effect.succeed({ ok: false as const, error }),
+							onSuccess: () => Effect.succeed({ ok: true as const })
+						});
+
+						return refreshResult.ok
+							? ({ ok: true as const })
+							: ({ ok: false as const, error: refreshResult.error });
+					})
+			});
+
+			yield* Effect.sync(() => {
+				if (!outcome.ok) {
+					const message = formatApiFailure(outcome.error);
+					loginError = message;
+					toast.update(toastId, "error", message);
+				}
+				loginLoading = false;
+			});
+		});
+
+	function submitLogin(): Promise<void> {
 		loginError = "";
 		clearAuthNotice();
 		if (loginUsername.trim().length === 0 || loginPassword.trim().length === 0) {
 			loginError = "Username and password are required.";
-			return;
+			return Promise.resolve();
 		}
-		loginLoading = true;
-		const toastId = toast.loading(bootstrapRequired ? "Creating admin account..." : "Authenticating...");
-		try {
-			const r = await runApiEffect(
-				bootstrapRequired
-					? bootstrap({ baseUrl: clientState.baseUrl }, loginUsername, loginPassword)
-					: login({ baseUrl: clientState.baseUrl }, loginUsername, loginPassword),
-				{ notifyAuthError: false }
-			);
-			setAuthSession({
-				userId: r.user_id,
-				username: r.username,
-				role: r.role,
-				expiresAt: r.expires_at
-			});
-			bootstrapRequired = false;
-			loginUsername = "";
-			loginPassword = "";
-			toast.update(toastId, "ok", "Signed in.");
-			await refreshData();
-		} catch (err) {
-			loginError = formatApiFailure(err);
-			toast.update(toastId, "error", formatApiFailure(err));
-		} finally {
-			loginLoading = false;
-		}
+		return runProgram(
+			submitLoginProgram({
+				baseUrl: clientState.baseUrl,
+				username: loginUsername,
+				password: loginPassword,
+				bootstrapMode: bootstrapRequired
+			})
+		);
 	}
 
 	async function signOut(revoke = true): Promise<void> {
@@ -374,72 +428,128 @@
 			}
 		});
 
+	const enqueueRefresh = (options: ResolvedRefreshOptions): void => {
+		queuedRefreshIncludeImages = queuedRefreshIncludeImages || options.includeImages;
+		queuedRefreshShowLoading = queuedRefreshShowLoading || options.showLoading;
+		queuedRefreshNotifyOnError = queuedRefreshNotifyOnError || options.notifyOnError;
+		queuedRefreshPollingSafeRetry = queuedRefreshPollingSafeRetry || options.pollingSafeRetry;
+		queuedRefreshForce = queuedRefreshForce || options.force;
+	};
+
+	const dequeueRefresh = (): RefreshOptions | null => {
+		if (
+			!queuedRefreshIncludeImages &&
+			!queuedRefreshShowLoading &&
+			!queuedRefreshNotifyOnError &&
+			!queuedRefreshPollingSafeRetry &&
+			!queuedRefreshForce
+		) {
+			return null;
+		}
+
+		const nextIncludeImages = queuedRefreshIncludeImages;
+		const nextShowLoading = queuedRefreshShowLoading;
+		const nextNotifyOnError = queuedRefreshNotifyOnError;
+		const nextPollingSafeRetry = queuedRefreshPollingSafeRetry;
+		const nextForce = queuedRefreshForce;
+		queuedRefreshIncludeImages = false;
+		queuedRefreshShowLoading = false;
+		queuedRefreshNotifyOnError = false;
+		queuedRefreshPollingSafeRetry = false;
+		queuedRefreshForce = false;
+
+		return {
+			includeImages: nextIncludeImages,
+			showLoading: nextShowLoading,
+			notifyOnError: nextNotifyOnError,
+			pollingSafeRetry: nextPollingSafeRetry,
+			force: nextForce
+		};
+	};
+
+	const runRefreshCycleProgram = (options: ResolvedRefreshOptions): Effect.Effect<void, never> => {
+		const baseProgram = refreshDataProgram(options);
+		const resilientProgram = options.pollingSafeRetry ? withPollingRetry(baseProgram) : baseProgram;
+		const refreshProgram = Effect.matchEffect(resilientProgram, {
+			onFailure: (error) =>
+				Effect.sync(() => {
+					if (options.notifyOnError) {
+						toast.error(formatApiFailure(error));
+					}
+				}),
+			onSuccess: () => Effect.void
+		});
+
+		if (!options.showLoading) {
+			return refreshProgram;
+		}
+
+		return Effect.acquireUseRelease(
+			Effect.sync(() => {
+				dataLoading = true;
+			}),
+			() => refreshProgram,
+			() =>
+				Effect.sync(() => {
+					dataLoading = false;
+				})
+		);
+	};
+
 	async function refreshData(options?: RefreshOptions): Promise<void> {
 		const resolved = resolveRefreshOptions(options);
 
 		if (refreshPromise) {
-			queuedRefreshIncludeImages = queuedRefreshIncludeImages || resolved.includeImages;
-			queuedRefreshShowLoading = queuedRefreshShowLoading || resolved.showLoading;
-			queuedRefreshNotifyOnError = queuedRefreshNotifyOnError || resolved.notifyOnError;
-			queuedRefreshPollingSafeRetry = queuedRefreshPollingSafeRetry || resolved.pollingSafeRetry;
-			queuedRefreshForce = queuedRefreshForce || resolved.force;
+			enqueueRefresh(resolved);
 			return refreshPromise;
 		}
 
-		const baseProgram = refreshDataProgram(resolved);
-		const resilientProgram = resolved.pollingSafeRetry ? withPollingRetry(baseProgram) : baseProgram;
-		refreshPromise = runProgram(
-			Effect.gen(function* () {
-				if (resolved.showLoading) {
-					dataLoading = true;
-				}
-				try {
-					yield* resilientProgram;
-				} catch (err) {
-					if (resolved.notifyOnError) {
-						toast.error(formatApiFailure(err));
-					}
-				} finally {
-					if (resolved.showLoading) {
-						dataLoading = false;
-					}
-				}
-			})
-		);
+		refreshPromise = runProgram(runRefreshCycleProgram(resolved));
 
 		try {
 			await refreshPromise;
 		} finally {
 			refreshPromise = null;
-			if (
-				queuedRefreshIncludeImages ||
-				queuedRefreshShowLoading ||
-				queuedRefreshNotifyOnError ||
-				queuedRefreshPollingSafeRetry ||
-				queuedRefreshForce
-			) {
-				const nextIncludeImages = queuedRefreshIncludeImages;
-				const nextShowLoading = queuedRefreshShowLoading;
-				const nextNotifyOnError = queuedRefreshNotifyOnError;
-				const nextPollingSafeRetry = queuedRefreshPollingSafeRetry;
-				const nextForce = queuedRefreshForce;
-				queuedRefreshIncludeImages = false;
-				queuedRefreshShowLoading = false;
-				queuedRefreshNotifyOnError = false;
-				queuedRefreshPollingSafeRetry = false;
-				queuedRefreshForce = false;
-				await refreshData({
-					includeImages: nextIncludeImages,
-					showLoading: nextShowLoading,
-					notifyOnError: nextNotifyOnError,
-					pollingSafeRetry: nextPollingSafeRetry,
-					force: nextForce
-				});
+			const nextRefresh = dequeueRefresh();
+			if (nextRefresh !== null) {
+				await refreshData(nextRefresh);
 			}
 		}
 	}
 
-	async function runActionProgram<A>(
+	const runActionProgramEffect = <A>(
+		program: Effect.Effect<A, unknown>,
+		options: {
+			successMessage: string;
+			afterSuccess?: (result: A) => void;
+			refreshOptions?: RefreshOptions;
+			invalidate?: Effect.Effect<void, unknown>;
+		}
+	): Effect.Effect<void, never> =>
+		Effect.matchEffect(
+			Effect.gen(function* () {
+				const result = yield* program;
+				yield* Effect.sync(() => {
+					options.afterSuccess?.(result);
+				});
+				if (options.invalidate) {
+					yield* options.invalidate;
+				}
+				yield* Effect.sync(() => {
+					toast.ok(options.successMessage);
+				});
+				yield* Effect.promise(() => refreshData(options.refreshOptions));
+			}),
+			{
+				onFailure: (error) =>
+					Effect.sync(() => {
+						toast.error(formatApiFailure(error));
+					}),
+				onSuccess: () => Effect.void
+			}
+		);
+
+	function runActionProgram<A>(
 		program: Effect.Effect<A, unknown>,
 		options: {
 			successMessage: string;
@@ -448,17 +558,7 @@
 			invalidate?: Effect.Effect<void, unknown>;
 		}
 	): Promise<void> {
-		try {
-			const result = await runProgram(program);
-			options.afterSuccess?.(result);
-			if (options.invalidate) {
-				await runProgram(options.invalidate);
-			}
-			toast.ok(options.successMessage);
-			await refreshData(options.refreshOptions);
-		} catch (err) {
-			toast.error(formatApiFailure(err));
-		}
+		return runProgram(runActionProgramEffect(program, options));
 	}
 
 	async function submitCreate(): Promise<void> {
