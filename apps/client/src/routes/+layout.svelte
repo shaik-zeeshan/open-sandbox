@@ -10,7 +10,52 @@
 	import Toaster from '$lib/components/Toaster.svelte';
 
 	let { children } = $props();
+	const APP_NAME = "Open Sandbox";
 	const healthDebouncer = createDebouncer(400);
+
+	const formatSegment = (segment: string): string => {
+		const decoded = decodeURIComponent(segment).replace(/[-_]+/g, " ").trim();
+		if (decoded.length === 0) {
+			return "";
+		}
+		return decoded.replace(/\b\w/g, (char) => char.toUpperCase());
+	};
+
+	const routeTitle = $derived.by(() => {
+		const path = page.url.pathname;
+		if (path === "/") {
+			return "Dashboard";
+		}
+		if (path === "/settings") {
+			return "Settings";
+		}
+		if (path === "/users") {
+			return "User Access";
+		}
+		if (path === "/images") {
+			return "Images";
+		}
+		if (path === "/compose") {
+			return "Compose";
+		}
+		if (path.startsWith("/compose/")) {
+			const project = formatSegment(path.slice("/compose/".length));
+			return project.length > 0 ? `Compose: ${project}` : "Compose";
+		}
+		if (path.startsWith("/sandboxes/")) {
+			const sandbox = formatSegment(path.slice("/sandboxes/".length));
+			return sandbox.length > 0 ? `Sandbox: ${sandbox}` : "Sandbox";
+		}
+		if (path.startsWith("/services/")) {
+			const service = formatSegment(path.slice("/services/".length));
+			return service.length > 0 ? `Service: ${service}` : "Service";
+		}
+
+		const lastSegment = path.split("/").filter(Boolean).at(-1);
+		return lastSegment ? formatSegment(lastSegment) : "Dashboard";
+	});
+
+	const pageTitle = $derived(`${routeTitle} - ${APP_NAME}`);
 
 	$effect(() => {
 		clientState.baseUrl;
@@ -73,6 +118,7 @@
 </script>
 
 <svelte:head>
+	<title>{pageTitle}</title>
 	<link rel="icon" href={favicon} />
 	<link rel="preconnect" href="https://fonts.googleapis.com" />
 	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
