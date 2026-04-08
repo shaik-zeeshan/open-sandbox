@@ -25,10 +25,25 @@
 - Client image build context is repo root with `-f apps/client/Dockerfile`; it needs the root `package.json` and `bun.lock`.
 - If Docker or deploy files change, mirror CI with `docker build ./apps/server` and `docker build . -f apps/client/Dockerfile --build-arg VITE_SANDBOX_BASE_URL=/`.
 
-&lt;!-- opensrc:start --&gt;
+<!-- opensrc:start -->
 
-- Dependency source snapshots live in `opensrc/`; check them before guessing package internals.
-- `opensrc/sources.json` lists fetched packages and versions.
-- Fetch more with `npx opensrc <package>`, `npx opensrc pypi:<package>`, `npx opensrc crates:<package>`, or `npx opensrc <owner>/<repo>`.
+## Source Code Reference
 
-&lt;!-- opensrc:end --&gt;
+Source code for dependencies is available in `opensrc/` for deeper understanding of implementation details.
+
+See `opensrc/sources.json` for the list of available packages and their versions.
+
+Use this source code when you need to understand how a package works internally, not just its types/interface.
+
+### Fetching Additional Source Code
+
+To fetch source code for a package or repository you need to understand, run:
+
+```bash
+npx opensrc <package>           # npm package (e.g., npx opensrc zod)
+npx opensrc pypi:<package>      # Python package (e.g., npx opensrc pypi:requests)
+npx opensrc crates:<package>    # Rust crate (e.g., npx opensrc crates:serde)
+npx opensrc <owner>/<repo>      # GitHub repo (e.g., npx opensrc vercel/ai)
+```
+
+<!-- opensrc:end -->
