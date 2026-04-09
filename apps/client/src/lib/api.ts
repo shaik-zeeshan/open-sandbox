@@ -39,6 +39,28 @@ export interface UserSummary {
 	updated_at: number;
 }
 
+export interface ApiKeySummary {
+	id: string;
+	name?: string;
+	preview?: string;
+	created_at: number;
+	revoked_at?: number;
+}
+
+export interface CreateApiKeyRequest {
+	name: string;
+}
+
+export interface CreateApiKeyResponse {
+	api_key: ApiKeySummary;
+	secret: string;
+}
+
+export interface RevokeApiKeyResponse {
+	id: string;
+	revoked: boolean;
+}
+
 export interface BuildImageRequest {
 	context_path?: string;
 	dockerfile?: string;
@@ -284,6 +306,24 @@ const UserSummarySchema: Schema.Schema<UserSummary> = Schema.Struct({
 	created_at: Schema.Number,
 	updated_at: Schema.Number
 }) as Schema.Schema<UserSummary>;
+
+const ApiKeySummarySchema: Schema.Schema<ApiKeySummary> = Schema.Struct({
+	id: Schema.String,
+	name: Schema.optional(Schema.String),
+	preview: Schema.optional(Schema.String),
+	created_at: Schema.Number,
+	revoked_at: Schema.optional(Schema.Number)
+}) as Schema.Schema<ApiKeySummary>;
+
+const CreateApiKeyResponseSchema: Schema.Schema<CreateApiKeyResponse> = Schema.Struct({
+	api_key: ApiKeySummarySchema,
+	secret: Schema.String
+}) as Schema.Schema<CreateApiKeyResponse>;
+
+const RevokeApiKeyResponseSchema: Schema.Schema<RevokeApiKeyResponse> = Schema.Struct({
+	id: Schema.String,
+	revoked: Schema.Boolean
+}) as Schema.Schema<RevokeApiKeyResponse>;
 
 const HealthStatusResponseSchema = Schema.Struct({ status: Schema.String });
 
@@ -819,6 +859,31 @@ export const deleteUser = (
 	userId: string
 ): Effect.Effect<{ id: string; deleted: boolean }, ApiFailure, HttpClient.HttpClient> =>
 	requestJson(config, HttpClientRequest.del(`/api/users/${encodeURIComponent(userId)}`), ItemDeletedResponseSchema);
+
+export const listApiKeys = (
+	config: ApiConfig
+): Effect.Effect<ApiKeySummary[], ApiFailure, HttpClient.HttpClient> =>
+	requestJson(
+		config,
+		HttpClientRequest.get("/api/api-keys"),
+		Schema.Array(ApiKeySummarySchema) as unknown as Schema.Schema<ApiKeySummary[]>
+	);
+
+export const createApiKey = (
+	config: ApiConfig,
+	request: CreateApiKeyRequest
+): Effect.Effect<CreateApiKeyResponse, ApiFailure, HttpClient.HttpClient> =>
+	postJson(config, "/api/api-keys", request, CreateApiKeyResponseSchema);
+
+export const revokeApiKey = (
+	config: ApiConfig,
+	apiKeyId: string
+): Effect.Effect<RevokeApiKeyResponse, ApiFailure, HttpClient.HttpClient> =>
+	requestJson(
+		config,
+		HttpClientRequest.del(`/api/api-keys/${encodeURIComponent(apiKeyId)}`),
+		RevokeApiKeyResponseSchema
+	);
 
 export const resolveApiUrl = (
 	config: ApiConfig,
