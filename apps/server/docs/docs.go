@@ -1297,8 +1297,17 @@ const docTemplate = `{
                 "container_id": {
                     "type": "string"
                 },
+                "depth": {
+                    "type": "integer"
+                },
+                "filter": {
+                    "type": "string"
+                },
                 "repo_url": {
                     "type": "string"
+                },
+                "single_branch": {
+                    "type": "boolean"
                 },
                 "target_path": {
                     "type": "string"

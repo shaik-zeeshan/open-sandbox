@@ -320,7 +320,9 @@ curl -X POST "$BASE_URL/api/git/clone" \
     "container_id": "<running-container-id>",
     "repo_url": "https://github.com/example/repo.git",
     "target_path": "/workspace/repo",
-    "branch": "main"
+    "branch": "main",
+    "depth": 1,
+    "filter": "blob:none"
   }'
 ```
 
@@ -370,7 +372,9 @@ curl -X POST "$BASE_URL/api/sandboxes" \
     "name": "workspace",
     "image": "ubuntu:24.04",
     "repo_url": "https://github.com/example/repo.git",
-    "branch": "main"
+    "branch": "main",
+    "depth": 1,
+    "filter": "blob:none"
   }'
 ```
 

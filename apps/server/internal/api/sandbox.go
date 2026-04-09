@@ -96,6 +96,9 @@ type CreateSandboxRequest struct {
 	Image              string                             `json:"image" binding:"required"`
 	RepoURL            string                             `json:"repo_url"`
 	Branch             string                             `json:"branch"`
+	SingleBranch       bool                               `json:"single_branch"`
+	Depth              *int                               `json:"depth"`
+	Filter             string                             `json:"filter"`
 	RepoTargetPath     string                             `json:"repo_target_path"`
 	UseImageDefaultCmd bool                               `json:"use_image_default_cmd"`
 	Env                []string                           `json:"env"`
@@ -429,6 +432,12 @@ func (s *Server) createSandbox(c *gin.Context) {
 		return
 	}
 
+	depth, err := validateCloneDepth(req.Depth)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err)
+		return
+	}
+
 	identity, ok := authIdentityFromContext(c)
 	if !ok {
 		writeError(c, http.StatusUnauthorized, errors.New("missing auth identity"))
@@ -483,6 +492,19 @@ func (s *Server) createSandbox(c *gin.Context) {
 			"open-sandbox.name":           req.Name,
 			"open-sandbox.repo_url":       strings.TrimSpace(req.RepoURL),
 			"open-sandbox.repo_branch":    strings.TrimSpace(req.Branch),
+			"open-sandbox.repo_single_branch": func() string {
+				if req.SingleBranch {
+					return "true"
+				}
+				return ""
+			}(),
+			"open-sandbox.repo_depth": func() string {
+				if depth > 0 {
+					return strconv.Itoa(depth)
+				}
+				return ""
+			}(),
+			"open-sandbox.repo_filter": strings.TrimSpace(req.Filter),
 			"open-sandbox.repo_target_path": func() string {
 				if strings.TrimSpace(req.RepoTargetPath) != "" {
 					return strings.TrimSpace(req.RepoTargetPath)
@@ -537,11 +559,7 @@ func (s *Server) createSandbox(c *gin.Context) {
 			targetPath = path.Join(workspaceDir, "repo")
 		}
 
-		cmd := []string{"git", "clone"}
-		if strings.TrimSpace(req.Branch) != "" {
-			cmd = append(cmd, "--branch", strings.TrimSpace(req.Branch))
-		}
-		cmd = append(cmd, strings.TrimSpace(req.RepoURL), targetPath)
+		cmd := gitCloneCommand(strings.TrimSpace(req.RepoURL), targetPath, strings.TrimSpace(req.Branch), req.SingleBranch, depth, strings.TrimSpace(req.Filter))
 
 		execResp, execErr := s.runContainerExec(c.Request.Context(), workerID, created.ID, ExecRequest{Cmd: cmd})
 		if execErr != nil {
@@ -812,6 +830,9 @@ func (s *Server) resetSandbox(c *gin.Context) {
 	repoURL := strings.TrimSpace(inspect.Config.Labels["open-sandbox.repo_url"])
 	repoTargetPath := strings.TrimSpace(inspect.Config.Labels["open-sandbox.repo_target_path"])
 	repoBranch := strings.TrimSpace(inspect.Config.Labels["open-sandbox.repo_branch"])
+	repoSingleBranch, _ := strconv.ParseBool(strings.TrimSpace(inspect.Config.Labels["open-sandbox.repo_single_branch"]))
+	repoFilter := strings.TrimSpace(inspect.Config.Labels["open-sandbox.repo_filter"])
+	repoDepth, _ := strconv.Atoi(strings.TrimSpace(inspect.Config.Labels["open-sandbox.repo_depth"]))
 	if repoURL != "" {
 		if repoTargetPath == "" {
 			if sandbox.WorkspaceDir != "" {
@@ -842,11 +863,7 @@ func (s *Server) resetSandbox(c *gin.Context) {
 	}
 
 	if repoURL != "" {
-		cloneCmd := []string{"git", "clone"}
-		if repoBranch != "" {
-			cloneCmd = append(cloneCmd, "--branch", repoBranch)
-		}
-		cloneCmd = append(cloneCmd, repoURL, repoTargetPath)
+		cloneCmd := gitCloneCommand(repoURL, repoTargetPath, repoBranch, repoSingleBranch, repoDepth, repoFilter)
 		cloneResp, cloneErr := s.runContainerExec(c.Request.Context(), workerID, sandbox.ContainerID, ExecRequest{Cmd: cloneCmd})
 		if cloneErr != nil {
 			s.logLifecycleFailure("reset_sandbox", cloneErr, slog.String("sandbox_id", sandbox.ID), slog.String("container_id", sandbox.ContainerID))

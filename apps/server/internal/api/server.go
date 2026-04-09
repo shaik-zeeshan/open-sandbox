@@ -243,10 +243,40 @@ type ComposePublishedPortEntry struct {
 }
 
 type GitCloneRequest struct {
-	ContainerID string `json:"container_id" binding:"required"`
-	RepoURL     string `json:"repo_url" binding:"required"`
-	TargetPath  string `json:"target_path" binding:"required"`
-	Branch      string `json:"branch"`
+	ContainerID  string `json:"container_id" binding:"required"`
+	RepoURL      string `json:"repo_url" binding:"required"`
+	TargetPath   string `json:"target_path" binding:"required"`
+	Branch       string `json:"branch"`
+	SingleBranch bool   `json:"single_branch"`
+	Depth        *int   `json:"depth"`
+	Filter       string `json:"filter"`
+}
+
+func validateCloneDepth(depth *int) (int, error) {
+	if depth == nil {
+		return 0, nil
+	}
+	if *depth <= 0 {
+		return 0, errors.New("depth must be a positive integer")
+	}
+	return *depth, nil
+}
+
+func gitCloneCommand(repoURL, targetPath, branch string, singleBranch bool, depth int, filter string) []string {
+	cmd := []string{"git", "clone"}
+	if branch != "" {
+		cmd = append(cmd, "--branch", branch)
+	}
+	if singleBranch {
+		cmd = append(cmd, "--single-branch")
+	}
+	if depth > 0 {
+		cmd = append(cmd, "--depth", strconv.Itoa(depth))
+	}
+	if filter != "" {
+		cmd = append(cmd, "--filter", filter)
+	}
+	return append(cmd, repoURL, targetPath)
 }
 
 type CreateContainerRequest struct {
@@ -1153,11 +1183,13 @@ func (s *Server) gitClone(c *gin.Context) {
 		return
 	}
 
-	cmd := []string{"git", "clone"}
-	if req.Branch != "" {
-		cmd = append(cmd, "--branch", req.Branch)
+	depth, err := validateCloneDepth(req.Depth)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err)
+		return
 	}
-	cmd = append(cmd, req.RepoURL, req.TargetPath)
+
+	cmd := gitCloneCommand(req.RepoURL, req.TargetPath, strings.TrimSpace(req.Branch), req.SingleBranch, depth, strings.TrimSpace(req.Filter))
 
 	execResp, err := s.runContainerExec(c.Request.Context(), localRuntimeWorkerID, req.ContainerID, ExecRequest{Cmd: cmd})
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -3530,7 +3531,7 @@ func TestGitCloneEndpointBuildsExpectedCommand(t *testing.T) {
 	}
 
 	s := newTestServer(m)
-	req := httptest.NewRequest(http.MethodPost, "/api/git/clone", bytes.NewBufferString(`{"container_id":"cid","repo_url":"https://github.com/example/repo.git","target_path":"/workspace/repo","branch":"main"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/git/clone", bytes.NewBufferString(`{"container_id":"cid","repo_url":"https://github.com/example/repo.git","target_path":"/workspace/repo","branch":"main","single_branch":true,"depth":1,"filter":"blob:none"}`))
 	setAuthHeader(t, req)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -3541,13 +3542,221 @@ func TestGitCloneEndpointBuildsExpectedCommand(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	want := []string{"git", "clone", "--branch", "main", "https://github.com/example/repo.git", "/workspace/repo"}
+	want := []string{"git", "clone", "--branch", "main", "--single-branch", "--depth", "1", "--filter", "blob:none", "https://github.com/example/repo.git", "/workspace/repo"}
 	if len(capturedCmd) != len(want) {
 		t.Fatalf("unexpected command length: got %v", capturedCmd)
 	}
 	for i := range want {
 		if capturedCmd[i] != want[i] {
 			t.Fatalf("unexpected command at %d: got %q, want %q", i, capturedCmd[i], want[i])
+		}
+	}
+}
+
+func TestGitCloneEndpointRejectsNonPositiveDepth(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		depth int
+	}{
+		{name: "zero", depth: 0},
+		{name: "negative", depth: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			execCalled := false
+			m := &mockDocker{
+				containerExecCreateFn: func(context.Context, string, container.ExecOptions) (container.ExecCreateResponse, error) {
+					execCalled = true
+					return container.ExecCreateResponse{}, nil
+				},
+			}
+
+			s := newTestServer(m)
+			req := httptest.NewRequest(http.MethodPost, "/api/git/clone", bytes.NewBufferString(fmt.Sprintf(`{"container_id":"cid","repo_url":"https://github.com/example/repo.git","target_path":"/workspace/repo","depth":%d}`, tc.depth)))
+			setAuthHeader(t, req)
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			s.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d (%s)", w.Code, w.Body.String())
+			}
+			if execCalled {
+				t.Fatal("expected clone exec not to run")
+			}
+			if !strings.Contains(w.Body.String(), "depth must be a positive integer") {
+				t.Fatalf("expected depth validation error, got %s", w.Body.String())
+			}
+		})
+	}
+}
+
+func TestCreateSandboxEndpointBuildsCloneCommandWithDepthAndFilter(t *testing.T) {
+	var capturedCmd []string
+	m := &mockDocker{
+		imageInspectFn: func(_ context.Context, imageID string) (image.InspectResponse, error) {
+			if imageID != "ubuntu:24.04" {
+				t.Fatalf("expected image inspect for ubuntu:24.04, got %q", imageID)
+			}
+			return image.InspectResponse{Config: &dockerspec.DockerOCIImageConfig{ImageConfig: ocispec.ImageConfig{WorkingDir: "/workspace"}}}, nil
+		},
+		volumeCreateFn: func(_ context.Context, options volume.CreateOptions) (volume.Volume, error) {
+			return volume.Volume{Name: options.Name}, nil
+		},
+		containerCreateFn: func(_ context.Context, config *container.Config, _ *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, _ string) (container.CreateResponse, error) {
+			if config.Labels["open-sandbox.repo_single_branch"] != "true" {
+				t.Fatalf("expected repo single branch label, got %+v", config.Labels)
+			}
+			if config.Labels["open-sandbox.repo_depth"] != "1" {
+				t.Fatalf("expected repo depth label, got %+v", config.Labels)
+			}
+			if config.Labels["open-sandbox.repo_filter"] != "blob:none" {
+				t.Fatalf("expected repo filter label, got %+v", config.Labels)
+			}
+			return container.CreateResponse{ID: "sandbox-container-id"}, nil
+		},
+		containerStartFn: func(_ context.Context, _ string, _ container.StartOptions) error {
+			return nil
+		},
+		containerExecCreateFn: func(_ context.Context, _ string, options container.ExecOptions) (container.ExecCreateResponse, error) {
+			capturedCmd = append([]string{}, options.Cmd...)
+			return container.ExecCreateResponse{ID: "exec-clone"}, nil
+		},
+		containerExecAttachFn: func(context.Context, string, container.ExecAttachOptions) (dockertypes.HijackedResponse, error) {
+			return fakeHijackedResponse([]byte(""), []byte("")), nil
+		},
+		containerExecInspectFn: func(context.Context, string) (container.ExecInspect, error) {
+			return container.ExecInspect{ExitCode: 0, Running: false}, nil
+		},
+	}
+
+	sandboxStore := &mockSandboxStore{
+		createSandboxFn: func(context.Context, store.Sandbox) error { return nil },
+	}
+
+	s := newTestServerWithStore(m, sandboxStore)
+	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes", bytes.NewBufferString(`{"name":"workspace","image":"ubuntu:24.04","repo_url":"https://github.com/example/repo.git","branch":"main","single_branch":true,"depth":1,"filter":"blob:none"}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+
+	want := []string{"git", "clone", "--branch", "main", "--single-branch", "--depth", "1", "--filter", "blob:none", "https://github.com/example/repo.git", "/workspace/repo"}
+	if len(capturedCmd) != len(want) {
+		t.Fatalf("unexpected command length: got %v", capturedCmd)
+	}
+	for i := range want {
+		if capturedCmd[i] != want[i] {
+			t.Fatalf("unexpected command at %d: got %q, want %q", i, capturedCmd[i], want[i])
+		}
+	}
+}
+
+func TestCreateSandboxEndpointRejectsNonPositiveDepth(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		depth int
+	}{
+		{name: "zero", depth: 0},
+		{name: "negative", depth: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			containerCreated := false
+			m := &mockDocker{
+				containerCreateFn: func(_ context.Context, _ *container.Config, _ *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, _ string) (container.CreateResponse, error) {
+					containerCreated = true
+					return container.CreateResponse{}, nil
+				},
+			}
+
+			s := newTestServerWithStore(m, &mockSandboxStore{})
+			req := httptest.NewRequest(http.MethodPost, "/api/sandboxes", bytes.NewBufferString(fmt.Sprintf(`{"name":"workspace","image":"ubuntu:24.04","repo_url":"https://github.com/example/repo.git","depth":%d}`, tc.depth)))
+			setAuthHeader(t, req)
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			s.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d (%s)", w.Code, w.Body.String())
+			}
+			if containerCreated {
+				t.Fatal("expected sandbox container not to be created")
+			}
+			if !strings.Contains(w.Body.String(), "depth must be a positive integer") {
+				t.Fatalf("expected depth validation error, got %s", w.Body.String())
+			}
+		})
+	}
+}
+
+func TestResetSandboxEndpointBuildsCloneCommandWithDepthAndFilter(t *testing.T) {
+	var capturedCmds [][]string
+	m := &mockDocker{
+		containerInspectFn: func(_ context.Context, containerID string) (container.InspectResponse, error) {
+			if containerID != "sandbox-container" {
+				t.Fatalf("expected sandbox container, got %q", containerID)
+			}
+			return container.InspectResponse{
+				Config: &container.Config{Labels: map[string]string{
+					"open-sandbox.repo_url":           "https://github.com/example/repo.git",
+					"open-sandbox.repo_branch":        "main",
+					"open-sandbox.repo_single_branch": "true",
+					"open-sandbox.repo_depth":         "1",
+					"open-sandbox.repo_filter":        "blob:none",
+					"open-sandbox.repo_target_path":   "/workspace/repo",
+				}},
+				ContainerJSONBase: &container.ContainerJSONBase{State: &container.State{Running: true}},
+			}, nil
+		},
+		containerExecCreateFn: func(_ context.Context, _ string, options container.ExecOptions) (container.ExecCreateResponse, error) {
+			captured := append([]string{}, options.Cmd...)
+			capturedCmds = append(capturedCmds, captured)
+			return container.ExecCreateResponse{ID: "exec-reset"}, nil
+		},
+		containerExecAttachFn: func(context.Context, string, container.ExecAttachOptions) (dockertypes.HijackedResponse, error) {
+			return fakeHijackedResponse([]byte(""), []byte("")), nil
+		},
+		containerExecInspectFn: func(context.Context, string) (container.ExecInspect, error) {
+			return container.ExecInspect{ExitCode: 0, Running: false}, nil
+		},
+	}
+
+	sandboxStore := &mockSandboxStore{
+		getSandboxFn: func(context.Context, string) (store.Sandbox, error) {
+			return store.Sandbox{ID: "sandbox-1", ContainerID: "sandbox-container", WorkspaceDir: "/workspace", OwnerID: "admin-user", OwnerUsername: "admin"}, nil
+		},
+		updateSandboxStatusFn: func(context.Context, string, string) error { return nil },
+	}
+
+	s := newTestServerWithStore(m, sandboxStore)
+	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes/sandbox-1/reset", bytes.NewBufferString(`{}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if len(capturedCmds) != 2 {
+		t.Fatalf("expected cleanup and clone commands, got %d", len(capturedCmds))
+	}
+
+	want := []string{"git", "clone", "--branch", "main", "--single-branch", "--depth", "1", "--filter", "blob:none", "https://github.com/example/repo.git", "/workspace/repo"}
+	cloneCmd := capturedCmds[1]
+	if len(cloneCmd) != len(want) {
+		t.Fatalf("unexpected clone command length: got %v", cloneCmd)
+	}
+	for i := range want {
+		if cloneCmd[i] != want[i] {
+			t.Fatalf("unexpected clone command at %d: got %q, want %q", i, cloneCmd[i], want[i])
 		}
 	}
 }
