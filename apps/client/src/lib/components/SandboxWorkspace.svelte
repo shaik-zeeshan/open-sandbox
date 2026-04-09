@@ -22,7 +22,7 @@
 		resolveContainerLogsSseUrl,
 		restartContainer,
 		resetContainer,
-		resetSandbox,
+		resetSandboxStream,
 		resolveApiUrl,
 		resolveSandboxLogsSseUrl,
 		restartSandbox,
@@ -42,6 +42,11 @@
 		type PreviewUrl,
 		type Sandbox
 	} from "$lib/api";
+	import {
+		formatSandboxProgress,
+		formatSandboxProgressToast,
+		type SandboxProgressDisplay
+	} from "$lib/sandbox-progress";
 	import {
 		cloneSandboxEnv,
 		listSandboxEnvKeys,
@@ -128,6 +133,7 @@
 	let editableSecretEnv = $state<string[]>([]);
 	let removedSecretEnvKeys = $state<string[]>([]);
 	let savingEnv = $state(false);
+	let resetProgress = $state<SandboxProgressDisplay | null>(null);
 
 	function cloneProxyConfig(
 		value: Record<string, SandboxPortProxyConfig> | undefined
@@ -760,6 +766,7 @@
 
 	async function handleAction(action: "restart" | "reset" | "stop" | "delete"): Promise<void> {
 		actionLoading = action;
+		let resetToastId: string | null = null;
 		try {
 			if (action === "restart") {
 				if (workloadKind === "sandbox") {
@@ -772,9 +779,19 @@
 				await Promise.resolve(onRefresh());
 			} else if (action === "reset") {
 				if (workloadKind === "sandbox") {
-					await runApiEffect(resetSandbox(config, targetId));
+					resetProgress = null;
+					const toastId = toast.loading("Resetting sandbox...");
+					resetToastId = toastId;
+					await runApiEffect(
+						resetSandboxStream(config, targetId, (event) => {
+							if (event.event === "progress") {
+								resetProgress = formatSandboxProgress(event.data);
+								toast.update(toastId, "loading", formatSandboxProgressToast("Resetting sandbox", event.data));
+							}
+						})
+					);
 					Effect.runSync(invalidateWorkloadCaches(config));
-					toast.ok("Reset to clean workspace.");
+					toast.update(toastId, "ok", "Reset to clean workspace.");
 					await Promise.resolve(onRefresh());
 					await loadPath(workspaceDirValue);
 				} else {
@@ -808,8 +825,14 @@
 				onDeleted();
 			}
 		} catch (error) {
-			toast.error(formatApiFailure(error));
+			resetProgress = null;
+			if (resetToastId !== null) {
+				toast.update(resetToastId, "error", formatApiFailure(error));
+			} else {
+				toast.error(formatApiFailure(error));
+			}
 		} finally {
+			resetProgress = null;
 			actionLoading = null;
 		}
 	}
@@ -872,7 +895,7 @@
 				</button>
 				{#if canReset}
 					<button class="action-btn" type="button" onclick={() => void handleAction("reset")} disabled={actionLoading !== null}>
-						{actionLoading === "reset" ? "..." : "Reset"}
+						{actionLoading === "reset" ? (resetProgress ? `Reset · ${resetProgress.phaseLabel}` : "...") : "Reset"}
 					</button>
 				{/if}
 				<button
@@ -903,6 +926,17 @@
 			</button>
 		{/each}
 	</div>
+
+	{#if resetProgress}
+		<div class="operation-progress operation-progress--{resetProgress.tone}" role="status" aria-live="polite">
+			<div class="operation-progress-copy">
+				<span class="operation-progress-label">Reset in progress</span>
+				<strong>{resetProgress.phaseLabel}</strong>
+				<p>{resetProgress.detail}</p>
+			</div>
+			<span class="operation-progress-status">{resetProgress.statusLabel}</span>
+		</div>
+	{/if}
 
 	<!-- ── Tab content ────────────────────────────────────────────────────────── -->
 	<div class="tab-content">
@@ -1475,6 +1509,66 @@
 		animation: blink 0.9s step-end infinite;
 	}
 	@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
+	.operation-progress {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 0.9rem;
+		margin: 0.9rem 1.5rem 0;
+		padding: 0.9rem 1rem;
+		border: 1px solid var(--border-mid);
+		border-radius: var(--radius-md);
+		background: color-mix(in srgb, var(--bg-raised) 88%, transparent);
+	}
+
+	.operation-progress--active {
+		border-color: color-mix(in srgb, var(--accent) 38%, var(--border-mid));
+	}
+
+	.operation-progress--ok {
+		border-color: var(--status-ok-border);
+	}
+
+	.operation-progress--error {
+		border-color: var(--status-error-border);
+	}
+
+	.operation-progress-copy {
+		display: flex;
+		flex-direction: column;
+		gap: 0.22rem;
+		min-width: 0;
+	}
+
+	.operation-progress-copy strong {
+		font-size: 0.84rem;
+		font-weight: 500;
+		color: var(--text-primary);
+	}
+
+	.operation-progress-copy p {
+		margin: 0;
+		font-family: var(--font-mono);
+		font-size: 0.64rem;
+		line-height: 1.5;
+		color: var(--text-muted);
+	}
+
+	.operation-progress-label,
+	.operation-progress-status {
+		font-family: var(--font-mono);
+		font-size: 0.6rem;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		color: var(--text-secondary);
+	}
+
+	.operation-progress-status {
+		flex: none;
+		padding-top: 0.05rem;
+		text-align: right;
+	}
 
 	/* ── Alerts ──────────────────────────────────────────────────────────────── */
 	.alert-wrap {
@@ -2049,6 +2143,8 @@
 		.ws-header { padding: 0.75rem 1rem; }
 		.tab-content { padding: 1rem; }
 		.tab-bar { padding: 0 1rem; }
+		.operation-progress { margin: 0.9rem 1rem 0; flex-direction: column; }
+		.operation-progress-status { text-align: left; }
 		.quick-actions { grid-template-columns: 1fr; }
 		.ws-header-right { flex-wrap: wrap; }
 	}

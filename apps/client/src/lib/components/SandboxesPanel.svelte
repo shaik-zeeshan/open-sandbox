@@ -6,6 +6,7 @@
 	import ProxyConfigEditor from "./ProxyConfigEditor.svelte";
 	import EnvEditor from "./EnvEditor.svelte";
 	import { resolveApiUrl, type ApiConfig, type ComposeProjectPreview, type ContainerSummary, type ImageSummary, type PreviewUrl, type Sandbox, type SandboxPortProxyConfig } from "$lib/api";
+	import type { SandboxProgressDisplay } from "$lib/sandbox-progress";
 
 	let {
 		sandboxes,
@@ -45,6 +46,7 @@
 		createPorts = $bindable(),
 		createProxyConfig = $bindable(),
 		createLoading,
+		createProgress = null,
 		createImageHref = "/images",
 		onToggleCreate,
 		onCreateSubmit,
@@ -87,6 +89,7 @@
 		createPorts: string;
 		createProxyConfig: Record<string, SandboxPortProxyConfig>;
 		createLoading: boolean;
+		createProgress?: SandboxProgressDisplay | null;
 		createImageHref?: string;
 		onToggleCreate: () => void;
 		onCreateSubmit: () => void;
@@ -840,6 +843,16 @@
 
 	<div class="drawer-body">
 		<fieldset class="create-fieldset" disabled={createLoading}>
+			{#if createProgress}
+				<div class="create-progress create-progress--{createProgress.tone}" role="status" aria-live="polite">
+					<div class="create-progress-copy">
+						<span class="create-progress-label">Creating sandbox</span>
+						<strong>{createProgress.phaseLabel}</strong>
+						<p>{createProgress.detail}</p>
+					</div>
+					<span class="create-progress-status">{createProgress.statusLabel}</span>
+				</div>
+			{/if}
 
 			<!-- General tab -->
 			{#if activeDrawerTab === "general"}
@@ -1026,7 +1039,7 @@
 		<button class="btn-primary" type="button" onclick={handleSubmit} disabled={createLoading}>
 			{#if createLoading}
 				<svg class="spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.22-8.56"/></svg>
-				Creating...
+				{createProgress ? `Creating · ${createProgress.phaseLabel}` : "Creating..."}
 			{:else}
 				Create sandbox
 			{/if}
@@ -1546,6 +1559,67 @@
 		flex-direction: column;
 	}
 
+	.create-progress {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 0.9rem;
+		padding: 0.9rem 1rem;
+		margin-bottom: 0.85rem;
+		border: 1px solid var(--border-mid);
+		border-radius: var(--radius-md);
+		background: color-mix(in srgb, var(--bg-raised) 88%, transparent);
+	}
+
+	.create-progress--active {
+		border-color: color-mix(in srgb, var(--accent) 38%, var(--border-mid));
+		box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+	}
+
+	.create-progress--ok {
+		border-color: var(--status-ok-border);
+	}
+
+	.create-progress--error {
+		border-color: var(--status-error-border);
+	}
+
+	.create-progress-copy {
+		display: flex;
+		flex-direction: column;
+		gap: 0.22rem;
+		min-width: 0;
+	}
+
+	.create-progress-copy strong {
+		font-size: 0.84rem;
+		font-weight: 500;
+		color: var(--text-primary);
+	}
+
+	.create-progress-copy p {
+		margin: 0;
+		font-family: var(--font-mono);
+		font-size: 0.64rem;
+		line-height: 1.5;
+		color: var(--text-muted);
+	}
+
+	.create-progress-label,
+	.create-progress-status {
+		font-family: var(--font-mono);
+		font-size: 0.6rem;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		color: var(--text-secondary);
+	}
+
+	.create-progress-status {
+		flex: none;
+		padding-top: 0.05rem;
+		text-align: right;
+	}
+
 	/* Form sections */
 	.form-section {
 		display: flex;
@@ -1816,6 +1890,8 @@
 		.filter-field { flex: 1 1 10rem; }
 		.sandbox-table-wrap { overflow-x: auto; }
 		.drawer { width: 100vw; }
+		.create-progress { flex-direction: column; }
+		.create-progress-status { text-align: left; }
 		.form-row-2 { grid-template-columns: 1fr; }
 		.pagination { flex-direction: column; align-items: flex-start; gap: 0.5rem; }
 	}

@@ -22,14 +22,14 @@
 	import type { HttpClient } from "@effect/platform";
 	import {
 		bootstrap,
-		createSandbox,
+		createSandboxStream,
 		deleteSandbox,
 		formatApiFailure,
 		getSetupStatus,
 		login,
 		removeContainer,
 		resetContainer,
-		resetSandbox,
+		resetSandboxStream,
 		restartContainer,
 		restartSandbox,
 		runApiEffect,
@@ -37,12 +37,19 @@
 		stopSandbox,
 		type ApiFailure,
 		type CreateSandboxRequest,
+		type SandboxCreateStreamEvent,
+		type SandboxResetStreamEvent,
 		type ComposeProjectPreview,
 		type ContainerSummary,
 		type ImageSummary,
 		type Sandbox,
 		type SandboxPortProxyConfig
 	} from "$lib/api";
+	import {
+		formatSandboxProgress,
+		formatSandboxProgressToast,
+		type SandboxProgressDisplay
+	} from "$lib/sandbox-progress";
 	import { cloneSandboxEnv, normalizeSandboxEnv, normalizeSandboxSecretEnv } from "$lib/sandbox-env";
 	import { Effect } from "effect";
 	import {
@@ -194,6 +201,7 @@
 	let createDrawerInitialTab = $state<"general" | "git">("general");
 	let createDrawerInitialTabVersion = $state(0);
 	let createLoading = $state(false);
+	let createProgress = $state<SandboxProgressDisplay | null>(null);
 
 	function resetCreateFormState(): void {
 		createName = "";
@@ -615,6 +623,7 @@
 
 	async function submitCreate(): Promise<void> {
 		createLoading = true;
+		createProgress = null;
 		const toastId = toast.loading("Creating sandbox...");
 		try {
 			const parseLines = (v: string) => v.split("\n").map((l) => l.trim()).filter(Boolean);
@@ -647,7 +656,14 @@
 				proxy_config: Object.keys(createProxyConfig).length > 0 ? createProxyConfig : undefined
 			};
 
-			const created = await runApiEffect(createSandbox(clientState.config, request));
+			const created = await runApiEffect(
+				createSandboxStream(clientState.config, request, (event: SandboxCreateStreamEvent) => {
+					if (event.event === "progress") {
+						createProgress = formatSandboxProgress(event.data);
+						toast.update(toastId, "loading", formatSandboxProgressToast("Creating sandbox", event.data));
+					}
+				})
+			);
 			showCreateForm = false;
 			createRepoUrl = "";
 			createBranch = "";
@@ -667,6 +683,7 @@
 		} catch (err) {
 			toast.update(toastId, "error", formatApiFailure(err));
 		} finally {
+			createProgress = null;
 			createLoading = false;
 		}
 	}
@@ -744,10 +761,21 @@
 		});
 	}
 	async function handleReset(id: string): Promise<void> {
-		await runActionProgram(runApiProgram(resetSandbox(clientState.config, id)), {
-			successMessage: "Reset.",
-			invalidate: invalidateWorkloadCaches(clientState.config)
-		});
+		const toastId = toast.loading("Resetting sandbox...");
+		try {
+			await runApiEffect(
+				resetSandboxStream(clientState.config, id, (event: SandboxResetStreamEvent) => {
+					if (event.event === "progress") {
+						toast.update(toastId, "loading", formatSandboxProgressToast("Resetting sandbox", event.data));
+					}
+				})
+			);
+			await runProgram(invalidateWorkloadCaches(clientState.config));
+			await refreshData();
+			toast.update(toastId, "ok", "Reset.");
+		} catch (error) {
+			toast.update(toastId, "error", formatApiFailure(error));
+		}
 	}
 	async function handleResetContainer(id: string): Promise<void> {
 		await runActionProgram(runApiProgram(resetContainer(clientState.config, id)), {
@@ -975,6 +1003,7 @@
 				bind:createPorts
 				bind:createProxyConfig
 				{createLoading}
+				{createProgress}
 				createImageHref="/images"
 				onToggleCreate={toggleCreateForm}
 				onCreateSubmit={() => void submitCreate()}

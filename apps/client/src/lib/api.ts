@@ -15,6 +15,10 @@ import {
 	normalizeBaseUrl as sdkNormalizeBaseUrl,
 	resolveApiUrl as sdkResolveApiUrl,
 	resolveWebSocketUrl as sdkResolveWebSocketUrl,
+	type SandboxCreateStreamEvent as SdkSandboxCreateStreamEvent,
+	type SandboxOperationProgress as SdkSandboxOperationProgress,
+	type SandboxResetStreamEvent as SdkSandboxResetStreamEvent,
+	type SandboxStreamDone as SdkSandboxStreamDone,
 	SdkAuthLayer,
 	SdkConfigLayer,
 	type SdkTransportEnv
@@ -161,6 +165,11 @@ export interface ComposeProjectPreview {
 	project_name: string;
 	services: ComposeServicePreview[];
 }
+
+export type SandboxOperationProgress = SdkSandboxOperationProgress;
+export type SandboxStreamDone = SdkSandboxStreamDone;
+export type SandboxCreateStreamEvent = SdkSandboxCreateStreamEvent;
+export type SandboxResetStreamEvent = SdkSandboxResetStreamEvent;
 
 export interface GitCloneRequest {
 	container_id: string;
@@ -1155,6 +1164,12 @@ export const createSandbox = (
 ): Effect.Effect<Sandbox, ApiFailure, HttpClient.HttpClient> =>
 	sdkRequest(config, SdkApi.createSandbox(request));
 
+export const createSandboxStream = (
+	config: ApiConfig,
+	request: CreateSandboxRequest,
+	onEvent?: (event: SandboxCreateStreamEvent) => void
+): Effect.Effect<Sandbox, ApiFailure> => sdkRequest(config, SdkApi.createSandboxStream(request, onEvent));
+
 export const listSandboxes = (
 	config: ApiConfig
 ): Effect.Effect<Sandbox[], ApiFailure, HttpClient.HttpClient> =>
@@ -1177,6 +1192,13 @@ export const resetSandbox = (
 	sandboxId: string
 ): Effect.Effect<{ id: string; reset: boolean }, ApiFailure, HttpClient.HttpClient> =>
 	sdkRequest(config, SdkApi.resetSandbox(sandboxId));
+
+export const resetSandboxStream = (
+	config: ApiConfig,
+	sandboxId: string,
+	onEvent?: (event: SandboxResetStreamEvent) => void
+): Effect.Effect<{ id: string; reset: boolean }, ApiFailure> =>
+	sdkRequest(config, SdkApi.resetSandboxStream(sandboxId, onEvent));
 
 export const stopSandbox = (
 	config: ApiConfig,
