@@ -36,6 +36,7 @@
 		createExistingImage = $bindable(),
 		createRepoUrl = $bindable(),
 		createBranch = $bindable(),
+		createBaseCommit = $bindable(),
 		createDepth = $bindable(),
 		createFilter = $bindable(),
 		createSingleBranch = $bindable(),
@@ -79,6 +80,7 @@
 		createExistingImage: string;
 		createRepoUrl: string;
 		createBranch: string;
+		createBaseCommit: string;
 		createDepth: string;
 		createFilter: string;
 		createSingleBranch: boolean;
@@ -963,6 +965,11 @@
 					</div>
 					<div class="form-row-2">
 						<label class="field-col">
+							<span class="section-label">Base commit</span>
+							<input class="field" bind:value={createBaseCommit} placeholder="abc1234" />
+							<span class="field-help">Optional commit SHA to clone from.</span>
+						</label>
+						<label class="field-col">
 							<span class="section-label">Clone depth</span>
 							<input
 								class="field"
@@ -982,12 +989,12 @@
 								<span class="field-inline-error">{depthError}</span>
 							{/if}
 						</label>
-						<label class="field-col">
-							<span class="section-label">Clone filter</span>
-							<input class="field" bind:value={createFilter} placeholder="blob:none" />
-							<span class="field-help">Optional partial clone filter passed through when cloning a repo.</span>
-						</label>
 					</div>
+					<label class="field-col">
+						<span class="section-label">Clone filter</span>
+						<input class="field" bind:value={createFilter} placeholder="blob:none" />
+						<span class="field-help">Optional partial clone filter passed through when cloning a repo.</span>
+					</label>
 					<div class="field-col">
 						<span class="section-label">Clone behavior</span>
 						<Checkbox bind:checked={createSingleBranch} label="Single branch only" />

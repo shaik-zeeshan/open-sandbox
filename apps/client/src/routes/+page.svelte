@@ -189,6 +189,7 @@
 	let createExistingImage = $state("");
 	let createRepoUrl = $state("");
 	let createBranch = $state("");
+	let createBaseCommit = $state("");
 	let createDepth = $state("");
 	let createFilter = $state("");
 	let createSingleBranch = $state(false);
@@ -208,6 +209,7 @@
 		createExistingImage = "";
 		createRepoUrl = "";
 		createBranch = "";
+		createBaseCommit = "";
 		createDepth = "";
 		createFilter = "";
 		createSingleBranch = false;
@@ -244,6 +246,7 @@
 		createExistingImage = draft.image;
 		createRepoUrl = draft.repoUrl;
 		createBranch = draft.branch;
+		createBaseCommit = draft.baseCommit;
 		createDepth = draft.depth;
 		createFilter = draft.filter;
 		createSingleBranch = draft.singleBranch;
@@ -259,6 +262,7 @@
 		return (
 			draft.repoUrl.trim().length > 0 ||
 			draft.branch.trim().length > 0 ||
+			draft.baseCommit.trim().length > 0 ||
 			draft.depth.trim().length > 0 ||
 			draft.filter.trim().length > 0 ||
 			draft.singleBranch
@@ -646,6 +650,7 @@
 				use_image_default_cmd: true,
 				repo_url: createRepoUrl.trim() || undefined,
 				branch: createBranch.trim() || undefined,
+				base_commit: createBaseCommit.trim() || undefined,
 				depth,
 				filter: createFilter.trim() || undefined,
 				single_branch: createSingleBranch || undefined,
@@ -667,6 +672,7 @@
 			showCreateForm = false;
 			createRepoUrl = "";
 			createBranch = "";
+			createBaseCommit = "";
 			createDepth = "";
 			createFilter = "";
 			createSingleBranch = false;
@@ -993,6 +999,7 @@
 				bind:createExistingImage
 				bind:createRepoUrl
 				bind:createBranch
+				bind:createBaseCommit
 				bind:createDepth
 				bind:createFilter
 				bind:createSingleBranch

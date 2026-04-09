@@ -50,6 +50,7 @@ export interface PendingDuplicateCreateDraft {
 	image: string;
 	repoUrl: string;
 	branch: string;
+	baseCommit: string;
 	depth: string;
 	filter: string;
 	singleBranch: boolean;

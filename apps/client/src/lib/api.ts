@@ -176,6 +176,7 @@ export interface GitCloneRequest {
 	repo_url: string;
 	target_path: string;
 	branch?: string;
+	base_commit?: string;
 	single_branch?: boolean;
 	depth?: number;
 	filter?: string;
@@ -265,6 +266,7 @@ export interface CreateSandboxRequest {
 	image: string;
 	repo_url?: string;
 	branch?: string;
+	base_commit?: string;
 	single_branch?: boolean;
 	depth?: number;
 	filter?: string;
