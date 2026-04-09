@@ -36,6 +36,7 @@
 		stopContainer,
 		stopSandbox,
 		type ApiFailure,
+		type CreateSandboxRequest,
 		type ComposeProjectPreview,
 		type ContainerSummary,
 		type ImageSummary,
@@ -181,12 +182,17 @@
 	let createExistingImage = $state("");
 	let createRepoUrl = $state("");
 	let createBranch = $state("");
+	let createDepth = $state("");
+	let createFilter = $state("");
+	let createSingleBranch = $state(false);
 	let createWorkdir = $state("");
 	let createEnv = $state<string[]>([]);
 	let createSecretEnv = $state<string[]>([]);
 	let createSecretEnvHint = $state(false);
 	let createPorts = $state("");
 	let createProxyConfig = $state<Record<string, SandboxPortProxyConfig>>({});
+	let createDrawerInitialTab = $state<"general" | "git">("general");
+	let createDrawerInitialTabVersion = $state(0);
 	let createLoading = $state(false);
 
 	function resetCreateFormState(): void {
@@ -194,6 +200,9 @@
 		createExistingImage = "";
 		createRepoUrl = "";
 		createBranch = "";
+		createDepth = "";
+		createFilter = "";
+		createSingleBranch = false;
 		createWorkdir = "";
 		createEnv = [];
 		createSecretEnv = [];
@@ -202,17 +211,50 @@
 		createProxyConfig = {};
 	}
 
+	function parseCloneDepth(value: string): number | undefined {
+		const trimmed = value.trim();
+		if (trimmed.length === 0) {
+			return undefined;
+		}
+
+		if (!/^\d+$/.test(trimmed)) {
+			throw new Error("Clone depth must be a positive integer or left blank.");
+		}
+
+		const parsed = Number.parseInt(trimmed, 10);
+		if (!Number.isInteger(parsed) || parsed <= 0) {
+			throw new Error("Clone depth must be a positive integer or left blank.");
+		}
+
+		return parsed;
+	}
+
 	function applyCreateDraft(draft: PendingDuplicateCreateDraft): void {
+		createDrawerInitialTab = draftHasGitCloneOptions(draft) ? "git" : "general";
+		createDrawerInitialTabVersion += 1;
 		createName = draft.name;
 		createExistingImage = draft.image;
 		createRepoUrl = draft.repoUrl;
 		createBranch = draft.branch;
+		createDepth = draft.depth;
+		createFilter = draft.filter;
+		createSingleBranch = draft.singleBranch;
 		createWorkdir = draft.workdir;
 		createEnv = cloneSandboxEnv(draft.env);
 		createSecretEnv = [];
 		createSecretEnvHint = draft.secretEnvKeys.length > 0;
 		createPorts = draft.ports;
 		createProxyConfig = { ...draft.proxyConfig };
+	}
+
+	function draftHasGitCloneOptions(draft: PendingDuplicateCreateDraft): boolean {
+		return (
+			draft.repoUrl.trim().length > 0 ||
+			draft.branch.trim().length > 0 ||
+			draft.depth.trim().length > 0 ||
+			draft.filter.trim().length > 0 ||
+			draft.singleBranch
+		);
 	}
 
 	const resolveSetupStatusProgram = (baseUrl: string): Effect.Effect<void, never> =>
@@ -578,6 +620,7 @@
 			const parseLines = (v: string) => v.split("\n").map((l) => l.trim()).filter(Boolean);
 			const sandboxName = createName.trim();
 			const workdir = createWorkdir.trim();
+			const depth = parseCloneDepth(createDepth);
 			if (sandboxName.length === 0) {
 				throw new Error("Sandbox name is required.");
 			}
@@ -588,22 +631,29 @@
 			}
 			const env = normalizeSandboxEnv(createEnv);
 			const secretEnv = normalizeSandboxSecretEnv(createSecretEnv);
-
-			const created = await runApiEffect(createSandbox(clientState.config, {
+			const request: CreateSandboxRequest & { single_branch?: boolean } = {
 				name: sandboxName,
 				image: resolvedImage,
 				use_image_default_cmd: true,
 				repo_url: createRepoUrl.trim() || undefined,
 				branch: createBranch.trim() || undefined,
+				depth,
+				filter: createFilter.trim() || undefined,
+				single_branch: createSingleBranch || undefined,
 				workdir: workdir || undefined,
 				env: env.length > 0 ? env : undefined,
 				secret_env: secretEnv.length > 0 ? secretEnv : undefined,
 				ports: parseLines(createPorts),
 				proxy_config: Object.keys(createProxyConfig).length > 0 ? createProxyConfig : undefined
-			}));
+			};
+
+			const created = await runApiEffect(createSandbox(clientState.config, request));
 			showCreateForm = false;
 			createRepoUrl = "";
 			createBranch = "";
+			createDepth = "";
+			createFilter = "";
+			createSingleBranch = false;
 			createWorkdir = "";
 			createEnv = [];
 			createSecretEnv = [];
@@ -909,10 +959,15 @@
 				onRefresh={() => void refreshData({ force: true })}
 				composeHref="/compose"
 				{showCreateForm}
+				{createDrawerInitialTab}
+				{createDrawerInitialTabVersion}
 				bind:createName
 				bind:createExistingImage
 				bind:createRepoUrl
 				bind:createBranch
+				bind:createDepth
+				bind:createFilter
+				bind:createSingleBranch
 				bind:createWorkdir
 				bind:createEnv
 				bind:createSecretEnv

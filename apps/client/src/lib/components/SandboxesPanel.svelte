@@ -1,5 +1,6 @@
 <script lang="ts">
 	import SandboxCard from "./SandboxCard.svelte";
+	import Checkbox from "./Checkbox.svelte";
 	import Combobox from "./Combobox.svelte";
 	import PortsEditor from "./PortsEditor.svelte";
 	import ProxyConfigEditor from "./ProxyConfigEditor.svelte";
@@ -28,10 +29,15 @@
 		onRefresh,
 		composeHref = "/compose",
 		showCreateForm,
+		createDrawerInitialTab = "general",
+		createDrawerInitialTabVersion = 0,
 		createName = $bindable(),
 		createExistingImage = $bindable(),
 		createRepoUrl = $bindable(),
 		createBranch = $bindable(),
+		createDepth = $bindable(),
+		createFilter = $bindable(),
+		createSingleBranch = $bindable(),
 		createWorkdir = $bindable(),
 		createEnv = $bindable(),
 		createSecretEnv = $bindable(),
@@ -65,10 +71,15 @@
 		onRefresh: () => void;
 		composeHref?: string;
 		showCreateForm: boolean;
+		createDrawerInitialTab?: "general" | "git";
+		createDrawerInitialTabVersion?: number;
 		createName: string;
 		createExistingImage: string;
 		createRepoUrl: string;
 		createBranch: string;
+		createDepth: string;
+		createFilter: string;
+		createSingleBranch: boolean;
 		createWorkdir: string;
 		createEnv: string[];
 		createSecretEnv: string[];
@@ -117,6 +128,7 @@
 	let nameError = $state("");
 	let imageError = $state("");
 	let repoUrlError = $state("");
+	let depthError = $state("");
 	let formTouched = $state(false);
 
 	function isValidUrl(value: string): boolean {
@@ -128,22 +140,52 @@
 		}
 	}
 
+	function isValidCloneDepth(value: string): boolean {
+		const trimmed = value.trim();
+		if (trimmed.length === 0) {
+			return true;
+		}
+
+		if (!/^\d+$/.test(trimmed)) {
+			return false;
+		}
+
+		const parsed = Number.parseInt(trimmed, 10);
+		return Number.isInteger(parsed) && parsed > 0;
+	}
+
 	function validateForm(): boolean {
 		let valid = true;
+		let generalHasError = false;
+		let gitHasError = false;
 		nameError = "";
 		imageError = "";
 		repoUrlError = "";
+		depthError = "";
 		if (createName.trim().length === 0) {
 			nameError = "Sandbox name is required.";
 			valid = false;
+			generalHasError = true;
 		}
 		if (createExistingImage.trim().length === 0) {
 			imageError = "Select an image.";
 			valid = false;
+			generalHasError = true;
 		}
 		if (createRepoUrl.trim().length > 0 && !isValidUrl(createRepoUrl.trim())) {
 			repoUrlError = "Enter a valid URL.";
 			valid = false;
+			gitHasError = true;
+		}
+		if (!isValidCloneDepth(createDepth)) {
+			depthError = "Enter a positive integer or leave blank.";
+			valid = false;
+			gitHasError = true;
+		}
+		if (generalHasError) {
+			activeDrawerTab = "general";
+		} else if (gitHasError) {
+			activeDrawerTab = "git";
 		}
 		return valid;
 	}
@@ -156,7 +198,7 @@
 	}
 
 	// Drawer tab state
-	let activeDrawerTab = $state<"general" | "proxy">("general");
+	let activeDrawerTab = $state<"general" | "git" | "proxy">("general");
 
 	// Reset validation state when drawer closes
 	$effect(() => {
@@ -164,9 +206,21 @@
 			nameError = "";
 			imageError = "";
 			repoUrlError = "";
+			depthError = "";
 			formTouched = false;
 			activeDrawerTab = "general";
 		}
+	});
+
+	let lastAppliedCreateDrawerInitialTabVersion = $state(0);
+
+	$effect(() => {
+		if (!showCreateForm || createDrawerInitialTabVersion === lastAppliedCreateDrawerInitialTabVersion) {
+			return;
+		}
+
+		activeDrawerTab = createDrawerInitialTab;
+		lastAppliedCreateDrawerInitialTabVersion = createDrawerInitialTabVersion;
 	});
 
 	// Clear image error when a value is selected
@@ -185,6 +239,9 @@
 		}
 		if (createRepoUrl.trim().length === 0 || isValidUrl(createRepoUrl.trim())) {
 			repoUrlError = "";
+		}
+		if (isValidCloneDepth(createDepth)) {
+			depthError = "";
 		}
 	});
 	const sandboxContainerIDs = $derived(new Set(sandboxes.map((sandbox: Sandbox) => sandbox.id)));
@@ -760,6 +817,14 @@
 		>General</button>
 		<button
 			class="drawer-tab"
+			class:drawer-tab--active={activeDrawerTab === "git"}
+			role="tab"
+			type="button"
+			aria-selected={activeDrawerTab === "git"}
+			onclick={() => activeDrawerTab = "git"}
+		>Git</button>
+		<button
+			class="drawer-tab"
 			class:drawer-tab--active={activeDrawerTab === "proxy"}
 			role="tab"
 			type="button"
@@ -827,32 +892,10 @@
 
 				<div class="form-section">
 					<span class="section-label form-section-title">Runtime options <span class="opt">(optional)</span></span>
-					<div class="form-row-2">
-						<label class="field-col">
-							<span class="section-label">Repo URL</span>
-							<input
-								class="field"
-								class:field--error={!!repoUrlError}
-								bind:value={createRepoUrl}
-								placeholder="https://github.com/org/repo.git"
-								oninput={() => {
-									const v = createRepoUrl.trim();
-									if (v.length === 0 || isValidUrl(v)) repoUrlError = "";
-								}}
-							/>
-							{#if repoUrlError}
-								<span class="field-inline-error">{repoUrlError}</span>
-							{/if}
-						</label>
-						<label class="field-col">
-							<span class="section-label">Branch</span>
-							<input class="field" bind:value={createBranch} placeholder="main" />
-						</label>
-					</div>
 					<label class="field-col">
 						<span class="section-label">Workdir</span>
 						<input class="field" bind:value={createWorkdir} />
-						<span class="field-help">Leave empty to use the image <code class="inline-code">WORKDIR</code>. If the image does not define one, the sandbox keeps the container default working directory and skips the workspace volume.</span>
+							<span class="field-help">Leave empty to use the image <code class="inline-code">WORKDIR</code>. If the image does not define one, the sandbox keeps the container default working directory and skips the workspace volume.</span>
 					</label>
 					<div class="field-col">
 						<span class="section-label">Environment variables</span>
@@ -876,6 +919,66 @@
 					<div class="field-col">
 						<span class="section-label">Port mappings <span class="opt">(host → container)</span></span>
 						<PortsEditor bind:value={createPorts} />
+					</div>
+				</div>
+			{/if}
+
+			{#if activeDrawerTab === "git"}
+				<div class="form-section">
+					<span class="section-label form-section-title">Git options <span class="opt">(optional)</span></span>
+					<div class="form-row-2">
+						<label class="field-col">
+							<span class="section-label">Repo URL</span>
+							<input
+								class="field"
+								class:field--error={!!repoUrlError}
+								bind:value={createRepoUrl}
+								placeholder="https://github.com/org/repo.git"
+								oninput={() => {
+									const v = createRepoUrl.trim();
+									if (v.length === 0 || isValidUrl(v)) repoUrlError = "";
+								}}
+							/>
+							{#if repoUrlError}
+								<span class="field-inline-error">{repoUrlError}</span>
+							{/if}
+						</label>
+						<label class="field-col">
+							<span class="section-label">Branch</span>
+							<input class="field" bind:value={createBranch} placeholder="main" />
+						</label>
+					</div>
+					<div class="form-row-2">
+						<label class="field-col">
+							<span class="section-label">Clone depth</span>
+							<input
+								class="field"
+								class:field--error={!!depthError}
+								bind:value={createDepth}
+								type="number"
+								min="1"
+								step="1"
+								inputmode="numeric"
+								placeholder="1"
+								oninput={() => {
+									if (isValidCloneDepth(createDepth)) depthError = "";
+								}}
+							/>
+							<span class="field-help">Optional shallow clone depth. Blank keeps the current behavior.</span>
+							{#if depthError}
+								<span class="field-inline-error">{depthError}</span>
+							{/if}
+						</label>
+						<label class="field-col">
+							<span class="section-label">Clone filter</span>
+							<input class="field" bind:value={createFilter} placeholder="blob:none" />
+							<span class="field-help">Optional partial clone filter passed through when cloning a repo.</span>
+						</label>
+					</div>
+					<div class="field-col">
+						<span class="section-label">Clone behavior</span>
+						<Checkbox bind:checked={createSingleBranch} label="Single branch only" />
+						<span class="field-help">Limit cloning to the selected branch when supported. Leave off to keep the current multi-branch behavior.</span>
 					</div>
 				</div>
 			{/if}

@@ -50,6 +50,9 @@ export interface PendingDuplicateCreateDraft {
 	image: string;
 	repoUrl: string;
 	branch: string;
+	depth: string;
+	filter: string;
+	singleBranch: boolean;
 	workdir: string;
 	env: string[];
 	secretEnvKeys: string[];
