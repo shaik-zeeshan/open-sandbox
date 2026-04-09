@@ -24,6 +24,13 @@ export interface ItemDeletedResponse {
 	deleted: boolean;
 }
 
+export interface ErrorResponse {
+	error: string;
+	reason?: string;
+	stderr?: string;
+	status?: number;
+}
+
 export interface APIKeyResponse {
 	id: string;
 	name?: string;
@@ -315,6 +322,12 @@ export interface UpdateSandboxEnvRequest {
 	remove_secret_env_keys?: readonly string[];
 }
 
+export interface SandboxOperationProgress {
+	phase: string;
+	status: string;
+	message: string;
+}
+
 export interface Sandbox {
 	id: string;
 	name: string;
@@ -343,6 +356,12 @@ export interface SandboxRestartedResponse {
 export interface SandboxResetResponse {
 	id: string;
 	reset: boolean;
+}
+
+export interface SandboxStreamDone {
+	id: string;
+	created?: boolean;
+	reset?: boolean;
 }
 
 export interface WorkerResponse {
@@ -603,6 +622,13 @@ export const FileEntrySchema: Schema.Schema<FileEntry> = Schema.Struct({
 	size: Schema.optional(Schema.Number)
 }) as Schema.Schema<FileEntry>;
 
+export const ErrorResponseSchema: Schema.Schema<ErrorResponse> = Schema.Struct({
+	error: Schema.String,
+	reason: Schema.optional(Schema.String),
+	stderr: Schema.optional(Schema.String),
+	status: Schema.optional(Schema.Number)
+}) as Schema.Schema<ErrorResponse>;
+
 export const FileReadResponseSchema: Schema.Schema<FileReadResponse> = Schema.Struct({
 	path: Schema.String,
 	name: Schema.String,
@@ -684,6 +710,12 @@ export const UpdateSandboxEnvRequestSchema: Schema.Schema<UpdateSandboxEnvReques
 	remove_secret_env_keys: Schema.optional(Schema.Array(Schema.String))
 }) as Schema.Schema<UpdateSandboxEnvRequest>;
 
+export const SandboxOperationProgressSchema: Schema.Schema<SandboxOperationProgress> = Schema.Struct({
+	phase: Schema.String,
+	status: Schema.String,
+	message: Schema.String
+}) as Schema.Schema<SandboxOperationProgress>;
+
 export const SandboxRestartedResponseSchema: Schema.Schema<SandboxRestartedResponse> = Schema.Struct({
 	id: Schema.String,
 	restarted: Schema.Boolean
@@ -693,6 +725,12 @@ export const SandboxResetResponseSchema: Schema.Schema<SandboxResetResponse> = S
 	id: Schema.String,
 	reset: Schema.Boolean
 }) as Schema.Schema<SandboxResetResponse>;
+
+export const SandboxStreamDoneSchema: Schema.Schema<SandboxStreamDone> = Schema.Struct({
+	id: Schema.String,
+	created: Schema.optional(Schema.Boolean),
+	reset: Schema.optional(Schema.Boolean)
+}) as Schema.Schema<SandboxStreamDone>;
 
 export const WorkerResponseSchema: Schema.Schema<WorkerResponse> = Schema.Struct({
 	id: Schema.String,

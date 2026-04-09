@@ -1046,6 +1046,9 @@ const docTemplate = `{
                 "reason": {
                     "type": "string"
                 },
+                "status": {
+                    "type": "integer"
+                },
                 "stderr": {
                     "type": "string"
                 }

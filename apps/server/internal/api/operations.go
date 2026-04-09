@@ -108,10 +108,11 @@ func (l runtimeLimits) apply(hostConfig *container.HostConfig) {
 type operationalMetrics struct {
 	mu       sync.Mutex
 	counters map[string]uint64
+	values   map[string]float64
 }
 
 func newOperationalMetrics() *operationalMetrics {
-	return &operationalMetrics{counters: map[string]uint64{}}
+	return &operationalMetrics{counters: map[string]uint64{}, values: map[string]float64{}}
 }
 
 func (m *operationalMetrics) add(name string, labels map[string]string, delta uint64) {
@@ -143,22 +144,50 @@ func (m *operationalMetrics) recordCleanupError(kind string) {
 	m.add("open_sandbox_cleanup_errors_total", map[string]string{"artifact": kind}, 1)
 }
 
+func (m *operationalMetrics) addValue(name string, labels map[string]string, delta float64) {
+	if m == nil {
+		return
+	}
+	key := metricKey(name, labels)
+	m.mu.Lock()
+	m.values[key] += delta
+	m.mu.Unlock()
+}
+
+func (m *operationalMetrics) recordSandboxRepoPhase(operation string, phase string, result string, duration time.Duration) {
+	labels := map[string]string{"operation": operation, "phase": phase, "result": result}
+	m.add("open_sandbox_sandbox_repo_phase_total", labels, 1)
+	m.addValue("open_sandbox_sandbox_repo_phase_duration_seconds", labels, duration.Seconds())
+}
+
 func (m *operationalMetrics) renderPrometheus() string {
 	if m == nil {
 		return ""
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	keys := make([]string, 0, len(m.counters))
+	keys := make([]string, 0, len(m.counters)+len(m.values))
 	for key := range m.counters {
+		keys = append(keys, key)
+	}
+	for key := range m.values {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	var b strings.Builder
+	seen := map[string]struct{}{}
 	for _, key := range keys {
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
 		b.WriteString(key)
 		b.WriteByte(' ')
-		b.WriteString(strconv.FormatUint(m.counters[key], 10))
+		if value, ok := m.values[key]; ok {
+			b.WriteString(strconv.FormatFloat(value, 'f', -1, 64))
+		} else {
+			b.WriteString(strconv.FormatUint(m.counters[key], 10))
+		}
 		b.WriteByte('\n')
 	}
 	return b.String()

@@ -13,8 +13,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -3592,6 +3594,12 @@ func TestGitCloneEndpointRejectsNonPositiveDepth(t *testing.T) {
 }
 
 func TestCreateSandboxEndpointBuildsCloneCommandWithDepthAndFilter(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return "", "", nil
+	}
+
 	var capturedCmd []string
 	m := &mockDocker{
 		imageInspectFn: func(_ context.Context, imageID string) (image.InspectResponse, error) {
@@ -3646,7 +3654,7 @@ func TestCreateSandboxEndpointBuildsCloneCommandWithDepthAndFilter(t *testing.T)
 		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
 	}
 
-	want := []string{"git", "clone", "--branch", "main", "--single-branch", "--depth", "1", "--filter", "blob:none", "https://github.com/example/repo.git", "/workspace/repo"}
+	want := []string{"git", "clone", "--branch", "main", "--single-branch", "--depth", "1", "--filter", "blob:none", "--reference-if-able", path.Join(sandboxGitCacheMountRoot, sandboxGitCacheKey("https://github.com/example/repo.git")+".git"), "https://github.com/example/repo.git", "/workspace/repo"}
 	if len(capturedCmd) != len(want) {
 		t.Fatalf("unexpected command length: got %v", capturedCmd)
 	}
@@ -3696,6 +3704,12 @@ func TestCreateSandboxEndpointRejectsNonPositiveDepth(t *testing.T) {
 }
 
 func TestResetSandboxEndpointBuildsCloneCommandWithDepthAndFilter(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return "", "", nil
+	}
+
 	var capturedCmds [][]string
 	m := &mockDocker{
 		containerInspectFn: func(_ context.Context, containerID string) (container.InspectResponse, error) {
@@ -3745,19 +3759,95 @@ func TestResetSandboxEndpointBuildsCloneCommandWithDepthAndFilter(t *testing.T) 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
 	}
-	if len(capturedCmds) != 2 {
-		t.Fatalf("expected cleanup and clone commands, got %d", len(capturedCmds))
+	if len(capturedCmds) != 4 {
+		t.Fatalf("expected repo check, fetch, reset, and clean commands, got %d", len(capturedCmds))
+	}
+	if got := capturedCmds[0]; len(got) < 3 || got[0] != "sh" || got[1] != "-lc" || !strings.Contains(got[2], "test -d '/workspace/repo'/.git") {
+		t.Fatalf("expected repo existence check, got %v", got)
+	}
+	if got := capturedCmds[1]; len(got) < 3 || !strings.Contains(got[2], "git -C '/workspace/repo' fetch --prune --depth 1 --filter='blob:none' origin 'main'") {
+		t.Fatalf("expected fetch command, got %v", got)
+	}
+	if got := capturedCmds[2]; len(got) < 3 || !strings.Contains(got[2], "git -C '/workspace/repo' checkout -B 'main' origin/'main' && git -C '/workspace/repo' reset --hard origin/'main'") {
+		t.Fatalf("expected reset command, got %v", got)
+	}
+	if got := capturedCmds[3]; len(got) != 5 || got[0] != "git" || got[1] != "-C" || got[2] != "/workspace/repo" || got[3] != "clean" || got[4] != "-fdx" {
+		t.Fatalf("expected clean command, got %v", got)
+	}
+}
+
+func TestResetSandboxEndpointCleansMissingRepoTargetBeforeClone(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return "", "", nil
 	}
 
-	want := []string{"git", "clone", "--branch", "main", "--single-branch", "--depth", "1", "--filter", "blob:none", "https://github.com/example/repo.git", "/workspace/repo"}
-	cloneCmd := capturedCmds[1]
-	if len(cloneCmd) != len(want) {
-		t.Fatalf("unexpected clone command length: got %v", cloneCmd)
+	var capturedCmds [][]string
+	execCount := 0
+	m := &mockDocker{
+		containerInspectFn: func(_ context.Context, _ string) (container.InspectResponse, error) {
+			return container.InspectResponse{
+				Config: &container.Config{Labels: map[string]string{
+					"open-sandbox.repo_url":         "https://github.com/example/repo.git",
+					"open-sandbox.repo_target_path": "/workspace/repo",
+				}},
+				ContainerJSONBase: &container.ContainerJSONBase{State: &container.State{Running: true}},
+			}, nil
+		},
+		containerExecCreateFn: func(_ context.Context, _ string, options container.ExecOptions) (container.ExecCreateResponse, error) {
+			execCount++
+			capturedCmds = append(capturedCmds, append([]string{}, options.Cmd...))
+			return container.ExecCreateResponse{ID: fmt.Sprintf("exec-reset-%d", execCount)}, nil
+		},
+		containerExecAttachFn: func(context.Context, string, container.ExecAttachOptions) (dockertypes.HijackedResponse, error) {
+			return fakeHijackedResponse([]byte(""), []byte("")), nil
+		},
+		containerExecInspectFn: func(_ context.Context, execID string) (container.ExecInspect, error) {
+			if execID == "exec-reset-1" {
+				return container.ExecInspect{ExitCode: 1, Running: false}, nil
+			}
+			return container.ExecInspect{ExitCode: 0, Running: false}, nil
+		},
 	}
-	for i := range want {
-		if cloneCmd[i] != want[i] {
-			t.Fatalf("unexpected clone command at %d: got %q, want %q", i, cloneCmd[i], want[i])
+
+	sandboxStore := &mockSandboxStore{
+		getSandboxFn: func(context.Context, string) (store.Sandbox, error) {
+			return store.Sandbox{ID: "sandbox-1", ContainerID: "sandbox-container", WorkspaceDir: "/workspace", OwnerID: "admin-user", OwnerUsername: "admin"}, nil
+		},
+		updateSandboxStatusFn: func(context.Context, string, string) error { return nil },
+	}
+
+	s := newTestServerWithStore(m, sandboxStore)
+	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes/sandbox-1/reset", bytes.NewBufferString(`{}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	cleanupSeen := false
+	cloneSeen := false
+	for _, got := range capturedCmds {
+		joined := strings.Join(got, " ")
+		if strings.Contains(joined, "test -d '/workspace/repo'/.git") {
+			continue
 		}
+		if strings.Contains(joined, "rm -rf '/workspace/repo' && mkdir -p '/workspace'") {
+			cleanupSeen = true
+		}
+		if strings.Contains(joined, "git clone") {
+			cloneSeen = true
+		}
+	}
+	if !cleanupSeen {
+		t.Fatalf("expected cleanup command before clone, got %v", capturedCmds)
+	}
+	if !cloneSeen {
+		t.Fatalf("expected clone command, got %v", capturedCmds)
 	}
 }
 
@@ -3799,6 +3889,7 @@ func TestMetricsEndpointReportsLifecycleCounters(t *testing.T) {
 	s := newTestServer(&mockDocker{})
 	s.metrics.recordLifecycle("create_sandbox", "success")
 	s.metrics.recordCleanupRun("success")
+	s.metrics.recordSandboxRepoPhase("reset", "fetch", "success", 250*time.Millisecond)
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	w := httptest.NewRecorder()
@@ -3814,6 +3905,348 @@ func TestMetricsEndpointReportsLifecycleCounters(t *testing.T) {
 	}
 	if !strings.Contains(body, `open_sandbox_cleanup_runs_total{result="success"} 1`) {
 		t.Fatalf("expected cleanup metric, got %s", body)
+	}
+	if !strings.Contains(body, `open_sandbox_sandbox_repo_phase_total{operation="reset",phase="fetch",result="success"} 1`) {
+		t.Fatalf("expected repo phase counter, got %s", body)
+	}
+	if !strings.Contains(body, `open_sandbox_sandbox_repo_phase_duration_seconds{operation="reset",phase="fetch",result="success"} 0.25`) {
+		t.Fatalf("expected repo phase duration, got %s", body)
+	}
+}
+
+func TestCreateSandboxStreamEndpointEmitsProgressEvents(t *testing.T) {
+	m := &mockDocker{
+		imageInspectFn: func(_ context.Context, imageID string) (image.InspectResponse, error) {
+			return image.InspectResponse{Config: &dockerspec.DockerOCIImageConfig{ImageConfig: ocispec.ImageConfig{WorkingDir: "/workspace"}}}, nil
+		},
+		volumeCreateFn: func(_ context.Context, options volume.CreateOptions) (volume.Volume, error) {
+			return volume.Volume{Name: options.Name}, nil
+		},
+		containerCreateFn: func(_ context.Context, _ *container.Config, _ *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, _ string) (container.CreateResponse, error) {
+			return container.CreateResponse{ID: "sandbox-container-id"}, nil
+		},
+		containerStartFn: func(_ context.Context, _ string, _ container.StartOptions) error { return nil },
+	}
+	s := newTestServerWithStore(m, &mockSandboxStore{createSandboxFn: func(context.Context, store.Sandbox) error { return nil }})
+	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes/stream", bytes.NewBufferString(`{"name":"workspace","image":"ubuntu:24.04"}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "event: progress") || !strings.Contains(body, "event: result") || !strings.Contains(body, "event: done") {
+		t.Fatalf("expected progress, result, and done events, got %s", body)
+	}
+}
+
+func TestCreateSandboxStreamEndpointEmitsErrorEvent(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return "", "", nil
+	}
+
+	m := &mockDocker{
+		imageInspectFn: func(_ context.Context, _ string) (image.InspectResponse, error) {
+			return image.InspectResponse{Config: &dockerspec.DockerOCIImageConfig{ImageConfig: ocispec.ImageConfig{WorkingDir: "/workspace"}}}, nil
+		},
+		volumeCreateFn: func(_ context.Context, options volume.CreateOptions) (volume.Volume, error) {
+			return volume.Volume{Name: options.Name}, nil
+		},
+		containerCreateFn: func(_ context.Context, _ *container.Config, _ *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, _ string) (container.CreateResponse, error) {
+			return container.CreateResponse{ID: "sandbox-container-id"}, nil
+		},
+		containerStartFn: func(_ context.Context, _ string, _ container.StartOptions) error { return nil },
+		containerExecCreateFn: func(context.Context, string, container.ExecOptions) (container.ExecCreateResponse, error) {
+			return container.ExecCreateResponse{ID: "exec-clone"}, nil
+		},
+		containerExecAttachFn: func(context.Context, string, container.ExecAttachOptions) (dockertypes.HijackedResponse, error) {
+			return fakeHijackedResponse([]byte(""), []byte("fatal: no such repo\n")), nil
+		},
+		containerExecInspectFn: func(context.Context, string) (container.ExecInspect, error) {
+			return container.ExecInspect{ExitCode: 1, Running: false}, nil
+		},
+	}
+	s := newTestServerWithStore(m, &mockSandboxStore{createSandboxFn: func(context.Context, store.Sandbox) error { return nil }})
+	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes/stream", bytes.NewBufferString(`{"name":"workspace","image":"ubuntu:24.04","repo_url":"https://github.com/example/repo.git"}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "event: error") || !strings.Contains(body, `data: {"error":"clone repository failed","reason":"git_clone_failed","stderr":"fatal: no such repo","status":400}`) {
+		t.Fatalf("expected structured error event, got %s", body)
+	}
+	if strings.Contains(body, "event: result") {
+		t.Fatalf("did not expect result event on failure, got %s", body)
+	}
+}
+
+func TestCreateSandboxEndpointReturnsJSONErrorOnCloneFailure(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return "", "", nil
+	}
+
+	m := &mockDocker{
+		imageInspectFn: func(_ context.Context, _ string) (image.InspectResponse, error) {
+			return image.InspectResponse{Config: &dockerspec.DockerOCIImageConfig{ImageConfig: ocispec.ImageConfig{WorkingDir: "/workspace"}}}, nil
+		},
+		volumeCreateFn: func(_ context.Context, options volume.CreateOptions) (volume.Volume, error) {
+			return volume.Volume{Name: options.Name}, nil
+		},
+		containerCreateFn: func(_ context.Context, _ *container.Config, _ *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, _ string) (container.CreateResponse, error) {
+			return container.CreateResponse{ID: "sandbox-container-id"}, nil
+		},
+		containerStartFn: func(_ context.Context, _ string, _ container.StartOptions) error { return nil },
+		containerExecCreateFn: func(context.Context, string, container.ExecOptions) (container.ExecCreateResponse, error) {
+			return container.ExecCreateResponse{ID: "exec-clone"}, nil
+		},
+		containerExecAttachFn: func(context.Context, string, container.ExecAttachOptions) (dockertypes.HijackedResponse, error) {
+			return fakeHijackedResponse([]byte(""), []byte("fatal: no such repo\n")), nil
+		},
+		containerExecInspectFn: func(context.Context, string) (container.ExecInspect, error) {
+			return container.ExecInspect{ExitCode: 1, Running: false}, nil
+		},
+	}
+	s := newTestServerWithStore(m, &mockSandboxStore{createSandboxFn: func(context.Context, store.Sandbox) error { return nil }})
+	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes", bytes.NewBufferString(`{"name":"workspace","image":"ubuntu:24.04","repo_url":"https://github.com/example/repo.git"}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (%s)", w.Code, w.Body.String())
+	}
+	if got := strings.TrimSpace(w.Body.String()); got != `{"error":"clone repository failed","reason":"git_clone_failed","stderr":"fatal: no such repo"}` {
+		t.Fatalf("expected structured JSON error, got %s", got)
+	}
+}
+
+func TestResetSandboxStreamEndpointEmitsErrorEvent(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return "", "", nil
+	}
+
+	callCount := 0
+	m := &mockDocker{
+		containerInspectFn: func(_ context.Context, _ string) (container.InspectResponse, error) {
+			return container.InspectResponse{Config: &container.Config{Labels: map[string]string{
+				"open-sandbox.repo_url":         "https://github.com/example/repo.git",
+				"open-sandbox.repo_target_path": "/workspace/repo",
+			}}, ContainerJSONBase: &container.ContainerJSONBase{State: &container.State{Running: true}}}, nil
+		},
+		containerExecCreateFn: func(context.Context, string, container.ExecOptions) (container.ExecCreateResponse, error) {
+			callCount++
+			return container.ExecCreateResponse{ID: fmt.Sprintf("exec-%d", callCount)}, nil
+		},
+		containerExecAttachFn: func(_ context.Context, execID string, _ container.ExecAttachOptions) (dockertypes.HijackedResponse, error) {
+			if execID == "exec-1" {
+				return fakeHijackedResponse([]byte(""), []byte("fatal: corrupt repo\n")), nil
+			}
+			return fakeHijackedResponse([]byte(""), []byte("permission denied\n")), nil
+		},
+		containerExecInspectFn: func(_ context.Context, execID string) (container.ExecInspect, error) {
+			if execID == "exec-1" {
+				return container.ExecInspect{ExitCode: 1, Running: false}, nil
+			}
+			return container.ExecInspect{ExitCode: 1, Running: false}, nil
+		},
+	}
+	sandboxStore := &mockSandboxStore{
+		getSandboxFn: func(context.Context, string) (store.Sandbox, error) {
+			return store.Sandbox{ID: "sandbox-1", ContainerID: "sandbox-container", WorkspaceDir: "/workspace", OwnerID: "admin-user", OwnerUsername: "admin"}, nil
+		},
+		updateSandboxStatusFn: func(context.Context, string, string) error { return nil },
+	}
+	s := newTestServerWithStore(m, sandboxStore)
+	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes/sandbox-1/reset/stream", bytes.NewBufferString(`{}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "event: error") || !strings.Contains(body, `data: {"error":"reset repository failed","reason":"git_cleanup_failed","stderr":"permission denied","status":500}`) {
+		t.Fatalf("expected structured error event, got %s", body)
+	}
+}
+
+func TestResetSandboxEndpointReturnsJSONErrorOnRefreshFailure(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return "", "", nil
+	}
+
+	callCount := 0
+	m := &mockDocker{
+		containerInspectFn: func(_ context.Context, _ string) (container.InspectResponse, error) {
+			return container.InspectResponse{Config: &container.Config{Labels: map[string]string{
+				"open-sandbox.repo_url":         "https://github.com/example/repo.git",
+				"open-sandbox.repo_target_path": "/workspace/repo",
+			}}, ContainerJSONBase: &container.ContainerJSONBase{State: &container.State{Running: true}}}, nil
+		},
+		containerExecCreateFn: func(context.Context, string, container.ExecOptions) (container.ExecCreateResponse, error) {
+			callCount++
+			return container.ExecCreateResponse{ID: fmt.Sprintf("exec-%d", callCount)}, nil
+		},
+		containerExecAttachFn: func(_ context.Context, execID string, _ container.ExecAttachOptions) (dockertypes.HijackedResponse, error) {
+			if execID == "exec-1" {
+				return fakeHijackedResponse([]byte(""), []byte("fatal: corrupt repo\n")), nil
+			}
+			return fakeHijackedResponse([]byte(""), []byte("permission denied\n")), nil
+		},
+		containerExecInspectFn: func(_ context.Context, _ string) (container.ExecInspect, error) {
+			return container.ExecInspect{ExitCode: 1, Running: false}, nil
+		},
+	}
+	sandboxStore := &mockSandboxStore{
+		getSandboxFn: func(context.Context, string) (store.Sandbox, error) {
+			return store.Sandbox{ID: "sandbox-1", ContainerID: "sandbox-container", WorkspaceDir: "/workspace", OwnerID: "admin-user", OwnerUsername: "admin"}, nil
+		},
+		updateSandboxStatusFn: func(context.Context, string, string) error { return nil },
+	}
+	s := newTestServerWithStore(m, sandboxStore)
+	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes/sandbox-1/reset", bytes.NewBufferString(`{}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d (%s)", w.Code, w.Body.String())
+	}
+	if got := strings.TrimSpace(w.Body.String()); got != `{"error":"reset repository failed","reason":"git_cleanup_failed","stderr":"permission denied"}` {
+		t.Fatalf("expected structured JSON error, got %s", got)
+	}
+}
+
+func TestPrepareSandboxGitReferenceLocksPerRepo(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+
+	workspaceRoot := t.TempDir()
+	s := newTestServerWithStore(&mockDocker{}, &mockSandboxStore{})
+	s.workspaceRoot = workspaceRoot
+
+	cacheDir := filepath.Join(s.sandboxGitCacheRoot(), sandboxGitCacheKey("https://github.com/example/repo.git")+".git")
+	cloneStarted := make(chan struct{}, 1)
+	cloneRelease := make(chan struct{})
+	var mu sync.Mutex
+	cloneCount := 0
+	fetchCount := 0
+	commandRunner = func(_ context.Context, name string, args ...string) (string, string, error) {
+		mu.Lock()
+		if name != "git" {
+			mu.Unlock()
+			return "", "", nil
+		}
+		if len(args) >= 1 && args[0] == "clone" {
+			cloneCount++
+			if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+				mu.Unlock()
+				return "", err.Error(), err
+			}
+			cloneStarted <- struct{}{}
+			mu.Unlock()
+			<-cloneRelease
+			return "", "", nil
+		}
+		if len(args) >= 3 && args[0] == "-C" && args[2] == "fetch" {
+			fetchCount++
+		}
+		mu.Unlock()
+		return "", "", nil
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		s.prepareSandboxGitReference(context.Background(), localRuntimeWorkerID, "https://github.com/example/repo.git", sandboxProgressReporter{})
+	}()
+	<-cloneStarted
+	go func() {
+		defer wg.Done()
+		s.prepareSandboxGitReference(context.Background(), localRuntimeWorkerID, "https://github.com/example/repo.git", sandboxProgressReporter{})
+	}()
+	close(cloneRelease)
+	wg.Wait()
+
+	if cloneCount != 1 {
+		t.Fatalf("expected one mirror clone, got %d", cloneCount)
+	}
+	if fetchCount != 1 {
+		t.Fatalf("expected one mirror fetch after clone, got %d", fetchCount)
+	}
+}
+
+func TestPrepareSandboxGitReferenceSkipsUnsafeRepoURLs(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	called := false
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		called = true
+		return "", "", nil
+	}
+
+	s := newTestServerWithStore(&mockDocker{}, &mockSandboxStore{})
+	if referencePath, bind := s.prepareSandboxGitReference(context.Background(), localRuntimeWorkerID, "git@localhost:example/repo.git", sandboxProgressReporter{}); referencePath != "" || bind != "" {
+		t.Fatalf("expected unsafe remote to skip shared cache, got %q %q", referencePath, bind)
+	}
+	if called {
+		t.Fatal("expected unsafe remote to avoid host-side git commands")
+	}
+}
+
+func TestResetSandboxStreamEndpointEmitsProgressEvents(t *testing.T) {
+	m := &mockDocker{
+		containerInspectFn: func(_ context.Context, _ string) (container.InspectResponse, error) {
+			return container.InspectResponse{Config: &container.Config{Labels: map[string]string{}}, ContainerJSONBase: &container.ContainerJSONBase{State: &container.State{Running: false}}}, nil
+		},
+		containerStartFn: func(_ context.Context, _ string, _ container.StartOptions) error { return nil },
+	}
+	sandboxStore := &mockSandboxStore{
+		getSandboxFn: func(context.Context, string) (store.Sandbox, error) {
+			return store.Sandbox{ID: "sandbox-1", ContainerID: "sandbox-container", OwnerID: "admin-user", OwnerUsername: "admin"}, nil
+		},
+		updateSandboxStatusFn: func(context.Context, string, string) error { return nil },
+	}
+	s := newTestServerWithStore(m, sandboxStore)
+	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes/sandbox-1/reset/stream", bytes.NewBufferString(`{}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "event: progress") || !strings.Contains(body, "event: result") || !strings.Contains(body, "event: done") {
+		t.Fatalf("expected progress, result, and done events, got %s", body)
 	}
 }
 

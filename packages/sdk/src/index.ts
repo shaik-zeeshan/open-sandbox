@@ -46,4 +46,4 @@ export * from "./api";
 
 export * from "./schemas";
 
-export { collectSseOutput, parseSseEvent, type StreamEvent } from "./stream";
+export { collectJsonResultSse, collectSseOutput, parseSseEvent, type JsonResultStreamEvent, type StreamEvent } from "./stream";

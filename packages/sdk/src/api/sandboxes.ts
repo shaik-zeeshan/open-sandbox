@@ -1,21 +1,26 @@
-import { Schema } from "effect";
+import { Effect, Schema } from "effect";
 
 import { deleteRequest, getRequest, patchJsonRequest, postJsonRequest, putJsonRequest } from "../request";
 import {
 	type CreateSandboxRequest,
 	type ExecRequest,
+	type SandboxOperationProgress,
 	type SandboxPortProxyConfig,
+	type SandboxStreamDone,
 	type UpdateSandboxEnvRequest,
 	ExecResponseSchema,
 	FileReadResponseSchema,
 	FileSavedResponseSchema,
 	FileUploadedResponseSchema,
 	ItemDeletedResponseSchema,
+	SandboxOperationProgressSchema,
 	SandboxResetResponseSchema,
 	SandboxRestartedResponseSchema,
-	SandboxSchema
+	SandboxSchema,
+	SandboxStreamDoneSchema
 } from "../schemas";
-import { execute, executeFetch } from "../transport";
+import { type JsonResultStreamEvent, collectJsonResultSse } from "../stream";
+import { execute, executeFetch, openStream } from "../transport";
 
 export interface SandboxLogsStreamQuery {
 	follow?: boolean;
@@ -27,8 +32,37 @@ export interface SandboxTerminalWebSocketQuery {
 	rows?: number;
 }
 
+export type SandboxCreateStreamEvent = JsonResultStreamEvent<SandboxOperationProgress, CreateSandboxResponse, SandboxStreamDone>;
+export type SandboxResetStreamEvent = JsonResultStreamEvent<SandboxOperationProgress, SandboxResetResponse, SandboxStreamDone>;
+
+type CreateSandboxResponse = Schema.Schema.Type<typeof SandboxSchema>;
+type SandboxResetResponse = Schema.Schema.Type<typeof SandboxResetResponseSchema>;
+
 export const createSandbox = (request: CreateSandboxRequest) =>
 	execute(postJsonRequest("/api/sandboxes", request), SandboxSchema);
+
+export const createSandboxStream = (
+	request: CreateSandboxRequest,
+	onEvent?: (event: SandboxCreateStreamEvent) => void
+) =>
+	Effect.flatMap(
+		openStream("/api/sandboxes/stream", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Accept: "text/event-stream",
+				"Accept-Encoding": "identity"
+			},
+			body: JSON.stringify(request)
+		}),
+		(response) =>
+			collectJsonResultSse(response, {
+				progressSchema: SandboxOperationProgressSchema,
+				resultSchema: SandboxSchema,
+				doneSchema: SandboxStreamDoneSchema,
+				onEvent
+			})
+	);
 
 export const listSandboxes = () => execute(getRequest("/api/sandboxes"), Schema.Array(SandboxSchema));
 
@@ -40,6 +74,26 @@ export const restartSandbox = (id: string) =>
 
 export const resetSandbox = (id: string) =>
 	execute(postJsonRequest(`/api/sandboxes/${encodeURIComponent(id)}/reset`, {}), SandboxResetResponseSchema);
+
+export const resetSandboxStream = (id: string, onEvent?: (event: SandboxResetStreamEvent) => void) =>
+	Effect.flatMap(
+		openStream(`/api/sandboxes/${encodeURIComponent(id)}/reset/stream`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Accept: "text/event-stream",
+				"Accept-Encoding": "identity"
+			},
+			body: JSON.stringify({})
+		}),
+		(response) =>
+			collectJsonResultSse(response, {
+				progressSchema: SandboxOperationProgressSchema,
+				resultSchema: SandboxResetResponseSchema,
+				doneSchema: SandboxStreamDoneSchema,
+				onEvent
+			})
+	);
 
 export const stopSandbox = (id: string) =>
 	execute(postJsonRequest(`/api/sandboxes/${encodeURIComponent(id)}/stop`, {}), SandboxSchema);

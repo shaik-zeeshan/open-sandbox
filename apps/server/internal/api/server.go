@@ -121,6 +121,7 @@ type Server struct {
 	traefikWriter    *traefikcfg.ConfigWriter
 	proxyAuthLimiter *proxyAuthRateLimiter
 	execWaitTimeout  time.Duration
+	gitCacheLocks    sync.Map
 	secretEnvCodec   *sandboxSecretEnvCodec
 	configErr        error
 }
@@ -157,6 +158,7 @@ type ErrorResponse struct {
 	Error  string `json:"error"`
 	Reason string `json:"reason,omitempty"`
 	Stderr string `json:"stderr,omitempty"`
+	Status int    `json:"status,omitempty"`
 }
 
 type BuildImageRequest struct {
@@ -262,7 +264,7 @@ func validateCloneDepth(depth *int) (int, error) {
 	return *depth, nil
 }
 
-func gitCloneCommand(repoURL, targetPath, branch string, singleBranch bool, depth int, filter string) []string {
+func gitCloneCommand(repoURL, targetPath, branch string, singleBranch bool, depth int, filter string, referencePath string) []string {
 	cmd := []string{"git", "clone"}
 	if branch != "" {
 		cmd = append(cmd, "--branch", branch)
@@ -275,6 +277,9 @@ func gitCloneCommand(repoURL, targetPath, branch string, singleBranch bool, dept
 	}
 	if filter != "" {
 		cmd = append(cmd, "--filter", filter)
+	}
+	if referencePath != "" {
+		cmd = append(cmd, "--reference-if-able", referencePath)
 	}
 	return append(cmd, repoURL, targetPath)
 }
@@ -460,12 +465,14 @@ func (s *Server) registerRoutes() {
 		api.PUT("/containers/:id/files", s.writeContainerFile)
 
 		api.POST("/sandboxes", s.createSandbox)
+		api.POST("/sandboxes/stream", s.createSandboxStream)
 		api.GET("/sandboxes", s.listSandboxes)
 		api.GET("/sandboxes/:id", s.getSandbox)
 		api.PATCH("/sandboxes/:id/env", s.updateSandboxEnv)
 		api.PATCH("/sandboxes/:id/proxy-config", s.updateSandboxProxyConfig)
 		api.POST("/sandboxes/:id/restart", s.restartSandbox)
 		api.POST("/sandboxes/:id/reset", s.resetSandbox)
+		api.POST("/sandboxes/:id/reset/stream", s.resetSandboxStream)
 		api.POST("/sandboxes/:id/stop", s.stopSandbox)
 		api.DELETE("/sandboxes/:id", s.deleteSandbox)
 		api.POST("/sandboxes/:id/exec", s.execInSandbox)
@@ -1189,7 +1196,7 @@ func (s *Server) gitClone(c *gin.Context) {
 		return
 	}
 
-	cmd := gitCloneCommand(req.RepoURL, req.TargetPath, strings.TrimSpace(req.Branch), req.SingleBranch, depth, strings.TrimSpace(req.Filter))
+	cmd := gitCloneCommand(req.RepoURL, req.TargetPath, strings.TrimSpace(req.Branch), req.SingleBranch, depth, strings.TrimSpace(req.Filter), "")
 
 	execResp, err := s.runContainerExec(c.Request.Context(), localRuntimeWorkerID, req.ContainerID, ExecRequest{Cmd: cmd})
 	if err != nil {
