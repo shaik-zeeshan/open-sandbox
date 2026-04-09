@@ -1,6 +1,8 @@
 package store
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -165,6 +167,127 @@ func TestSandboxPortSpecsRoundTrip(t *testing.T) {
 	}
 	if len(list) != 1 || len(list[0].PortSpecs) != 2 {
 		t.Fatalf("expected listed port specs, got %+v", list)
+	}
+}
+
+func TestSandboxEnvRoundTrip(t *testing.T) {
+	s := newSQLiteStoreForTest(t)
+
+	if err := s.CreateSandbox(t.Context(), Sandbox{
+		ID:            "sb-env-1",
+		Name:          "env-test",
+		Image:         "alpine:3.20",
+		ContainerID:   "ctr-env-1",
+		WorkspaceDir:  "/workspace",
+		RepoURL:       "",
+		Env:           []string{"FOO=bar", "HELLO=world"},
+		SecretEnv:     []string{"SECRET_TOKEN=encrypted-value"},
+		SecretEnvKeys: []string{"SECRET_TOKEN"},
+		Status:        "running",
+		OwnerID:       "user-1",
+		OwnerUsername: "alice",
+	}); err != nil {
+		t.Fatalf("failed to create sandbox: %v", err)
+	}
+
+	stored, err := s.GetSandbox(t.Context(), "sb-env-1")
+	if err != nil {
+		t.Fatalf("failed to read sandbox: %v", err)
+	}
+	if len(stored.Env) != 2 || stored.Env[0] != "FOO=bar" || stored.Env[1] != "HELLO=world" {
+		t.Fatalf("expected persisted env, got %+v", stored.Env)
+	}
+	if len(stored.SecretEnv) != 1 || stored.SecretEnv[0] != "SECRET_TOKEN=encrypted-value" {
+		t.Fatalf("expected persisted secret env ciphertext, got %+v", stored.SecretEnv)
+	}
+	if len(stored.SecretEnvKeys) != 1 || stored.SecretEnvKeys[0] != "SECRET_TOKEN" {
+		t.Fatalf("expected persisted secret env keys, got %+v", stored.SecretEnvKeys)
+	}
+
+	list, err := s.ListSandboxes(t.Context())
+	if err != nil {
+		t.Fatalf("failed to list sandboxes: %v", err)
+	}
+	if len(list) != 1 || len(list[0].Env) != 2 {
+		t.Fatalf("expected listed env, got %+v", list)
+	}
+	if len(list[0].SecretEnvKeys) != 1 || list[0].SecretEnvKeys[0] != "SECRET_TOKEN" {
+		t.Fatalf("expected listed secret env keys, got %+v", list[0].SecretEnvKeys)
+	}
+}
+
+func TestOpenSQLiteMigratesSandboxEnvColumn(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "store.db")
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	const legacySchema = `
+CREATE TABLE sandboxes (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
+	image TEXT NOT NULL,
+	container_id TEXT NOT NULL UNIQUE,
+	worker_id TEXT NOT NULL DEFAULT 'local',
+	workspace_dir TEXT NOT NULL,
+	repo_url TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL,
+	owner_id TEXT NOT NULL DEFAULT '',
+	owner_username TEXT NOT NULL DEFAULT '',
+	proxy_config_json TEXT NOT NULL DEFAULT '{}',
+	port_specs_json TEXT NOT NULL DEFAULT '[]',
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL
+);`
+	if _, err := db.ExecContext(context.Background(), legacySchema); err != nil {
+		t.Fatalf("create legacy schema: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO sandboxes (id, name, image, container_id, worker_id, workspace_dir, repo_url, status, owner_id, owner_username, proxy_config_json, port_specs_json, created_at, updated_at) VALUES ('sb-legacy', 'legacy', 'alpine:3.20', 'ctr-legacy', 'local', '/workspace', '', 'running', 'user-1', 'alice', '{}', '[]', 1, 1)`); err != nil {
+		t.Fatalf("insert legacy sandbox: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy db: %v", err)
+	}
+
+	s, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("migrate sqlite db: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	stored, err := s.GetSandbox(t.Context(), "sb-legacy")
+	if err != nil {
+		t.Fatalf("read migrated sandbox: %v", err)
+	}
+	if len(stored.Env) != 0 {
+		t.Fatalf("expected empty env after migration, got %+v", stored.Env)
+	}
+	if len(stored.SecretEnv) != 0 || len(stored.SecretEnvKeys) != 0 {
+		t.Fatalf("expected empty secret env after migration, got %+v %+v", stored.SecretEnv, stored.SecretEnvKeys)
+	}
+
+	if err := s.CreateSandbox(t.Context(), Sandbox{
+		ID:            "sb-new",
+		Name:          "new",
+		Image:         "alpine:3.20",
+		ContainerID:   "ctr-new",
+		WorkspaceDir:  "/workspace",
+		Env:           []string{"FOO=bar"},
+		Status:        "running",
+		OwnerID:       "user-1",
+		OwnerUsername: "alice",
+	}); err != nil {
+		t.Fatalf("create sandbox after migration: %v", err)
+	}
+
+	created, err := s.GetSandbox(t.Context(), "sb-new")
+	if err != nil {
+		t.Fatalf("read created sandbox after migration: %v", err)
+	}
+	if len(created.Env) != 1 || created.Env[0] != "FOO=bar" {
+		t.Fatalf("expected env after migration, got %+v", created.Env)
 	}
 }
 
@@ -375,6 +498,50 @@ func TestUpdateSandboxProxyConfig(t *testing.T) {
 	}
 	if len(cleared.ProxyConfig) != 0 {
 		t.Fatalf("expected cleared proxy config, got %+v", cleared.ProxyConfig)
+	}
+}
+
+func TestUpdateSandboxRuntime(t *testing.T) {
+	s := newSQLiteStoreForTest(t)
+
+	if err := s.CreateSandbox(t.Context(), Sandbox{
+		ID:            "sb-update-runtime",
+		Name:          "update-runtime-test",
+		Image:         "alpine:3.20",
+		ContainerID:   "ctr-old",
+		WorkspaceDir:  "/workspace",
+		Status:        "running",
+		OwnerID:       "user-1",
+		OwnerUsername: "alice",
+		Env:           []string{"OLD=value"},
+		CreatedAt:     100,
+		UpdatedAt:     100,
+	}); err != nil {
+		t.Fatalf("failed to create sandbox: %v", err)
+	}
+
+	if err := s.UpdateSandboxRuntime(t.Context(), "sb-update-runtime", "ctr-new", []string{"FOO=bar", "BAR=baz"}, []string{"SECRET_TOKEN=encrypted"}, []string{"SECRET_TOKEN"}, "running"); err != nil {
+		t.Fatalf("failed to update sandbox runtime: %v", err)
+	}
+
+	got, err := s.GetSandbox(t.Context(), "sb-update-runtime")
+	if err != nil {
+		t.Fatalf("failed to read updated sandbox: %v", err)
+	}
+	if got.ContainerID != "ctr-new" {
+		t.Fatalf("expected updated container id, got %q", got.ContainerID)
+	}
+	if len(got.Env) != 2 || got.Env[0] != "FOO=bar" || got.Env[1] != "BAR=baz" {
+		t.Fatalf("unexpected env after runtime update: %+v", got.Env)
+	}
+	if len(got.SecretEnv) != 1 || got.SecretEnv[0] != "SECRET_TOKEN=encrypted" {
+		t.Fatalf("unexpected secret env after runtime update: %+v", got.SecretEnv)
+	}
+	if len(got.SecretEnvKeys) != 1 || got.SecretEnvKeys[0] != "SECRET_TOKEN" {
+		t.Fatalf("unexpected secret env keys after runtime update: %+v", got.SecretEnvKeys)
+	}
+	if got.UpdatedAt <= 100 {
+		t.Fatalf("expected updated_at to advance, got %d", got.UpdatedAt)
 	}
 }
 

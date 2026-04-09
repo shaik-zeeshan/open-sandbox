@@ -69,6 +69,8 @@ type SandboxResponse struct {
 	WorkerID      string                             `json:"worker_id,omitempty"`
 	WorkspaceDir  string                             `json:"workspace_dir"`
 	RepoURL       string                             `json:"repo_url,omitempty"`
+	Env           []string                           `json:"env,omitempty"`
+	SecretEnvKeys []string                           `json:"secret_env_keys,omitempty"`
 	Status        string                             `json:"status"`
 	OwnerUsername string                             `json:"owner_username,omitempty"`
 	ProxyConfig   map[string]*SandboxPortProxyConfig `json:"proxy_config,omitempty"`
@@ -83,6 +85,12 @@ type UpdateSandboxProxyConfigRequest struct {
 	ProxyConfig map[string]*SandboxPortProxyConfig `json:"proxy_config"`
 }
 
+type UpdateSandboxEnvRequest struct {
+	Env                 []string `json:"env"`
+	SecretEnv           []string `json:"secret_env,omitempty"`
+	RemoveSecretEnvKeys []string `json:"remove_secret_env_keys,omitempty"`
+}
+
 type CreateSandboxRequest struct {
 	Name               string                             `json:"name" binding:"required"`
 	Image              string                             `json:"image" binding:"required"`
@@ -91,6 +99,7 @@ type CreateSandboxRequest struct {
 	RepoTargetPath     string                             `json:"repo_target_path"`
 	UseImageDefaultCmd bool                               `json:"use_image_default_cmd"`
 	Env                []string                           `json:"env"`
+	SecretEnv          []string                           `json:"secret_env,omitempty"`
 	Cmd                []string                           `json:"cmd"`
 	Workdir            string                             `json:"workdir"`
 	TTY                bool                               `json:"tty"`
@@ -428,6 +437,13 @@ func (s *Server) createSandbox(c *gin.Context) {
 
 	sandboxID := newRequestID()
 	workerID := localRuntimeWorkerID
+	visibleEnv := append([]string(nil), req.Env...)
+	secretEnv, err := s.encryptSandboxSecretEnv(req.SecretEnv)
+	if err != nil {
+		writeError(c, secretEnvHTTPStatus(err), err)
+		return
+	}
+	runtimeEnv := append(append([]string(nil), visibleEnv...), secretEnv.RuntimeEnv...)
 	workspaceDir, err := s.resolveSandboxWorkdir(c.Request.Context(), req.Image, req.Workdir)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
@@ -454,7 +470,7 @@ func (s *Server) createSandbox(c *gin.Context) {
 
 	containerConfig := &container.Config{
 		Image: req.Image,
-		Env:   req.Env,
+		Env:   runtimeEnv,
 		Tty:   req.TTY,
 		User:  req.User,
 		Labels: map[string]string{
@@ -548,6 +564,9 @@ func (s *Server) createSandbox(c *gin.Context) {
 		WorkerID:      workerID,
 		WorkspaceDir:  workspaceDir,
 		RepoURL:       strings.TrimSpace(req.RepoURL),
+		Env:           visibleEnv,
+		SecretEnv:     secretEnv.EncryptedEnv,
+		SecretEnvKeys: secretEnv.Keys,
 		PortSpecs:     append([]string(nil), req.Ports...),
 		Status:        "running",
 		OwnerID:       identity.UserID,
@@ -699,6 +718,42 @@ func (s *Server) updateSandboxProxyConfig(c *gin.Context) {
 		}
 	}
 
+	c.JSON(http.StatusOK, response)
+}
+
+func (s *Server) updateSandboxEnv(c *gin.Context) {
+	sandbox, ok := s.loadSandbox(c)
+	if !ok {
+		return
+	}
+
+	var req UpdateSandboxEnvRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, err)
+		return
+	}
+
+	updated, err := s.recreateSandboxWithEnv(c.Request.Context(), sandbox, req.Env, req.SecretEnv, req.RemoveSecretEnvKeys)
+	if err != nil {
+		writeError(c, secretEnvHTTPStatus(err), err)
+		return
+	}
+
+	response := sandboxToResponse(updated)
+	if runtimeByContainer, err := s.runtimeContainersByID(c.Request.Context()); err == nil {
+		if runtime, ok := runtimeByContainer[updated.ContainerID]; ok {
+			if liveState := strings.TrimSpace(runtime.State); liveState != "" {
+				response.Status = liveState
+			}
+			if liveStatus := strings.TrimSpace(runtime.Status); liveStatus != "" {
+				response.Status = liveStatus
+			}
+			response.Ports = runtime.Ports
+			response.PreviewURLs = s.previewURLsForSandbox(updated.ID, runtime.Ports)
+		}
+	}
+
+	s.syncTraefikRoutes(c.Request.Context())
 	c.JSON(http.StatusOK, response)
 }
 
@@ -1373,6 +1428,160 @@ func (s *Server) resolveSandboxWorkdir(ctx context.Context, imageRef string, req
 	return "", nil
 }
 
+func (s *Server) recreateSandboxWithEnv(ctx context.Context, sandbox store.Sandbox, env []string, secretEnv []string, removeSecretEnvKeys []string) (store.Sandbox, error) {
+	workerID := s.workerIDForSandbox(sandbox)
+	secretState, err := s.resolveSandboxSecretEnvState(sandbox, secretEnv, removeSecretEnvKeys)
+	if err != nil {
+		return store.Sandbox{}, err
+	}
+	runtimeEnv := append(append([]string(nil), env...), secretState.RuntimeEnv...)
+	inspect, err := s.runtime.InspectWorkload(ctx, workerID, sandbox.ContainerID)
+	if err != nil {
+		return store.Sandbox{}, fmt.Errorf("inspect sandbox container: %w", err)
+	}
+	if inspect.Config == nil {
+		return store.Sandbox{}, errors.New("sandbox container config is unavailable")
+	}
+
+	containerConfig := cloneSandboxContainerConfig(inspect.Config, runtimeEnv)
+	hostConfig := cloneSandboxHostConfig(inspect.HostConfig)
+	containerName := strings.TrimPrefix(strings.TrimSpace(inspect.Name), "/")
+	replacementName := containerName
+	if replacementName != "" {
+		replacementName = fmt.Sprintf("%s-replacement-%d", replacementName, time.Now().UnixNano())
+	}
+	imageRef := strings.TrimSpace(containerConfig.Image)
+	if imageRef == "" {
+		imageRef = sandbox.Image
+	}
+
+	wasRunning := inspect.State != nil && inspect.State.Running
+	status := sandbox.Status
+	if inspect.State != nil {
+		if currentStatus := strings.TrimSpace(inspect.State.Status); currentStatus != "" {
+			status = currentStatus
+		}
+	}
+
+	if wasRunning {
+		if err := s.runtime.StopWorkload(ctx, workerID, sandbox.ContainerID, container.StopOptions{}); err != nil {
+			return store.Sandbox{}, fmt.Errorf("stop sandbox container: %w", err)
+		}
+	}
+
+	created, err := s.createContainerWithAutoPull(ctx, workerID, imageRef, containerConfig, hostConfig, replacementName)
+	if err != nil {
+		if wasRunning {
+			if restartErr := s.runtime.StartWorkload(ctx, workerID, sandbox.ContainerID, container.StartOptions{}); restartErr != nil {
+				return store.Sandbox{}, fmt.Errorf("recreate sandbox container: %w (failed to restart original container: %v)", err, restartErr)
+			}
+		}
+		return store.Sandbox{}, fmt.Errorf("recreate sandbox container: %w", err)
+	}
+	if wasRunning {
+		if err := s.runtime.StartWorkload(ctx, workerID, created.ID, container.StartOptions{}); err != nil {
+			_ = s.runtime.RemoveWorkload(ctx, workerID, created.ID, container.RemoveOptions{Force: true, RemoveVolumes: false})
+			if restartErr := s.runtime.StartWorkload(ctx, workerID, sandbox.ContainerID, container.StartOptions{}); restartErr != nil {
+				return store.Sandbox{}, fmt.Errorf("start recreated sandbox container: %w (failed to restart original container: %v)", err, restartErr)
+			}
+			return store.Sandbox{}, fmt.Errorf("start recreated sandbox container: %w", err)
+		}
+		status = "running"
+	}
+
+	if err := s.sandboxStore.UpdateSandboxRuntime(ctx, sandbox.ID, created.ID, env, secretState.EncryptedEnv, secretState.Keys, status); err != nil {
+		if rollbackErr := s.rollbackSandboxEnvReplacement(ctx, workerID, sandbox.ContainerID, created.ID, wasRunning); rollbackErr != nil {
+			return store.Sandbox{}, fmt.Errorf("update sandbox runtime: %w (rollback failed: %v)", err, rollbackErr)
+		}
+		return store.Sandbox{}, fmt.Errorf("update sandbox runtime: %w", err)
+	}
+	if err := s.runtime.RemoveWorkload(ctx, workerID, sandbox.ContainerID, container.RemoveOptions{Force: true, RemoveVolumes: false}); err != nil {
+		if !isMissingWorkloadError(err) {
+			return store.Sandbox{}, fmt.Errorf("remove sandbox container: %w", err)
+		}
+	}
+
+	updated, err := s.sandboxStore.GetSandbox(ctx, sandbox.ID)
+	if err != nil {
+		return store.Sandbox{}, err
+	}
+	return updated, nil
+}
+
+func (s *Server) rollbackSandboxEnvReplacement(ctx context.Context, workerID, originalContainerID, replacementContainerID string, restartOriginal bool) error {
+	if err := s.runtime.RemoveWorkload(ctx, workerID, replacementContainerID, container.RemoveOptions{Force: true, RemoveVolumes: false}); err != nil && !isMissingWorkloadError(err) {
+		return fmt.Errorf("remove replacement sandbox container: %w", err)
+	}
+	if restartOriginal {
+		if err := s.runtime.StartWorkload(ctx, workerID, originalContainerID, container.StartOptions{}); err != nil {
+			return fmt.Errorf("restart original sandbox container: %w", err)
+		}
+	}
+	return nil
+}
+
+func cloneSandboxContainerConfig(config *container.Config, env []string) *container.Config {
+	cloned := *config
+	cloned.Env = append([]string(nil), env...)
+	if config.Cmd != nil {
+		cloned.Cmd = append([]string(nil), config.Cmd...)
+	}
+	if config.Entrypoint != nil {
+		cloned.Entrypoint = append([]string(nil), config.Entrypoint...)
+	}
+	if config.Shell != nil {
+		cloned.Shell = append([]string(nil), config.Shell...)
+	}
+	if config.Labels != nil {
+		cloned.Labels = make(map[string]string, len(config.Labels))
+		for key, value := range config.Labels {
+			cloned.Labels[key] = value
+		}
+	}
+	if config.Volumes != nil {
+		cloned.Volumes = make(map[string]struct{}, len(config.Volumes))
+		for key, value := range config.Volumes {
+			cloned.Volumes[key] = value
+		}
+	}
+	if config.ExposedPorts != nil {
+		cloned.ExposedPorts = make(nat.PortSet, len(config.ExposedPorts))
+		for key, value := range config.ExposedPorts {
+			cloned.ExposedPorts[key] = value
+		}
+	}
+	return &cloned
+}
+
+func cloneSandboxHostConfig(config *container.HostConfig) *container.HostConfig {
+	if config == nil {
+		return &container.HostConfig{}
+	}
+	cloned := *config
+	if config.Binds != nil {
+		cloned.Binds = append([]string(nil), config.Binds...)
+	}
+	if config.PortBindings != nil {
+		cloned.PortBindings = make(nat.PortMap, len(config.PortBindings))
+		for key, value := range config.PortBindings {
+			cloned.PortBindings[key] = append([]nat.PortBinding(nil), value...)
+		}
+	}
+	if config.Tmpfs != nil {
+		cloned.Tmpfs = make(map[string]string, len(config.Tmpfs))
+		for key, value := range config.Tmpfs {
+			cloned.Tmpfs[key] = value
+		}
+	}
+	if config.Annotations != nil {
+		cloned.Annotations = make(map[string]string, len(config.Annotations))
+		for key, value := range config.Annotations {
+			cloned.Annotations[key] = value
+		}
+	}
+	return &cloned
+}
+
 func (s *Server) inspectImageWithAutoPull(ctx context.Context, imageRef string) (image.InspectResponse, error) {
 	inspected, err := s.docker.ImageInspect(ctx, imageRef)
 	if err == nil {
@@ -1445,6 +1654,8 @@ func sandboxToResponse(sandbox store.Sandbox) SandboxResponse {
 		WorkerID:      sandbox.WorkerID,
 		WorkspaceDir:  sandbox.WorkspaceDir,
 		RepoURL:       sandbox.RepoURL,
+		Env:           append([]string(nil), sandbox.Env...),
+		SecretEnvKeys: append([]string(nil), sandbox.SecretEnvKeys...),
 		Status:        sandbox.Status,
 		OwnerUsername: sandbox.OwnerUsername,
 		ProxyConfig:   sandboxProxyConfigToResponse(sandbox.ProxyConfig),

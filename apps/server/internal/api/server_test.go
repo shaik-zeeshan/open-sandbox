@@ -63,6 +63,7 @@ type mockSandboxStore struct {
 	createSandboxFn                  func(context.Context, store.Sandbox) error
 	listSandboxesFn                  func(context.Context) ([]store.Sandbox, error)
 	getSandboxFn                     func(context.Context, string) (store.Sandbox, error)
+	updateSandboxRuntimeFn           func(context.Context, string, string, []string, []string, []string, string) error
 	updateSandboxProxyConfigFn       func(context.Context, string, map[int]traefikcfg.ServiceProxyConfig) error
 	updateSandboxStatusFn            func(context.Context, string, string) error
 	updateSandboxStatusByContainerFn func(context.Context, string, string) error
@@ -231,6 +232,13 @@ func (m *mockSandboxStore) GetSandbox(ctx context.Context, sandboxID string) (st
 	return m.getSandboxFn(ctx, sandboxID)
 }
 
+func (m *mockSandboxStore) UpdateSandboxRuntime(ctx context.Context, sandboxID string, containerID string, env []string, secretEnv []string, secretEnvKeys []string, status string) error {
+	if m.updateSandboxRuntimeFn == nil {
+		return errors.New("not implemented")
+	}
+	return m.updateSandboxRuntimeFn(ctx, sandboxID, containerID, env, secretEnv, secretEnvKeys, status)
+}
+
 func (m *mockSandboxStore) UpdateSandboxStatus(ctx context.Context, sandboxID string, status string) error {
 	if m.updateSandboxStatusFn == nil {
 		return errors.New("not implemented")
@@ -284,6 +292,25 @@ func newSQLiteStoreForAPITest(t *testing.T) *store.SQLiteStore {
 	}
 	t.Cleanup(func() { _ = sqliteStore.Close() })
 	return sqliteStore
+}
+
+func setSandboxSecretsKey(t *testing.T, key string) {
+	t.Helper()
+	if key == "" {
+		previous, hadPrevious := os.LookupEnv(sandboxSecretsKeyEnvVar)
+		if err := os.Unsetenv(sandboxSecretsKeyEnvVar); err != nil {
+			t.Fatalf("failed to unset %s: %v", sandboxSecretsKeyEnvVar, err)
+		}
+		t.Cleanup(func() {
+			if !hadPrevious {
+				_ = os.Unsetenv(sandboxSecretsKeyEnvVar)
+				return
+			}
+			_ = os.Setenv(sandboxSecretsKeyEnvVar, previous)
+		})
+		return
+	}
+	t.Setenv(sandboxSecretsKeyEnvVar, key)
 }
 
 func signedTestToken(t *testing.T) string {
@@ -576,6 +603,22 @@ func TestHealthEndpointIsPublic(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestHealthEndpointReportsInvalidSecretEnvConfig(t *testing.T) {
+	setSandboxSecretsKey(t, "not-a-valid-key")
+	s := newTestServer(&mockDocker{})
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d (%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), sandboxSecretsKeyEnvVar) {
+		t.Fatalf("expected config error in health response, got %s", w.Body.String())
 	}
 }
 
@@ -1886,6 +1929,7 @@ func TestAuthorizeComposeProjectAccessRejectsForeignOwner(t *testing.T) {
 }
 
 func TestCreateSandboxEndpoint(t *testing.T) {
+	setSandboxSecretsKey(t, "0123456789abcdef0123456789abcdef")
 	createdSandbox := store.Sandbox{}
 	m := &mockDocker{
 		imageInspectFn: func(_ context.Context, imageID string) (image.InspectResponse, error) {
@@ -1913,6 +1957,9 @@ func TestCreateSandboxEndpoint(t *testing.T) {
 			if len(hostConfig.Binds) != 1 || !strings.Contains(hostConfig.Binds[0], ":/home/opencode") {
 				t.Fatalf("expected workspace bind mount, got %v", hostConfig.Binds)
 			}
+			if len(config.Env) != 3 || config.Env[2] != "SECRET_TOKEN=swordfish" {
+				t.Fatalf("expected secret env in runtime config, got %+v", config.Env)
+			}
 			return container.CreateResponse{ID: "sandbox-container-id"}, nil
 		},
 		containerStartFn: func(_ context.Context, containerID string, _ container.StartOptions) error {
@@ -1931,7 +1978,7 @@ func TestCreateSandboxEndpoint(t *testing.T) {
 	}
 
 	s := newTestServerWithStore(m, sandboxStore)
-	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes", bytes.NewBufferString(`{"name":"workspace","image":"ubuntu:24.04"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes", bytes.NewBufferString(`{"name":"workspace","image":"ubuntu:24.04","env":["FOO=bar","HELLO=world"],"secret_env":["SECRET_TOKEN=swordfish"]}`))
 	setAuthHeader(t, req)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -1951,9 +1998,24 @@ func TestCreateSandboxEndpoint(t *testing.T) {
 	if createdSandbox.OwnerID != "admin-user" || createdSandbox.OwnerUsername != "admin" {
 		t.Fatalf("expected sandbox ownership to be set, got %+v", createdSandbox)
 	}
+	if len(createdSandbox.Env) != 2 || createdSandbox.Env[0] != "FOO=bar" || createdSandbox.Env[1] != "HELLO=world" {
+		t.Fatalf("expected sandbox env to be persisted, got %+v", createdSandbox.Env)
+	}
+	if len(createdSandbox.SecretEnv) != 1 || createdSandbox.SecretEnv[0] == "SECRET_TOKEN=swordfish" || !strings.HasPrefix(createdSandbox.SecretEnv[0], "SECRET_TOKEN=") {
+		t.Fatalf("expected encrypted sandbox secret env to be persisted, got %+v", createdSandbox.SecretEnv)
+	}
+	if len(createdSandbox.SecretEnvKeys) != 1 || createdSandbox.SecretEnvKeys[0] != "SECRET_TOKEN" {
+		t.Fatalf("expected sandbox secret env keys to be persisted, got %+v", createdSandbox.SecretEnvKeys)
+	}
 
 	if !bytes.Contains(w.Body.Bytes(), []byte("sandbox-container-id")) {
 		t.Fatalf("expected container id in response: %s", w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"env":["FOO=bar","HELLO=world"]`)) {
+		t.Fatalf("expected env in response: %s", w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"secret_env_keys":["SECRET_TOKEN"]`)) || bytes.Contains(w.Body.Bytes(), []byte("swordfish")) {
+		t.Fatalf("expected secret env keys only in response: %s", w.Body.String())
 	}
 }
 
@@ -2008,6 +2070,24 @@ func TestCreateSandboxEndpointLeavesWorkdirUnsetWhenImageHasNoWorkdir(t *testing
 	}
 	if createdSandbox.WorkspaceDir != "" {
 		t.Fatalf("expected persisted workspace dir to be empty, got %q", createdSandbox.WorkspaceDir)
+	}
+}
+
+func TestCreateSandboxEndpointRejectsSecretEnvWithoutKey(t *testing.T) {
+	setSandboxSecretsKey(t, "")
+	s := newTestServerWithStore(&mockDocker{}, &mockSandboxStore{})
+	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes", bytes.NewBufferString(`{"name":"workspace","image":"ubuntu:24.04","secret_env":["SECRET_TOKEN=swordfish"]}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), sandboxSecretsKeyEnvVar) {
+		t.Fatalf("expected missing key error, got %s", w.Body.String())
 	}
 }
 
@@ -2589,6 +2669,476 @@ func TestUpdateSandboxProxyConfigEndpointAllowsClearingConfig(t *testing.T) {
 	}
 }
 
+func TestUpdateSandboxEnvEndpointRecreatesContainerAndPersistsRuntime(t *testing.T) {
+	updatedSandbox := store.Sandbox{}
+	inspectCalls := 0
+	started := false
+	var operations []string
+	m := &mockDocker{
+		containerInspectFn: func(_ context.Context, containerID string) (container.InspectResponse, error) {
+			inspectCalls++
+			if inspectCalls > 1 {
+				return container.InspectResponse{}, errors.New("not implemented")
+			}
+			if containerID != "sandbox-old" {
+				t.Fatalf("unexpected inspected container id %q", containerID)
+			}
+			return container.InspectResponse{
+				ContainerJSONBase: &container.ContainerJSONBase{
+					Name: "/sandbox-workspace-abc123",
+					HostConfig: &container.HostConfig{
+						Binds: []string{"open-sandbox-volume:/workspace"},
+						PortBindings: nat.PortMap{
+							"3000/tcp": []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: "3000"}},
+						},
+					},
+					State: &container.State{Running: true, Status: "running"},
+				},
+				Config: &container.Config{
+					Image:      "alpine:3.20",
+					Cmd:        []string{"sleep", "infinity"},
+					WorkingDir: "/workspace",
+					Labels: map[string]string{
+						labelOpenSandboxManaged:       "true",
+						labelOpenSandboxSandboxID:     "sandbox-1",
+						labelOpenSandboxOwnerID:       "member-1",
+						labelOpenSandboxOwnerUsername: "alice",
+						labelOpenSandboxKind:          managedKindSandbox,
+						labelOpenSandboxWorkerID:      localRuntimeWorkerID,
+					},
+					Env: []string{"OLD=value"},
+				},
+			}, nil
+		},
+		containerStopFn: func(_ context.Context, containerID string, _ container.StopOptions) error {
+			if containerID != "sandbox-old" {
+				t.Fatalf("unexpected stopped container id %q", containerID)
+			}
+			operations = append(operations, "stop-old")
+			return nil
+		},
+		containerRemoveFn: func(_ context.Context, containerID string, options container.RemoveOptions) error {
+			if options.RemoveVolumes {
+				t.Fatal("expected sandbox workspace volume to be preserved")
+			}
+			operations = append(operations, "remove-"+containerID)
+			return nil
+		},
+		containerCreateFn: func(_ context.Context, config *container.Config, hostConfig *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, name string) (container.CreateResponse, error) {
+			if !strings.HasPrefix(name, "sandbox-workspace-abc123-replacement-") {
+				t.Fatalf("expected replacement container name, got %q", name)
+			}
+			if len(config.Env) != 2 || config.Env[0] != "FOO=bar" || config.Env[1] != "BAR=baz" {
+				t.Fatalf("expected updated env to be applied, got %+v", config.Env)
+			}
+			if config.Labels[labelOpenSandboxSandboxID] != "sandbox-1" {
+				t.Fatalf("expected sandbox label to be preserved, got %+v", config.Labels)
+			}
+			if len(hostConfig.Binds) != 1 || hostConfig.Binds[0] != "open-sandbox-volume:/workspace" {
+				t.Fatalf("expected workspace bind to be preserved, got %+v", hostConfig.Binds)
+			}
+			operations = append(operations, "create-new")
+			return container.CreateResponse{ID: "sandbox-new"}, nil
+		},
+		containerStartFn: func(_ context.Context, containerID string, _ container.StartOptions) error {
+			if containerID != "sandbox-new" {
+				t.Fatalf("unexpected started container id %q", containerID)
+			}
+			started = true
+			operations = append(operations, "start-new")
+			return nil
+		},
+	}
+	sandboxStore := &mockSandboxStore{
+		getSandboxFn: func(_ context.Context, sandboxID string) (store.Sandbox, error) {
+			if sandboxID != "sandbox-1" {
+				t.Fatalf("unexpected sandbox id %q", sandboxID)
+			}
+			if updatedSandbox.ID != "" {
+				return updatedSandbox, nil
+			}
+			return store.Sandbox{ID: "sandbox-1", ContainerID: "sandbox-old", Image: "alpine:3.20", WorkspaceDir: "/workspace", OwnerID: "member-1", OwnerUsername: "alice", Status: "running"}, nil
+		},
+		updateSandboxRuntimeFn: func(_ context.Context, sandboxID string, containerID string, env []string, secretEnv []string, secretEnvKeys []string, status string) error {
+			if sandboxID != "sandbox-1" {
+				t.Fatalf("unexpected sandbox id %q", sandboxID)
+			}
+			if containerID != "sandbox-new" {
+				t.Fatalf("expected new container id to be stored, got %q", containerID)
+			}
+			if len(env) != 2 || env[0] != "FOO=bar" || env[1] != "BAR=baz" {
+				t.Fatalf("expected env to be stored, got %+v", env)
+			}
+			if len(secretEnv) != 0 || len(secretEnvKeys) != 0 {
+				t.Fatalf("expected no secret env to be stored, got %+v %+v", secretEnv, secretEnvKeys)
+			}
+			if status != "running" {
+				t.Fatalf("expected running status, got %q", status)
+			}
+			operations = append(operations, "update-store")
+			updatedSandbox = store.Sandbox{ID: "sandbox-1", ContainerID: containerID, Image: "alpine:3.20", WorkspaceDir: "/workspace", OwnerID: "member-1", OwnerUsername: "alice", Status: status, Env: append([]string(nil), env...), UpdatedAt: 200}
+			return nil
+		},
+	}
+
+	s := newTestServerWithStore(m, sandboxStore)
+	req := httptest.NewRequest(http.MethodPatch, "/api/sandboxes/sandbox-1/env", bytes.NewBufferString(`{"env":["FOO=bar","BAR=baz"]}`))
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if !started {
+		t.Fatal("expected replacement sandbox container to start")
+	}
+	expectedOperations := []string{"stop-old", "create-new", "start-new", "update-store", "remove-sandbox-old"}
+	if strings.Join(operations, ",") != strings.Join(expectedOperations, ",") {
+		t.Fatalf("unexpected operation order: got %v want %v", operations, expectedOperations)
+	}
+
+	var response SandboxResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode sandbox response: %v", err)
+	}
+	if response.ContainerID != "sandbox-new" {
+		t.Fatalf("expected updated container id, got %q", response.ContainerID)
+	}
+	if len(response.Env) != 2 || response.Env[0] != "FOO=bar" || response.Env[1] != "BAR=baz" {
+		t.Fatalf("expected updated env response, got %+v", response.Env)
+	}
+}
+
+func TestUpdateSandboxEnvEndpointMergesSecretEnvAndRespondsWithKeysOnly(t *testing.T) {
+	setSandboxSecretsKey(t, "0123456789abcdef0123456789abcdef")
+	codec, err := newSandboxSecretEnvCodecFromEnv()
+	if err != nil {
+		t.Fatalf("load secret env codec: %v", err)
+	}
+	secretState, err := codec.encrypt(map[string]string{"KEEP": "value", "REPLACE": "old"})
+	if err != nil {
+		t.Fatalf("encrypt secret env: %v", err)
+	}
+	updatedSandbox := store.Sandbox{}
+	var operations []string
+	m := &mockDocker{
+		containerInspectFn: func(_ context.Context, containerID string) (container.InspectResponse, error) {
+			if containerID != "sandbox-old" {
+				t.Fatalf("unexpected inspected container id %q", containerID)
+			}
+			return container.InspectResponse{
+				ContainerJSONBase: &container.ContainerJSONBase{
+					Name:       "/sandbox-workspace-abc123",
+					HostConfig: &container.HostConfig{Binds: []string{"open-sandbox-volume:/workspace"}},
+					State:      &container.State{Running: true, Status: "running"},
+				},
+				Config: &container.Config{
+					Image: "alpine:3.20",
+					Labels: map[string]string{
+						labelOpenSandboxManaged:       "true",
+						labelOpenSandboxSandboxID:     "sandbox-1",
+						labelOpenSandboxOwnerID:       "member-1",
+						labelOpenSandboxOwnerUsername: "alice",
+						labelOpenSandboxKind:          managedKindSandbox,
+						labelOpenSandboxWorkerID:      localRuntimeWorkerID,
+					},
+				},
+			}, nil
+		},
+		containerStopFn: func(_ context.Context, containerID string, _ container.StopOptions) error {
+			operations = append(operations, "stop-"+containerID)
+			return nil
+		},
+		containerCreateFn: func(_ context.Context, config *container.Config, _ *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, _ string) (container.CreateResponse, error) {
+			expectedEnv := []string{"VISIBLE=1", "KEEP=value", "NEW=fresh", "REPLACE=new"}
+			if strings.Join(config.Env, ",") != strings.Join(expectedEnv, ",") {
+				t.Fatalf("unexpected runtime env: got %+v want %+v", config.Env, expectedEnv)
+			}
+			operations = append(operations, "create-new")
+			return container.CreateResponse{ID: "sandbox-new"}, nil
+		},
+		containerStartFn: func(_ context.Context, containerID string, _ container.StartOptions) error {
+			operations = append(operations, "start-"+containerID)
+			return nil
+		},
+		containerRemoveFn: func(_ context.Context, containerID string, _ container.RemoveOptions) error {
+			operations = append(operations, "remove-"+containerID)
+			return nil
+		},
+	}
+	sandboxStore := &mockSandboxStore{
+		getSandboxFn: func(_ context.Context, sandboxID string) (store.Sandbox, error) {
+			if updatedSandbox.ID != "" {
+				return updatedSandbox, nil
+			}
+			return store.Sandbox{ID: sandboxID, ContainerID: "sandbox-old", Image: "alpine:3.20", WorkspaceDir: "/workspace", OwnerID: "member-1", OwnerUsername: "alice", Status: "running", SecretEnv: append([]string(nil), secretState.EncryptedEnv...), SecretEnvKeys: append([]string(nil), secretState.Keys...)}, nil
+		},
+		updateSandboxRuntimeFn: func(_ context.Context, sandboxID string, containerID string, env []string, secretEnv []string, secretEnvKeys []string, status string) error {
+			if strings.Join(env, ",") != "VISIBLE=1" {
+				t.Fatalf("unexpected visible env: %+v", env)
+			}
+			if strings.Join(secretEnvKeys, ",") != "KEEP,NEW,REPLACE" {
+				t.Fatalf("unexpected secret env keys: %+v", secretEnvKeys)
+			}
+			for _, entry := range secretEnv {
+				if strings.Contains(entry, "value") || strings.Contains(entry, "fresh") || strings.Contains(entry, "new") {
+					t.Fatalf("expected encrypted secret env, got %+v", secretEnv)
+				}
+			}
+			updatedSandbox = store.Sandbox{ID: sandboxID, ContainerID: containerID, Image: "alpine:3.20", WorkspaceDir: "/workspace", OwnerID: "member-1", OwnerUsername: "alice", Status: status, Env: env, SecretEnv: secretEnv, SecretEnvKeys: secretEnvKeys}
+			operations = append(operations, "update-store")
+			return nil
+		},
+	}
+
+	s := newTestServerWithStore(m, sandboxStore)
+	req := httptest.NewRequest(http.MethodPatch, "/api/sandboxes/sandbox-1/env", bytes.NewBufferString(`{"env":["VISIBLE=1"],"secret_env":["REPLACE=new","NEW=fresh"],"remove_secret_env_keys":["MISSING"]}`))
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "value") || strings.Contains(w.Body.String(), "fresh") || strings.Contains(w.Body.String(), "REPLACE=new") {
+		t.Fatalf("expected response not to leak secret values: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"secret_env_keys":["KEEP","NEW","REPLACE"]`) {
+		t.Fatalf("expected secret env keys in response: %s", w.Body.String())
+	}
+	if strings.Join(operations, ",") != "stop-sandbox-old,create-new,start-sandbox-new,update-store,remove-sandbox-old" {
+		t.Fatalf("unexpected operations: %+v", operations)
+	}
+}
+
+func TestUpdateSandboxEnvEndpointRejectsWhenStoredSecretsNeedDecryptionWithoutKey(t *testing.T) {
+	setSandboxSecretsKey(t, "")
+	inspected := false
+	m := &mockDocker{
+		containerInspectFn: func(context.Context, string) (container.InspectResponse, error) {
+			inspected = true
+			return container.InspectResponse{}, nil
+		},
+	}
+	sandboxStore := &mockSandboxStore{
+		getSandboxFn: func(_ context.Context, sandboxID string) (store.Sandbox, error) {
+			return store.Sandbox{ID: sandboxID, ContainerID: "sandbox-old", OwnerID: "member-1", OwnerUsername: "alice", Status: "running", SecretEnv: []string{"SECRET_TOKEN=encrypted"}, SecretEnvKeys: []string{"SECRET_TOKEN"}}, nil
+		},
+	}
+	s := newTestServerWithStore(m, sandboxStore)
+	req := httptest.NewRequest(http.MethodPatch, "/api/sandboxes/sandbox-1/env", bytes.NewBufferString(`{"env":["VISIBLE=1"]}`))
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (%s)", w.Code, w.Body.String())
+	}
+	if inspected {
+		t.Fatal("expected request to fail before runtime mutation")
+	}
+	if !strings.Contains(w.Body.String(), sandboxSecretsKeyEnvVar) {
+		t.Fatalf("expected missing key error, got %s", w.Body.String())
+	}
+}
+
+func TestUpdateSandboxEnvEndpointRestartsOriginalWhenReplacementStartFails(t *testing.T) {
+	inspectCalls := 0
+	storeUpdated := false
+	var operations []string
+	m := &mockDocker{
+		containerInspectFn: func(_ context.Context, containerID string) (container.InspectResponse, error) {
+			inspectCalls++
+			if inspectCalls > 1 {
+				return container.InspectResponse{}, errors.New("not implemented")
+			}
+			if containerID != "sandbox-old" {
+				t.Fatalf("unexpected inspected container id %q", containerID)
+			}
+			return container.InspectResponse{
+				ContainerJSONBase: &container.ContainerJSONBase{
+					Name:       "/sandbox-workspace-abc123",
+					HostConfig: &container.HostConfig{Binds: []string{"open-sandbox-volume:/workspace"}},
+					State:      &container.State{Running: true, Status: "running"},
+				},
+				Config: &container.Config{
+					Image: "alpine:3.20",
+					Labels: map[string]string{
+						labelOpenSandboxManaged:       "true",
+						labelOpenSandboxSandboxID:     "sandbox-1",
+						labelOpenSandboxOwnerID:       "member-1",
+						labelOpenSandboxOwnerUsername: "alice",
+						labelOpenSandboxKind:          managedKindSandbox,
+						labelOpenSandboxWorkerID:      localRuntimeWorkerID,
+					},
+				},
+			}, nil
+		},
+		containerStopFn: func(_ context.Context, containerID string, _ container.StopOptions) error {
+			if containerID != "sandbox-old" {
+				t.Fatalf("unexpected stopped container id %q", containerID)
+			}
+			operations = append(operations, "stop-old")
+			return nil
+		},
+		containerCreateFn: func(_ context.Context, _ *container.Config, _ *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, name string) (container.CreateResponse, error) {
+			if !strings.HasPrefix(name, "sandbox-workspace-abc123-replacement-") {
+				t.Fatalf("expected replacement container name, got %q", name)
+			}
+			operations = append(operations, "create-new")
+			return container.CreateResponse{ID: "sandbox-new"}, nil
+		},
+		containerStartFn: func(_ context.Context, containerID string, _ container.StartOptions) error {
+			operations = append(operations, "start-"+containerID)
+			if containerID == "sandbox-new" {
+				return errors.New("boom")
+			}
+			if containerID != "sandbox-old" {
+				t.Fatalf("unexpected started container id %q", containerID)
+			}
+			return nil
+		},
+		containerRemoveFn: func(_ context.Context, containerID string, options container.RemoveOptions) error {
+			if options.RemoveVolumes {
+				t.Fatal("expected sandbox workspace volume to be preserved")
+			}
+			operations = append(operations, "remove-"+containerID)
+			return nil
+		},
+	}
+	sandboxStore := &mockSandboxStore{
+		getSandboxFn: func(_ context.Context, sandboxID string) (store.Sandbox, error) {
+			if sandboxID != "sandbox-1" {
+				t.Fatalf("unexpected sandbox id %q", sandboxID)
+			}
+			return store.Sandbox{ID: "sandbox-1", ContainerID: "sandbox-old", Image: "alpine:3.20", WorkspaceDir: "/workspace", OwnerID: "member-1", OwnerUsername: "alice", Status: "running"}, nil
+		},
+		updateSandboxRuntimeFn: func(context.Context, string, string, []string, []string, []string, string) error {
+			storeUpdated = true
+			return nil
+		},
+	}
+
+	s := newTestServerWithStore(m, sandboxStore)
+	req := httptest.NewRequest(http.MethodPatch, "/api/sandboxes/sandbox-1/env", bytes.NewBufferString(`{"env":["FOO=bar"]}`))
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d (%s)", w.Code, w.Body.String())
+	}
+	if storeUpdated {
+		t.Fatal("expected sandbox store runtime to remain unchanged")
+	}
+	expectedOperations := []string{"stop-old", "create-new", "start-sandbox-new", "remove-sandbox-new", "start-sandbox-old"}
+	if strings.Join(operations, ",") != strings.Join(expectedOperations, ",") {
+		t.Fatalf("unexpected operation order: got %v want %v", operations, expectedOperations)
+	}
+}
+
+func TestUpdateSandboxEnvEndpointRollsBackWhenStoreUpdateFails(t *testing.T) {
+	inspectCalls := 0
+	var operations []string
+	m := &mockDocker{
+		containerInspectFn: func(_ context.Context, containerID string) (container.InspectResponse, error) {
+			inspectCalls++
+			if inspectCalls > 1 {
+				return container.InspectResponse{}, errors.New("not implemented")
+			}
+			if containerID != "sandbox-old" {
+				t.Fatalf("unexpected inspected container id %q", containerID)
+			}
+			return container.InspectResponse{
+				ContainerJSONBase: &container.ContainerJSONBase{
+					Name:       "/sandbox-workspace-abc123",
+					HostConfig: &container.HostConfig{Binds: []string{"open-sandbox-volume:/workspace"}},
+					State:      &container.State{Running: true, Status: "running"},
+				},
+				Config: &container.Config{
+					Image: "alpine:3.20",
+					Labels: map[string]string{
+						labelOpenSandboxManaged:       "true",
+						labelOpenSandboxSandboxID:     "sandbox-1",
+						labelOpenSandboxOwnerID:       "member-1",
+						labelOpenSandboxOwnerUsername: "alice",
+						labelOpenSandboxKind:          managedKindSandbox,
+						labelOpenSandboxWorkerID:      localRuntimeWorkerID,
+					},
+				},
+			}, nil
+		},
+		containerStopFn: func(_ context.Context, containerID string, _ container.StopOptions) error {
+			if containerID != "sandbox-old" {
+				t.Fatalf("unexpected stopped container id %q", containerID)
+			}
+			operations = append(operations, "stop-old")
+			return nil
+		},
+		containerCreateFn: func(_ context.Context, _ *container.Config, _ *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, name string) (container.CreateResponse, error) {
+			if !strings.HasPrefix(name, "sandbox-workspace-abc123-replacement-") {
+				t.Fatalf("expected replacement container name, got %q", name)
+			}
+			operations = append(operations, "create-new")
+			return container.CreateResponse{ID: "sandbox-new"}, nil
+		},
+		containerStartFn: func(_ context.Context, containerID string, _ container.StartOptions) error {
+			operations = append(operations, "start-"+containerID)
+			if containerID != "sandbox-new" && containerID != "sandbox-old" {
+				t.Fatalf("unexpected started container id %q", containerID)
+			}
+			return nil
+		},
+		containerRemoveFn: func(_ context.Context, containerID string, options container.RemoveOptions) error {
+			if options.RemoveVolumes {
+				t.Fatal("expected sandbox workspace volume to be preserved")
+			}
+			operations = append(operations, "remove-"+containerID)
+			return nil
+		},
+	}
+	sandboxStore := &mockSandboxStore{
+		getSandboxFn: func(_ context.Context, sandboxID string) (store.Sandbox, error) {
+			if sandboxID != "sandbox-1" {
+				t.Fatalf("unexpected sandbox id %q", sandboxID)
+			}
+			return store.Sandbox{ID: "sandbox-1", ContainerID: "sandbox-old", Image: "alpine:3.20", WorkspaceDir: "/workspace", OwnerID: "member-1", OwnerUsername: "alice", Status: "running"}, nil
+		},
+		updateSandboxRuntimeFn: func(context.Context, string, string, []string, []string, []string, string) error {
+			operations = append(operations, "update-store")
+			return errors.New("store boom")
+		},
+	}
+
+	s := newTestServerWithStore(m, sandboxStore)
+	req := httptest.NewRequest(http.MethodPatch, "/api/sandboxes/sandbox-1/env", bytes.NewBufferString(`{"env":["FOO=bar"]}`))
+	req.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d (%s)", w.Code, w.Body.String())
+	}
+	expectedOperations := []string{"stop-old", "create-new", "start-sandbox-new", "update-store", "remove-sandbox-new", "start-sandbox-old"}
+	if strings.Join(operations, ",") != strings.Join(expectedOperations, ",") {
+		t.Fatalf("unexpected operation order: got %v want %v", operations, expectedOperations)
+	}
+	if bytes.Contains(w.Body.Bytes(), []byte("rollback failed")) {
+		t.Fatalf("expected rollback to succeed, got response %s", w.Body.String())
+	}
+}
+
 func TestSandboxResponseIncludesPortSpecs(t *testing.T) {
 	sandboxStore := &mockSandboxStore{
 		listSandboxesFn: func(context.Context) ([]store.Sandbox, error) {
@@ -2598,6 +3148,7 @@ func TestSandboxResponseIncludesPortSpecs(t *testing.T) {
 				ContainerID:   "sandbox-container",
 				OwnerID:       "member-1",
 				OwnerUsername: "alice",
+				Env:           []string{"FOO=bar", "HELLO=world"},
 				Status:        "running",
 				PortSpecs:     []string{"127.0.0.1:8080:80", "3000"},
 			}}, nil
@@ -2624,6 +3175,53 @@ func TestSandboxResponseIncludesPortSpecs(t *testing.T) {
 	}
 	if len(sandboxes[0].PortSpecs) != 2 || sandboxes[0].PortSpecs[0] != "127.0.0.1:8080:80" || sandboxes[0].PortSpecs[1] != "3000" {
 		t.Fatalf("unexpected sandbox port specs: %+v", sandboxes[0].PortSpecs)
+	}
+	if len(sandboxes[0].Env) != 2 || sandboxes[0].Env[0] != "FOO=bar" || sandboxes[0].Env[1] != "HELLO=world" {
+		t.Fatalf("unexpected sandbox env: %+v", sandboxes[0].Env)
+	}
+}
+
+func TestSandboxResponsesExposeSecretKeysWithoutValues(t *testing.T) {
+	sandboxStore := &mockSandboxStore{
+		listSandboxesFn: func(context.Context) ([]store.Sandbox, error) {
+			return []store.Sandbox{{
+				ID:            "sandbox-1",
+				Name:          "mine",
+				ContainerID:   "sandbox-container",
+				OwnerID:       "member-1",
+				OwnerUsername: "alice",
+				Env:           []string{"FOO=bar"},
+				SecretEnv:     []string{"SECRET_TOKEN=encrypted"},
+				SecretEnvKeys: []string{"SECRET_TOKEN"},
+				Status:        "running",
+			}}, nil
+		},
+		getSandboxFn: func(context.Context, string) (store.Sandbox, error) {
+			return store.Sandbox{ID: "sandbox-1", Name: "mine", ContainerID: "sandbox-container", OwnerID: "member-1", OwnerUsername: "alice", Env: []string{"FOO=bar"}, SecretEnv: []string{"SECRET_TOKEN=encrypted"}, SecretEnvKeys: []string{"SECRET_TOKEN"}, Status: "running"}, nil
+		},
+	}
+	s := newTestServerWithStore(&mockDocker{}, sandboxStore)
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/sandboxes", nil)
+	listReq.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	listResp := httptest.NewRecorder()
+	s.Router().ServeHTTP(listResp, listReq)
+	if listResp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", listResp.Code, listResp.Body.String())
+	}
+	if !strings.Contains(listResp.Body.String(), `"secret_env_keys":["SECRET_TOKEN"]`) || strings.Contains(listResp.Body.String(), "encrypted") {
+		t.Fatalf("expected list response to expose keys only: %s", listResp.Body.String())
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/sandboxes/sandbox-1", nil)
+	getReq.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: "member-1", Username: "alice", Role: roleMember}))
+	getResp := httptest.NewRecorder()
+	s.Router().ServeHTTP(getResp, getReq)
+	if getResp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", getResp.Code, getResp.Body.String())
+	}
+	if !strings.Contains(getResp.Body.String(), `"secret_env_keys":["SECRET_TOKEN"]`) || strings.Contains(getResp.Body.String(), "encrypted") {
+		t.Fatalf("expected get response to expose keys only: %s", getResp.Body.String())
 	}
 }
 
