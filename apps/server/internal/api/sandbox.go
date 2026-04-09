@@ -2320,24 +2320,55 @@ func (s *Server) prepareSandboxGitReference(ctx context.Context, workerID string
 	var stderr string
 	if _, statErr := os.Stat(cacheDir); statErr == nil {
 		_, stderr, err = commandRunner(ctx, "git", "-C", cacheDir, "fetch", "--prune", "origin")
-	} else if errors.Is(statErr, os.ErrNotExist) {
-		_, stderr, err = commandRunner(ctx, "git", "clone", "--mirror", repoURL, cacheDir)
 		if err != nil {
-			s.logger.Warn("sandbox_git_cache_clone_failed", slog.String("repo_url", repoURL), slog.String("error", strings.TrimSpace(stderr)))
+			s.logger.Warn("sandbox_git_cache_fetch_failed", slog.String("repo_url", repoURL), slog.String("error", strings.TrimSpace(stderr)))
+			if !s.removeSandboxGitCacheDir(cacheDir, repoURL) {
+				return "", ""
+			}
+			if !s.cloneSandboxGitCacheMirror(ctx, repoURL, cacheDir, false) {
+				return "", ""
+			}
+		}
+	} else if errors.Is(statErr, os.ErrNotExist) {
+		if !s.cloneSandboxGitCacheMirror(ctx, repoURL, cacheDir, true) {
 			return "", ""
 		}
-		reporter.phase("repo_cache", "done", "shared repository cache refreshed")
-		return path.Join(sandboxGitCacheMountRoot, filepath.Base(cacheDir)), fmt.Sprintf("%s:%s:ro", cacheRoot, sandboxGitCacheMountRoot)
 	} else {
 		s.logger.Warn("sandbox_git_cache_stat_failed", slog.String("repo_url", repoURL), slog.String("error", statErr.Error()))
 		return "", ""
 	}
-	if err != nil {
-		s.logger.Warn("sandbox_git_cache_fetch_failed", slog.String("repo_url", repoURL), slog.String("error", strings.TrimSpace(stderr)))
-		return "", ""
-	}
 	reporter.phase("repo_cache", "done", "shared repository cache refreshed")
 	return path.Join(sandboxGitCacheMountRoot, filepath.Base(cacheDir)), fmt.Sprintf("%s:%s:ro", cacheRoot, sandboxGitCacheMountRoot)
+}
+
+func (s *Server) cloneSandboxGitCacheMirror(ctx context.Context, repoURL string, cacheDir string, retryOnFailure bool) bool {
+	attempts := 1
+	if retryOnFailure {
+		attempts = 2
+	}
+	for attempt := 1; attempt <= attempts; attempt++ {
+		_, stderr, err := commandRunner(ctx, "git", "clone", "--mirror", repoURL, cacheDir)
+		if err == nil {
+			return true
+		}
+		attrs := []any{slog.String("repo_url", repoURL), slog.String("error", strings.TrimSpace(stderr))}
+		if attempts > 1 {
+			attrs = append(attrs, slog.Int("attempt", attempt))
+		}
+		s.logger.Warn("sandbox_git_cache_clone_failed", attrs...)
+		if !s.removeSandboxGitCacheDir(cacheDir, repoURL) {
+			return false
+		}
+	}
+	return false
+}
+
+func (s *Server) removeSandboxGitCacheDir(cacheDir string, repoURL string) bool {
+	if err := os.RemoveAll(cacheDir); err != nil {
+		s.logger.Warn("sandbox_git_cache_cleanup_failed", slog.String("repo_url", repoURL), slog.String("path", cacheDir), slog.String("error", err.Error()))
+		return false
+	}
+	return true
 }
 
 func (s *Server) lockSandboxGitCacheRepo(repoURL string) func() {

@@ -4799,6 +4799,113 @@ func TestPrepareSandboxGitReferenceLocksPerRepo(t *testing.T) {
 	}
 }
 
+func TestPrepareSandboxGitReferenceRetriesCloneAfterInitialFailure(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+
+	workspaceRoot := t.TempDir()
+	s := newTestServerWithStore(&mockDocker{}, &mockSandboxStore{})
+	s.workspaceRoot = workspaceRoot
+
+	repoURL := "https://github.com/example/repo.git"
+	cacheDir := filepath.Join(s.sandboxGitCacheRoot(), sandboxGitCacheKey(repoURL)+".git")
+	partialFile := filepath.Join(cacheDir, "partial")
+
+	cloneAttempts := 0
+	commandRunner = func(_ context.Context, name string, args ...string) (string, string, error) {
+		if name != "git" {
+			return "", "", nil
+		}
+		if len(args) >= 1 && args[0] == "clone" {
+			cloneAttempts++
+			if cloneAttempts == 1 {
+				if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+					return "", err.Error(), err
+				}
+				if err := os.WriteFile(partialFile, []byte("partial"), 0o600); err != nil {
+					return "", err.Error(), err
+				}
+				return "", "clone failed", errors.New("clone failed")
+			}
+			if _, err := os.Stat(partialFile); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("expected partial clone data removed before retry, err=%v", err)
+			}
+			if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+				return "", err.Error(), err
+			}
+			return "", "", nil
+		}
+		return "", "", nil
+	}
+
+	referencePath, bind := s.prepareSandboxGitReference(context.Background(), localRuntimeWorkerID, repoURL, sandboxProgressReporter{})
+	if referencePath == "" || bind == "" {
+		t.Fatalf("expected shared cache reference, got reference=%q bind=%q", referencePath, bind)
+	}
+	if cloneAttempts != 2 {
+		t.Fatalf("expected clone retry after initial failure, got %d attempts", cloneAttempts)
+	}
+	if _, err := os.Stat(cacheDir); err != nil {
+		t.Fatalf("expected cache directory after successful retry, err=%v", err)
+	}
+}
+
+func TestPrepareSandboxGitReferenceReclonesAfterFetchFailure(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+
+	workspaceRoot := t.TempDir()
+	s := newTestServerWithStore(&mockDocker{}, &mockSandboxStore{})
+	s.workspaceRoot = workspaceRoot
+
+	repoURL := "https://github.com/example/repo.git"
+	cacheDir := filepath.Join(s.sandboxGitCacheRoot(), sandboxGitCacheKey(repoURL)+".git")
+	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+		t.Fatalf("create cache dir: %v", err)
+	}
+	brokenFile := filepath.Join(cacheDir, "broken")
+	if err := os.WriteFile(brokenFile, []byte("broken"), 0o600); err != nil {
+		t.Fatalf("write broken marker: %v", err)
+	}
+
+	fetchCount := 0
+	cloneCount := 0
+	commandRunner = func(_ context.Context, name string, args ...string) (string, string, error) {
+		if name != "git" {
+			return "", "", nil
+		}
+		if len(args) >= 3 && args[0] == "-C" && args[2] == "fetch" {
+			fetchCount++
+			return "", "fetch failed", errors.New("fetch failed")
+		}
+		if len(args) >= 1 && args[0] == "clone" {
+			cloneCount++
+			if _, err := os.Stat(brokenFile); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("expected broken cache removed before reclone, err=%v", err)
+			}
+			if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+				return "", err.Error(), err
+			}
+			return "", "", nil
+		}
+		return "", "", nil
+	}
+
+	referencePath, bind := s.prepareSandboxGitReference(context.Background(), localRuntimeWorkerID, repoURL, sandboxProgressReporter{})
+	if referencePath == "" || bind == "" {
+		t.Fatalf("expected shared cache reference, got reference=%q bind=%q", referencePath, bind)
+	}
+	if fetchCount != 1 {
+		t.Fatalf("expected one fetch attempt, got %d", fetchCount)
+	}
+	if cloneCount != 1 {
+		t.Fatalf("expected one reclone after fetch failure, got %d", cloneCount)
+	}
+	if _, err := os.Stat(cacheDir); err != nil {
+		t.Fatalf("expected recloned cache directory, err=%v", err)
+	}
+}
+
 func TestPrepareSandboxGitReferenceSkipsUnsafeRepoURLs(t *testing.T) {
 	original := commandRunner
 	defer func() { commandRunner = original }()
