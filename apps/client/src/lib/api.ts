@@ -1,9 +1,27 @@
 import { browser } from "$app/environment";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "@effect/platform";
 import type { HttpClientResponse } from "@effect/platform";
+import {
+	Api as SdkApi,
+	ApiError,
+	AuthError,
+	bearerAuth,
+	DEFAULT_BASE_URL as SDK_DEFAULT_BASE_URL,
+	extractAuthReason,
+	extractMessage,
+	formatSdkError,
+	mapAuthReasonToMessage,
+	NetworkError,
+	normalizeBaseUrl as sdkNormalizeBaseUrl,
+	resolveApiUrl as sdkResolveApiUrl,
+	resolveWebSocketUrl as sdkResolveWebSocketUrl,
+	SdkAuthLayer,
+	SdkConfigLayer,
+	type SdkTransportEnv
+} from "@open-sandbox/sdk";
 import { dispatchAuthErrorEvent } from "$lib/client/browser";
 import { clientRuntime } from "$lib/client/runtime";
-import { Data, Effect, pipe, Schema } from "effect";
+import { Effect, Layer, pipe, Schema } from "effect";
 
 export interface ApiConfig {
 	baseUrl: string;
@@ -524,93 +542,46 @@ const ContainerRemovedResponseSchema = Schema.Struct({
 const UserPasswordUpdateResponseSchema = Schema.Struct({ id: Schema.String, updated: Schema.Boolean });
 const OutputImageResponseSchema = Schema.Struct({ output: Schema.String, image: Schema.String });
 
-const DEFAULT_BASE_URL = "http://localhost:8080";
+const DEFAULT_BASE_URL = SDK_DEFAULT_BASE_URL;
 
-export class ApiError extends Data.TaggedError("ApiError")<{
-	readonly status: number;
-	readonly message: string;
-	readonly body: unknown;
-}> {}
-
-export class NetworkError extends Data.TaggedError("NetworkError")<{
-	readonly message: string;
-	readonly cause: unknown;
-}> {}
-
-export class AuthError extends Data.TaggedError("AuthError")<{
-	readonly message: string;
-	readonly reason?: string;
-}> {}
+export { ApiError, AuthError, NetworkError };
 
 export type ApiFailure = ApiError | NetworkError | AuthError;
 
-const normalizeBaseUrl = (baseUrl: string): string => {
-	const trimmed = baseUrl.trim();
-	if (trimmed.length === 0) {
-		return DEFAULT_BASE_URL;
-	}
-	const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
-	return withScheme.replace(/\/+$/, "");
-};
+export const normalizeBaseUrl = (baseUrl: string): string => sdkNormalizeBaseUrl(baseUrl);
 
 const normalizePath = (path: string): string => (path.startsWith("/") ? path : `/${path}`);
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null;
-
-const mapAuthReasonToMessage = (reason?: string): string => {
-		switch (reason) {
-			case "invalid_credentials":
-				return "Invalid credentials.";
-			case "refresh_token_missing":
-				return "Unauthorized: your session expired. Please log in again.";
-			case "refresh_token_expired":
-				return "Unauthorized: your session expired. Please log in again.";
-			case "refresh_token_invalid":
-				return "Unauthorized: your session expired. Please log in again.";
-			case "token_missing":
-				return "Unauthorized: missing token. Please log in.";
-		case "token_expired":
-			return "Unauthorized: your session expired. Please log in again.";
-		case "token_invalid":
-			return "Unauthorized: token is invalid. Please log in again.";
-		default:
-			return "Unauthorized: your session is missing or expired.";
-	}
+const sdkAuthForConfig = (config: ApiConfig) => {
+	const token = config.token?.trim() ?? "";
+	return token.length > 0 ? bearerAuth(token) : { _tag: "session" as const };
 };
 
-const extractMessage = (payload: unknown, fallback: string): string => {
-	if (typeof payload === "string" && payload.trim().length > 0) {
-		return payload;
+const toApiFailure = (error: unknown): ApiFailure => {
+	if (
+		typeof error === "object" &&
+		error !== null &&
+		("_tag" in error) &&
+		(error._tag === "ApiError" || error._tag === "AuthError" || error._tag === "NetworkError")
+	) {
+		return error as ApiFailure;
 	}
 
-	if (isRecord(payload)) {
-		const errorField = payload.error;
-		if (typeof errorField === "string" && errorField.trim().length > 0) {
-			return errorField;
-		}
-
-		const messageField = payload.message;
-		if (typeof messageField === "string" && messageField.trim().length > 0) {
-			return messageField;
-		}
-	}
-
-	return fallback;
+	return new ApiError({
+		status: 200,
+		message: "Response payload did not match expected shape.",
+		body: error
+	});
 };
 
-const extractAuthReason = (payload: unknown): string | undefined => {
-	if (!isRecord(payload)) {
-		return undefined;
-	}
-
-	const reason = payload.reason;
-	if (typeof reason === "string" && reason.trim().length > 0) {
-		return reason.trim();
-	}
-
-	return undefined;
-};
+const sdkRequest = <A, B = A>(
+	config: ApiConfig,
+	effect: Effect.Effect<A, unknown, SdkTransportEnv>
+): Effect.Effect<B, ApiFailure> =>
+	Effect.provide(
+		Effect.mapError(effect, toApiFailure),
+		Layer.mergeAll(FetchHttpClient.layer, SdkConfigLayer({ baseUrl: config.baseUrl }), SdkAuthLayer(sdkAuthForConfig(config)))
+	) as unknown as Effect.Effect<B, ApiFailure>;
 
 function decodeResponsePayload(status: number, payload: unknown): Effect.Effect<unknown, never>;
 function decodeResponsePayload<A, I = A>(
@@ -835,123 +806,67 @@ export const refreshSession = (
 export const listUsers = (
 	config: ApiConfig
 ): Effect.Effect<UserSummary[], ApiFailure, HttpClient.HttpClient> =>
-	requestJson(
-		config,
-		HttpClientRequest.get("/api/users"),
-		Schema.Array(UserSummarySchema) as unknown as Schema.Schema<UserSummary[]>
-	);
+	sdkRequest(config, SdkApi.listUsers());
 
 export const createUser = (
 	config: ApiConfig,
 	request: { username: string; password: string; role?: string }
 ): Effect.Effect<UserSummary, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, "/api/users", request, UserSummarySchema);
+	sdkRequest(config, SdkApi.createUser(request));
 
 export const updateUserPassword = (
 	config: ApiConfig,
 	userId: string,
 	password: string
 ): Effect.Effect<{ id: string; updated: boolean }, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, `/api/users/${encodeURIComponent(userId)}/password`, { password }, UserPasswordUpdateResponseSchema);
+	sdkRequest(config, SdkApi.updateUserPassword(userId, password));
 
 export const deleteUser = (
 	config: ApiConfig,
 	userId: string
 ): Effect.Effect<{ id: string; deleted: boolean }, ApiFailure, HttpClient.HttpClient> =>
-	requestJson(config, HttpClientRequest.del(`/api/users/${encodeURIComponent(userId)}`), ItemDeletedResponseSchema);
+	sdkRequest(config, SdkApi.deleteUser(userId));
 
 export const listApiKeys = (
 	config: ApiConfig
 ): Effect.Effect<ApiKeySummary[], ApiFailure, HttpClient.HttpClient> =>
-	requestJson(
-		config,
-		HttpClientRequest.get("/api/api-keys"),
-		Schema.Array(ApiKeySummarySchema) as unknown as Schema.Schema<ApiKeySummary[]>
-	);
+	sdkRequest(config, SdkApi.listApiKeys());
 
 export const createApiKey = (
 	config: ApiConfig,
 	request: CreateApiKeyRequest
 ): Effect.Effect<CreateApiKeyResponse, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, "/api/api-keys", request, CreateApiKeyResponseSchema);
+	sdkRequest(config, SdkApi.createApiKey(request));
 
 export const revokeApiKey = (
 	config: ApiConfig,
 	apiKeyId: string
 ): Effect.Effect<RevokeApiKeyResponse, ApiFailure, HttpClient.HttpClient> =>
-	requestJson(
-		config,
-		HttpClientRequest.del(`/api/api-keys/${encodeURIComponent(apiKeyId)}`),
-		RevokeApiKeyResponseSchema
-	);
+	sdkRequest(config, SdkApi.revokeApiKey(apiKeyId));
 
 export const resolveApiUrl = (
 	config: ApiConfig,
 	path: string,
 	query?: Record<string, string | boolean | number | undefined>
-): string => {
-	const base = normalizeBaseUrl(config.baseUrl);
-	const baseWithSlash = `${base}/`;
-	const url = new URL(normalizePath(path), baseWithSlash);
+): string => sdkResolveApiUrl({ baseUrl: config.baseUrl }, path, query);
 
-	if (query) {
-		for (const [key, value] of Object.entries(query)) {
-			if (value === undefined || value === "") {
-				continue;
-			}
-			url.searchParams.set(key, String(value));
-		}
-	}
+export const resolveSandboxLogsSseUrl = (
+	sandboxId: string,
+	query?: { follow?: boolean; tail?: string | number }
+) => SdkApi.resolveSandboxLogsSseUrl(sandboxId, query);
 
-	return url.toString();
-};
+export const resolveContainerLogsSseUrl = (
+	containerId: string,
+	query?: { follow?: boolean; tail?: string | number }
+) => SdkApi.resolveContainerLogsSseUrl(containerId, query);
 
 export const resolveWebSocketUrl = (
 	config: ApiConfig,
 	path: string,
 	query?: Record<string, string | boolean | number | undefined>
-): string => {
-	const apiUrl = new URL(resolveApiUrl(config, path, query));
-	apiUrl.protocol = apiUrl.protocol === "https:" ? "wss:" : "ws:";
-	return apiUrl.toString();
-};
+): string => sdkResolveWebSocketUrl({ baseUrl: config.baseUrl }, path, query);
 
-export const formatApiFailure = (error: unknown): string => {
-	if (isRecord(error) && typeof error._tag === "string") {
-		switch (error._tag) {
-			case "AuthError":
-				return typeof error.message === "string" ? error.message : "Unauthorized.";
-			case "ApiError": {
-				const msg = typeof error.message === "string" ? error.message.trim() : "";
-				const status = typeof error.status === "number" ? error.status : 0;
-				if (msg.length > 0) {
-					// Prepend status code for non-generic messages so it's easier to debug
-					return status >= 400 && status < 600 && !msg.includes(String(status))
-						? `${status}: ${msg}`
-						: msg;
-				}
-				return status > 0
-					? `Server error ${status}.`
-					: "Server returned an unexpected response.";
-			}
-			case "NetworkError": {
-				const msg = typeof error.message === "string" ? error.message.trim() : "";
-				if (msg.length === 0) return "Network request failed.";
-				// Make fetch errors friendlier
-				if (msg.toLowerCase().includes("failed to fetch") || msg.toLowerCase().includes("networkerror")) {
-					return "Unable to reach the server. Check your connection or API endpoint.";
-				}
-				return msg;
-			}
-		}
-	}
-
-	if (error instanceof Error) {
-		return error.message;
-	}
-
-	return "An unexpected error occurred.";
-};
+export const formatApiFailure = (error: unknown): string => formatSdkError(error);
 
 export const healthCheck = (config: ApiConfig): Effect.Effect<{ status: string }, ApiFailure, HttpClient.HttpClient> =>
 	requestJson(config, HttpClientRequest.get("/health"), HealthStatusResponseSchema);
@@ -959,79 +874,56 @@ export const healthCheck = (config: ApiConfig): Effect.Effect<{ status: string }
 export const listImages = (
 	config: ApiConfig
 ): Effect.Effect<ImageSummary[], ApiFailure, HttpClient.HttpClient> =>
-	requestJson(
-		config,
-		HttpClientRequest.get("/api/images"),
-		Schema.Array(ImageSummarySchema) as unknown as Schema.Schema<ImageSummary[]>
-	);
+	sdkRequest(config, SdkApi.listImages());
 
 export const searchImages = (
 	config: ApiConfig,
 	query: string,
 	limit = 25
 ): Effect.Effect<ImageSearchResult[], ApiFailure, HttpClient.HttpClient> =>
-	requestJson(config, HttpClientRequest.get("/api/images/search", {
-		urlParams: {
-			q: query,
-			limit: String(limit)
-		}
-	}), Schema.Array(ImageSearchResultSchema) as unknown as Schema.Schema<ImageSearchResult[]>);
+	sdkRequest(config, SdkApi.searchImages(query, limit));
 
 export const pullImage = (
 	config: ApiConfig,
 	request: PullImageRequest
 ): Effect.Effect<{ output: string; image: string }, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, "/api/images/pull", request, OutputImageResponseSchema);
+	sdkRequest(config, SdkApi.pullImage(request));
 
 export const buildImage = (
 	config: ApiConfig,
 	request: BuildImageRequest
 ): Effect.Effect<{ output: string; image: string }, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, "/api/images/build", request, OutputImageResponseSchema);
+	sdkRequest(config, SdkApi.buildImage(request));
 
 export const removeImage = (
 	config: ApiConfig,
 	id: string,
 	force = false
 ): Effect.Effect<RemoveImageResponse, ApiFailure, HttpClient.HttpClient> =>
-	requestJson(
-		config,
-		HttpClientRequest.del(`/api/images/${encodeURIComponent(id)}`, {
-			urlParams: force ? { force: "true" } : undefined
-		}),
-		RemoveImageResponseSchema
-	);
+	sdkRequest(config, SdkApi.removeImage(id, force));
 
 export const composeDown = (
 	config: ApiConfig,
 	request: ComposeRequest
 ): Effect.Effect<ComposeResponse, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, "/api/compose/down", request, ComposeResponseSchema);
+	sdkRequest(config, SdkApi.composeDown(request));
 
 export const composeStatus = (
 	config: ApiConfig,
 	request: ComposeRequest
 ): Effect.Effect<ComposeStatusResponse, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, "/api/compose/status", request, ComposeStatusResponseSchema);
+	sdkRequest(config, SdkApi.composeStatus(request));
 
 export const listComposeProjects = (
 	config: ApiConfig
 ): Effect.Effect<ComposeProjectPreview[], ApiFailure, HttpClient.HttpClient> =>
-	requestJson(
-		config,
-		HttpClientRequest.get("/api/compose/projects"),
-		Schema.Array(ComposeProjectPreviewSchema) as unknown as Schema.Schema<ComposeProjectPreview[]>
-	);
+	sdkRequest(config, SdkApi.listComposeProjects());
 
 export const getComposeProject = (
 	config: ApiConfig,
 	projectName: string
 ): Effect.Effect<ComposeProjectPreview, ApiFailure, HttpClient.HttpClient> =>
-	requestJson(
-		config,
-		HttpClientRequest.get(`/api/compose/projects/${encodeURIComponent(projectName)}`),
-		ComposeProjectPreviewSchema
-	);
+	sdkRequest(config, SdkApi.getComposeProject(projectName));
 
 export type StreamEvent = {
 	event: string;
@@ -1184,174 +1076,132 @@ export const composeUpStream = (
 	config: ApiConfig,
 	request: ComposeRequest,
 	onEvent?: (event: StreamEvent) => void
-): Effect.Effect<ComposeResponse, ApiFailure> => streamJsonPost(config, "/api/compose/up", request, onEvent);
+): Effect.Effect<ComposeResponse, ApiFailure> => sdkRequest(config, SdkApi.composeUpStream(request, onEvent));
 
 export const buildImageStream = (
 	config: ApiConfig,
 	request: BuildImageRequest,
 	onEvent?: (event: StreamEvent) => void
-): Effect.Effect<ComposeResponse, ApiFailure> => streamJsonPost(config, "/api/images/build/stream", request, onEvent);
+): Effect.Effect<ComposeResponse, ApiFailure> => sdkRequest(config, SdkApi.buildImageStream(request, onEvent));
 
 export const gitClone = (
 	config: ApiConfig,
 	request: GitCloneRequest
 ): Effect.Effect<ExecResponse, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, "/api/git/clone", request, ExecResponseSchema);
+	sdkRequest(config, SdkApi.gitClone(request));
 
 export const createContainer = (
 	config: ApiConfig,
 	request: CreateContainerRequest
 ): Effect.Effect<CreateContainerResponse, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, "/api/containers/create", request, CreateContainerResponseSchema);
+	sdkRequest(config, SdkApi.createContainer(request));
 
 export const execInContainer = (
 	config: ApiConfig,
 	containerId: string,
 	request: ExecRequest
 ): Effect.Effect<ExecResponse, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, `/api/containers/${encodeURIComponent(containerId)}/exec`, request, ExecResponseSchema);
+	sdkRequest(config, SdkApi.execInContainer(containerId, request));
 
 export const listContainers = (
 	config: ApiConfig
 ): Effect.Effect<ContainerSummary[], ApiFailure, HttpClient.HttpClient> =>
-	requestJson(
-		config,
-		HttpClientRequest.get("/api/containers"),
-		Schema.Array(ContainerSummarySchema) as unknown as Schema.Schema<ContainerSummary[]>
-	);
+	sdkRequest(config, SdkApi.listContainers());
 
 export const stopContainer = (
 	config: ApiConfig,
 	workloadId: string
 ): Effect.Effect<{ id: string; container_id: string; stopped: boolean }, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, `/api/containers/${encodeURIComponent(workloadId)}/stop`, {}, ContainerStoppedResponseSchema);
+	sdkRequest(config, SdkApi.stopContainer(workloadId));
 
 export const restartContainer = (
 	config: ApiConfig,
 	workloadId: string
 ): Effect.Effect<{ id: string; container_id: string; restarted: boolean }, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, `/api/containers/${encodeURIComponent(workloadId)}/restart`, {}, ContainerRestartedResponseSchema);
+	sdkRequest(config, SdkApi.restartContainer(workloadId));
 
 export const resetContainer = (
 	config: ApiConfig,
 	workloadId: string
 ): Effect.Effect<{ id: string; container_id: string; reset: boolean }, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, `/api/containers/${encodeURIComponent(workloadId)}/reset`, {}, ContainerResetResponseSchema);
+	sdkRequest(config, SdkApi.resetContainer(workloadId));
 
 export const removeContainer = (
 	config: ApiConfig,
 	workloadId: string,
 	force = true
 ): Effect.Effect<{ id: string; container_id: string; removed: boolean }, ApiFailure, HttpClient.HttpClient> =>
-	requestJson(
-		config,
-		HttpClientRequest.del(`/api/containers/${encodeURIComponent(workloadId)}`, {
-			urlParams: force ? { force: "true" } : undefined
-		}),
-		ContainerRemovedResponseSchema
-	);
+	sdkRequest(config, SdkApi.removeContainer(workloadId, force));
 
 export const createSandbox = (
 	config: ApiConfig,
 	request: CreateSandboxRequest
 ): Effect.Effect<Sandbox, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, "/api/sandboxes", request, SandboxSchema);
+	sdkRequest(config, SdkApi.createSandbox(request));
 
 export const listSandboxes = (
 	config: ApiConfig
 ): Effect.Effect<Sandbox[], ApiFailure, HttpClient.HttpClient> =>
-	requestJson(
-		config,
-		HttpClientRequest.get("/api/sandboxes"),
-		Schema.Array(SandboxSchema) as unknown as Schema.Schema<Sandbox[]>
-	);
+	sdkRequest(config, SdkApi.listSandboxes());
 
 export const getSandbox = (
 	config: ApiConfig,
 	sandboxId: string
 ): Effect.Effect<Sandbox, ApiFailure, HttpClient.HttpClient> =>
-	requestJson(config, HttpClientRequest.get(`/api/sandboxes/${encodeURIComponent(sandboxId)}`), SandboxSchema);
+	sdkRequest(config, SdkApi.getSandbox(sandboxId));
 
 export const restartSandbox = (
 	config: ApiConfig,
 	sandboxId: string
 ): Effect.Effect<{ id: string; restarted: boolean }, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, `/api/sandboxes/${encodeURIComponent(sandboxId)}/restart`, {}, ItemRestartedResponseSchema);
+	sdkRequest(config, SdkApi.restartSandbox(sandboxId));
 
 export const resetSandbox = (
 	config: ApiConfig,
 	sandboxId: string
 ): Effect.Effect<{ id: string; reset: boolean }, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, `/api/sandboxes/${encodeURIComponent(sandboxId)}/reset`, {}, ItemResetResponseSchema);
+	sdkRequest(config, SdkApi.resetSandbox(sandboxId));
 
 export const stopSandbox = (
 	config: ApiConfig,
 	sandboxId: string
 ): Effect.Effect<Sandbox, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, `/api/sandboxes/${encodeURIComponent(sandboxId)}/stop`, {}, SandboxSchema);
+	sdkRequest(config, SdkApi.stopSandbox(sandboxId));
 
 export const updateSandboxProxyConfig = (
 	config: ApiConfig,
 	sandboxId: string,
 	proxyConfig: Record<string, SandboxPortProxyConfig>
 ): Effect.Effect<Sandbox, ApiFailure> =>
-	fetchJson(
-		config,
-		`/api/sandboxes/${encodeURIComponent(sandboxId)}/proxy-config`,
-		SandboxSchema,
-		{
-			method: "PATCH",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ proxy_config: proxyConfig })
-		}
-	);
+	sdkRequest(config, SdkApi.updateSandboxProxyConfig(sandboxId, proxyConfig));
 
 export const deleteSandbox = (
 	config: ApiConfig,
 	sandboxId: string
 ): Effect.Effect<{ id: string; deleted: boolean }, ApiFailure, HttpClient.HttpClient> =>
-	requestJson(config, HttpClientRequest.del(`/api/sandboxes/${encodeURIComponent(sandboxId)}`), ItemDeletedResponseSchema);
+	sdkRequest(config, SdkApi.deleteSandbox(sandboxId));
 
 export const execInSandbox = (
 	config: ApiConfig,
 	sandboxId: string,
 	request: ExecRequest
 ): Effect.Effect<ExecResponse, ApiFailure, HttpClient.HttpClient> =>
-	postJson(config, `/api/sandboxes/${encodeURIComponent(sandboxId)}/exec`, request, ExecResponseSchema);
+	sdkRequest(config, SdkApi.execInSandbox(sandboxId, request));
 
 export const readSandboxFile = (
 	config: ApiConfig,
 	sandboxId: string,
 	filePath: string
 ): Effect.Effect<FileReadResponse, ApiFailure, HttpClient.HttpClient> =>
-	requestJson(
-		config,
-		HttpClientRequest.get(`/api/sandboxes/${encodeURIComponent(sandboxId)}/files`, {
-			urlParams: { path: filePath }
-		}),
-		FileReadResponseSchema
-	);
+	sdkRequest(config, SdkApi.readSandboxFile(sandboxId, filePath));
 
 export const uploadSandboxFile = (
 	config: ApiConfig,
 	sandboxId: string,
 	targetPath: string,
 	file: File
-): Effect.Effect<{ id: string; path: string; uploaded: boolean }, ApiFailure> => {
-	const formData = new FormData();
-	formData.set("target_path", targetPath);
-	formData.set("file", file, file.name);
-
-	return fetchJson(
-		config,
-		`/api/sandboxes/${encodeURIComponent(sandboxId)}/files`,
-		ItemUploadedResponseSchema,
-		{
-			method: "PUT",
-			body: formData
-		}
-	);
-};
+): Effect.Effect<{ id: string; path: string; uploaded: boolean }, ApiFailure> =>
+	sdkRequest(config, SdkApi.uploadSandboxFile(sandboxId, targetPath, file, file.name));
 
 export const saveSandboxFile = (
 	config: ApiConfig,
@@ -1359,48 +1209,22 @@ export const saveSandboxFile = (
 	targetPath: string,
 	content: string
 ): Effect.Effect<{ id: string; path: string; saved: boolean }, ApiFailure, HttpClient.HttpClient> =>
-	requestJson(
-		config,
-		pipe(
-			HttpClientRequest.put(`/api/sandboxes/${encodeURIComponent(sandboxId)}/files`),
-			HttpClientRequest.bodyUnsafeJson({ target_path: targetPath, content })
-		),
-		ItemSavedResponseSchema
-	);
+	sdkRequest(config, SdkApi.saveSandboxFile(sandboxId, targetPath, content));
 
 export const readContainerFile = (
 	config: ApiConfig,
 	containerId: string,
 	filePath: string
 ): Effect.Effect<FileReadResponse, ApiFailure, HttpClient.HttpClient> =>
-	requestJson(
-		config,
-		HttpClientRequest.get(`/api/containers/${encodeURIComponent(containerId)}/files`, {
-			urlParams: { path: filePath }
-		}),
-		FileReadResponseSchema
-	);
+	sdkRequest(config, SdkApi.readContainerFile(containerId, filePath));
 
 export const uploadContainerFile = (
 	config: ApiConfig,
 	containerId: string,
 	targetPath: string,
 	file: File
-): Effect.Effect<{ id: string; container_id: string; path: string; uploaded: boolean }, ApiFailure> => {
-	const formData = new FormData();
-	formData.set("target_path", targetPath);
-	formData.set("file", file, file.name);
-
-	return fetchJson(
-		config,
-		`/api/containers/${encodeURIComponent(containerId)}/files`,
-		ContainerUploadedResponseSchema,
-		{
-			method: "PUT",
-			body: formData
-		}
-	);
-};
+): Effect.Effect<{ id: string; container_id: string; path: string; uploaded: boolean }, ApiFailure> =>
+	sdkRequest(config, SdkApi.uploadContainerFile(containerId, targetPath, file, file.name));
 
 export const saveContainerFile = (
 	config: ApiConfig,
@@ -1408,16 +1232,4 @@ export const saveContainerFile = (
 	targetPath: string,
 	content: string
 ): Effect.Effect<{ id: string; container_id: string; path: string; saved: boolean }, ApiFailure, HttpClient.HttpClient> =>
-	requestJson(
-		config,
-		pipe(
-			HttpClientRequest.put(`/api/containers/${encodeURIComponent(containerId)}/files`),
-			HttpClientRequest.bodyUnsafeJson({ target_path: targetPath, content })
-		),
-		Schema.Struct({
-			id: Schema.String,
-			container_id: Schema.String,
-			path: Schema.String,
-			saved: Schema.Boolean
-		})
-	);
+	sdkRequest(config, SdkApi.saveContainerFile(containerId, targetPath, content));

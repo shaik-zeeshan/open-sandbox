@@ -18,10 +18,12 @@
 		readContainerFile,
 		readSandboxFile,
 		removeContainer,
+		resolveContainerLogsSseUrl,
 		restartContainer,
 		resetContainer,
 		resetSandbox,
 		resolveApiUrl,
+		resolveSandboxLogsSseUrl,
 		restartSandbox,
 		runApiEffect,
 		saveContainerFile,
@@ -195,6 +197,11 @@
 	const workspaceLogStreamService: WorkspaceLogStreamService = {
 		stream: ({ follow, tail, onEntry }) =>
 			Effect.gen(function* () {
+				const logsRequest =
+					workloadKind === "sandbox"
+						? resolveSandboxLogsSseUrl(targetId, { follow, tail: tail.trim() || "100" })
+						: resolveContainerLogsSseUrl(targetId, { follow, tail: tail.trim() || "100" });
+
 				const controller = yield* Effect.acquireRelease(
 					Effect.sync(() => new AbortController()),
 					(value) => Effect.sync(() => value.abort())
@@ -211,11 +218,7 @@
 				const response = yield* Effect.tryPromise({
 					try: () =>
 						fetch(
-							resolveApiUrl(
-								config,
-								`/api/${workloadKind === "sandbox" ? "sandboxes" : "containers"}/${encodeURIComponent(targetId)}/logs`,
-								{ follow, tail: tail.trim() || "100" }
-							),
+							resolveApiUrl(config, logsRequest.path, logsRequest.query),
 							{ credentials: "include", headers, signal: controller.signal }
 						),
 					catch: (error) => (error instanceof Error ? error : new Error("Failed to stream logs."))
