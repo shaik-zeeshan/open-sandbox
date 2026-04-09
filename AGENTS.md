@@ -14,6 +14,7 @@
 - If `SANDBOX_WORKSPACE_DIR` is unset, the server uses the current user's home directory; relative workspace paths resolve inside that root.
 - Current Go tests are unit-style: mocked Docker API plus temp SQLite, so `bun run test:server` does not require a live Docker daemon.
 - `/health`, `/metrics`, and `/auth/*` are public; `/api/*` is behind auth middleware.
+- Whenever server API code changes, regenerate Swagger docs in `apps/server/docs` and update `packages/sdk` for any affected request/response/auth surface changes.
 - Client code is in Svelte 5 rune mode by default; follow existing `$state`, `$derived`, and `$effect` patterns.
 - `VITE_SANDBOX_BASE_URL` defaults to `http://localhost:8080`. In container/self-hosted builds it must stay `/`, which the client resolves from `window.location.origin`.
 - The client build is static (`@sveltejs/adapter-static` with `fallback: 'index.html'`); Traefik is the edge proxy for `/api`, `/auth`, `/health`, `/metrics`, `/swagger`, and `/proxy/...`.

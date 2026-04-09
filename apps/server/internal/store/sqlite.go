@@ -23,6 +23,7 @@ var ErrRuntimeWorkerNotFound = errors.New("runtime worker not found")
 var ErrUsernameTaken = errors.New("username already exists")
 var ErrRefreshTokenNotFound = errors.New("refresh token not found")
 var ErrRefreshTokenInactive = errors.New("refresh token is inactive")
+var ErrAPIKeyNotFound = errors.New("api key not found")
 
 type Sandbox struct {
 	ID            string
@@ -77,6 +78,16 @@ type RefreshTokenRecord struct {
 	RotatedAt         int64
 	RevokedAt         int64
 	ReplacedByTokenID string
+}
+
+type APIKeyRecord struct {
+	ID        string
+	Name      string
+	Preview   string
+	KeyHash   string
+	UserID    string
+	CreatedAt int64
+	RevokedAt int64
 }
 
 func (s *SQLiteStore) HasUsers(ctx context.Context) (bool, error) {
@@ -171,6 +182,16 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires_at ON refresh_tokens(expires_at);
 
+CREATE TABLE IF NOT EXISTS api_keys (
+	id TEXT PRIMARY KEY,
+	key_hash TEXT NOT NULL UNIQUE,
+	user_id TEXT NOT NULL,
+	created_at INTEGER NOT NULL,
+	revoked_at INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys(user_id);
+
 CREATE TABLE IF NOT EXISTS runtime_workers (
 	id TEXT PRIMARY KEY,
 	name TEXT NOT NULL,
@@ -204,6 +225,12 @@ CREATE INDEX IF NOT EXISTS idx_runtime_workers_last_heartbeat_at ON runtime_work
 		return err
 	}
 	if err := s.ensureColumn(ctx, "sandboxes", "port_specs_json", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "api_keys", "name", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "api_keys", "key_preview", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 
@@ -1081,6 +1108,124 @@ func (s *SQLiteStore) RevokeRefreshTokenByHash(ctx context.Context, tokenHash st
 	}
 	if changed == 0 {
 		return ErrRefreshTokenNotFound
+	}
+
+	return nil
+}
+
+func (s *SQLiteStore) CreateAPIKey(ctx context.Context, key APIKeyRecord) error {
+	if strings.TrimSpace(key.ID) == "" {
+		return errors.New("api key id is required")
+	}
+	if strings.TrimSpace(key.KeyHash) == "" {
+		return errors.New("api key hash is required")
+	}
+	if strings.TrimSpace(key.UserID) == "" {
+		return errors.New("api key user id is required")
+	}
+	if key.CreatedAt == 0 {
+		key.CreatedAt = time.Now().Unix()
+	}
+
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO api_keys (id, name, key_preview, key_hash, user_id, created_at, revoked_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		key.ID,
+		strings.TrimSpace(key.Name),
+		strings.TrimSpace(key.Preview),
+		key.KeyHash,
+		key.UserID,
+		key.CreatedAt,
+		key.RevokedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("insert api key: %w", err)
+	}
+
+	return nil
+}
+
+func (s *SQLiteStore) GetAPIKeyByHash(ctx context.Context, keyHash string) (APIKeyRecord, error) {
+	row := s.db.QueryRowContext(
+		ctx,
+		`SELECT id, name, key_preview, key_hash, user_id, created_at, revoked_at
+		 FROM api_keys
+		 WHERE key_hash = ?
+		   AND revoked_at = 0`,
+		strings.TrimSpace(keyHash),
+	)
+
+	var key APIKeyRecord
+	if err := row.Scan(&key.ID, &key.Name, &key.Preview, &key.KeyHash, &key.UserID, &key.CreatedAt, &key.RevokedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return APIKeyRecord{}, ErrAPIKeyNotFound
+		}
+		return APIKeyRecord{}, fmt.Errorf("query api key by hash: %w", err)
+	}
+
+	return key, nil
+}
+
+func (s *SQLiteStore) ListAPIKeysByUser(ctx context.Context, userID string) ([]APIKeyRecord, error) {
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT id, name, key_preview, key_hash, user_id, created_at, revoked_at
+		 FROM api_keys
+		 WHERE user_id = ?
+		   AND revoked_at = 0
+		 ORDER BY created_at DESC`,
+		strings.TrimSpace(userID),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query api keys by user: %w", err)
+	}
+	defer rows.Close()
+
+	keys := make([]APIKeyRecord, 0)
+	for rows.Next() {
+		var key APIKeyRecord
+		if err := rows.Scan(&key.ID, &key.Name, &key.Preview, &key.KeyHash, &key.UserID, &key.CreatedAt, &key.RevokedAt); err != nil {
+			return nil, fmt.Errorf("scan api key row: %w", err)
+		}
+		keys = append(keys, key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate api keys by user: %w", err)
+	}
+
+	return keys, nil
+}
+
+func (s *SQLiteStore) RevokeAPIKey(ctx context.Context, keyID string, userID string, revokedAt int64) error {
+	if strings.TrimSpace(keyID) == "" || strings.TrimSpace(userID) == "" {
+		return ErrAPIKeyNotFound
+	}
+	if revokedAt <= 0 {
+		revokedAt = time.Now().Unix()
+	}
+
+	result, err := s.db.ExecContext(
+		ctx,
+		`UPDATE api_keys
+		 SET revoked_at = ?
+		 WHERE id = ?
+		   AND user_id = ?
+		   AND revoked_at = 0`,
+		revokedAt,
+		strings.TrimSpace(keyID),
+		strings.TrimSpace(userID),
+	)
+	if err != nil {
+		return fmt.Errorf("revoke api key: %w", err)
+	}
+
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read api key revoke rows affected: %w", err)
+	}
+	if changed == 0 {
+		return ErrAPIKeyNotFound
 	}
 
 	return nil

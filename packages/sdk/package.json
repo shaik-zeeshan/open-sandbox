@@ -1,0 +1,33 @@
+{
+	"name": "@open-sandbox/sdk",
+	"version": "0.0.1",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"default": "./dist/index.js"
+		}
+	},
+	"types": "./dist/index.d.ts",
+	"files": [
+		"dist"
+	],
+	"scripts": {
+		"build": "tsc -p tsconfig.json",
+		"check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.examples.json --noEmit",
+		"check:examples": "tsc -p tsconfig.examples.json --noEmit",
+		"example:bearer": "bun run ./examples/bearer-auth.ts",
+		"example:api-key": "bun run ./examples/api-key-auth.ts",
+		"example:api-key-management": "bun run ./examples/api-key-management.ts",
+		"example:resources": "bun run ./examples/common-resource-operations.ts",
+		"example:stream-urls": "bun run ./examples/stream-url-helpers.ts"
+	},
+	"dependencies": {
+		"@effect/platform": "^0.96.0",
+		"effect": "^3.21.0"
+	},
+	"devDependencies": {
+		"typescript": "^5.9.3"
+	}
+}

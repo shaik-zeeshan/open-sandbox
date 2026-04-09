@@ -6,6 +6,8 @@ apps/server/tmp/
 node_modules/
 .turbo/
 
+dist/
+
 # opensrc - source code for packages
 opensrc/
 

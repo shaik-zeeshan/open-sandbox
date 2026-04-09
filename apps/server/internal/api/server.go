@@ -84,6 +84,10 @@ type UserStore interface {
 	EnsureUser(ctx context.Context, user store.UserRecord) (store.User, error)
 	GetUserByUsername(ctx context.Context, username string) (store.UserRecord, error)
 	GetUserByID(ctx context.Context, userID string) (store.UserRecord, error)
+	CreateAPIKey(ctx context.Context, key store.APIKeyRecord) error
+	GetAPIKeyByHash(ctx context.Context, keyHash string) (store.APIKeyRecord, error)
+	ListAPIKeysByUser(ctx context.Context, userID string) ([]store.APIKeyRecord, error)
+	RevokeAPIKey(ctx context.Context, keyID string, userID string, revokedAt int64) error
 	ListUsers(ctx context.Context) ([]store.User, error)
 	UpdateUserPasswordHash(ctx context.Context, userID string, passwordHash string) error
 	DeleteUser(ctx context.Context, userID string) error
@@ -302,7 +306,7 @@ func NewServerWithStore(dockerClient DockerAPI, authConfig AuthConfig, sandboxSt
 	r.Use(cors.New(cors.Config{
 		AllowOriginWithContextFunc: buildAllowOriginWithContextFunc(origins),
 		AllowMethods:               []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowHeaders:               []string{"Authorization", "Content-Type", "Accept", "X-Request-ID", "Traceparent", "Tracestate", "Baggage", "B3", "X-B3-TraceId", "X-B3-SpanId", "X-B3-ParentSpanId", "X-B3-Sampled", "X-B3-Flags", "Sentry-Trace"},
+		AllowHeaders:               []string{"Authorization", "X-API-Key", "Content-Type", "Accept", "X-Request-ID", "Traceparent", "Tracestate", "Baggage", "B3", "X-B3-TraceId", "X-B3-SpanId", "X-B3-ParentSpanId", "X-B3-Sampled", "X-B3-Flags", "Sentry-Trace"},
 		ExposeHeaders:              []string{"X-Request-ID"},
 		AllowCredentials:           true,
 		MaxAge:                     12 * time.Hour,
@@ -318,6 +322,7 @@ func NewServerWithStore(dockerClient DockerAPI, authConfig AuthConfig, sandboxSt
 			workerStore = configuredWorkerStore
 		}
 	}
+	authConfig.UserStore = userStore
 
 	s := &Server{
 		docker:           dockerClient,
@@ -385,6 +390,10 @@ func (s *Server) registerRoutes() {
 		api.POST("/users", s.createUser)
 		api.POST("/users/:id/password", s.updateUserPassword)
 		api.DELETE("/users/:id", s.deleteUser)
+
+		api.GET("/api-keys", s.listAPIKeys)
+		api.POST("/api-keys", s.createAPIKey)
+		api.DELETE("/api-keys/:id", s.revokeAPIKey)
 
 		api.POST("/images/build/stream", s.buildImageStream)
 		api.POST("/images/build", s.buildImage)

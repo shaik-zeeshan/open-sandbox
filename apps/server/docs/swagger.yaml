@@ -1,5 +1,18 @@
 basePath: /
 definitions:
+  api.APIKeyResponse:
+    properties:
+      created_at:
+        type: integer
+      id:
+        type: string
+      name:
+        type: string
+      preview:
+        type: string
+      revoked_at:
+        type: integer
+    type: object
   api.BuildImageRequest:
     properties:
       build_args:
@@ -49,7 +62,31 @@ definitions:
     properties:
       raw:
         type: string
-      services: {}
+      services:
+        items:
+          $ref: '#/definitions/api.ComposeStatusService'
+        type: array
+    type: object
+  api.ComposeStatusService:
+    properties:
+      name:
+        type: string
+      service:
+        type: string
+      state:
+        type: string
+    type: object
+  api.CreateAPIKeyRequest:
+    properties:
+      name:
+        type: string
+    type: object
+  api.CreateAPIKeyResponse:
+    properties:
+      api_key:
+        $ref: '#/definitions/api.APIKeyResponse'
+      secret:
+        type: string
     type: object
   api.CreateContainerRequest:
     properties:
@@ -71,6 +108,10 @@ definitions:
         type: string
       name:
         type: string
+      ports:
+        items:
+          type: string
+        type: array
       start:
         type: boolean
       tty:
@@ -85,6 +126,8 @@ definitions:
   api.CreateContainerResponse:
     properties:
       container_id:
+        type: string
+      id:
         type: string
       started:
         type: boolean
@@ -151,6 +194,19 @@ definitions:
     - repo_url
     - target_path
     type: object
+  api.ImageSearchResult:
+    properties:
+      automated:
+        type: boolean
+      description:
+        type: string
+      name:
+        type: string
+      official:
+        type: boolean
+      stars:
+        type: integer
+    type: object
   api.ImageSummary:
     properties:
       created:
@@ -195,6 +251,99 @@ info:
   title: Open Sandbox API
   version: "1.0"
 paths:
+  /api/api-keys:
+    get:
+      description: Returns the current user's active personal API keys.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/api.APIKeyResponse'
+            type: array
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      - APIKeyAuth: []
+      summary: List personal API keys
+      tags:
+      - auth
+    post:
+      consumes:
+      - application/json
+      description: Creates an API key for the current user and returns the plaintext
+        secret once.
+      parameters:
+      - description: API key payload
+        in: body
+        name: payload
+        schema:
+          $ref: '#/definitions/api.CreateAPIKeyRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.CreateAPIKeyResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      - APIKeyAuth: []
+      summary: Create personal API key
+      tags:
+      - auth
+  /api/api-keys/{id}:
+    delete:
+      description: Revokes one API key owned by the current user.
+      parameters:
+      - description: API key ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      - APIKeyAuth: []
+      summary: Revoke personal API key
+      tags:
+      - auth
   /api/compose/down:
     post:
       consumes:
@@ -453,6 +602,18 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/api.RemoveImageResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
@@ -524,6 +685,39 @@ paths:
       summary: Pull Docker image
       tags:
       - images
+  /api/images/search:
+    get:
+      description: Searches Docker Hub using docker search
+      parameters:
+      - description: Search query
+        in: query
+        name: q
+        required: true
+        type: string
+      - description: Maximum results
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/api.ImageSearchResult'
+            type: array
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      summary: Search Docker Hub images
+      tags:
+      - images
   /health:
     get:
       description: Returns service status
@@ -538,7 +732,13 @@ paths:
       tags:
       - system
 securityDefinitions:
+  APIKeyAuth:
+    description: Personal API key
+    in: header
+    name: X-API-Key
+    type: apiKey
   BearerAuth:
+    description: 'Use format: Bearer <token>'
     in: header
     name: Authorization
     type: apiKey
