@@ -9,6 +9,7 @@
 	} from "$lib/client/browser";
 	import { toast, type ToastKind } from "$lib/toast.svelte";
 	import SandboxTerminal from "$lib/components/SandboxTerminal.svelte";
+	import EnvEditor from "$lib/components/EnvEditor.svelte";
 	import ProxyConfigEditor from "$lib/components/ProxyConfigEditor.svelte";
 	import Checkbox from "$lib/components/Checkbox.svelte";
 	import AnsiToHtml from "ansi-to-html";
@@ -31,6 +32,7 @@
 		type SandboxPortProxyConfig,
 		stopContainer,
 		stopSandbox,
+		updateSandboxEnv,
 		updateSandboxProxyConfig,
 		uploadContainerFile,
 		uploadSandboxFile,
@@ -40,9 +42,17 @@
 		type PreviewUrl,
 		type Sandbox
 	} from "$lib/api";
+	import {
+		cloneSandboxEnv,
+		listSandboxEnvKeys,
+		normalizeSandboxEnv,
+		normalizeSandboxSecretEnv,
+		parseSandboxEnvEntry,
+		serializeSandboxEnvEntry
+	} from "$lib/sandbox-env";
 	import { Context, Effect, Fiber, Layer, type Scope } from "effect";
 
-	type WorkspaceTab = "overview" | "terminal" | "files" | "logs" | "proxy";
+	type WorkspaceTab = "overview" | "terminal" | "files" | "logs" | "env" | "proxy";
 
 	let {
 		sandbox = null,
@@ -106,6 +116,7 @@
 	let logsViewport = $state<HTMLDivElement | null>(null);
 	let logsFiber: Fiber.RuntimeFiber<void, unknown> | null = null;
 	let streaming = $state(false);
+	let lastBackingContainerId = $state("");
 
 	// Actions
 	let actionLoading = $state<string | null>(null);
@@ -113,6 +124,10 @@
 	let deleteConfirmTimer: TimeoutHandle | null = null;
 	let editableProxyConfig = $state<Record<string, SandboxPortProxyConfig>>({});
 	let savingProxyConfig = $state(false);
+	let editableEnv = $state<string[]>([]);
+	let editableSecretEnv = $state<string[]>([]);
+	let removedSecretEnvKeys = $state<string[]>([]);
+	let savingEnv = $state(false);
 
 	function cloneProxyConfig(
 		value: Record<string, SandboxPortProxyConfig> | undefined
@@ -412,6 +427,15 @@
 	const proxyConfigDirty = $derived.by(
 		() => JSON.stringify(editableProxyConfig) !== JSON.stringify(cloneProxyConfig(sandbox?.proxy_config))
 	);
+	const editableSecretEnvNormalized = $derived(normalizeSandboxSecretEnv(editableSecretEnv));
+	const editableSecretDraftKeys = $derived(listSandboxEnvKeys(editableSecretEnv));
+	const secretEnvKeys = $derived([...(sandbox?.secret_env_keys ?? [])]);
+	const envDirty = $derived.by(
+		() =>
+			JSON.stringify(normalizeSandboxEnv(editableEnv)) !== JSON.stringify(cloneSandboxEnv(sandbox?.env)) ||
+			editableSecretEnvNormalized.length > 0 ||
+			removedSecretEnvKeys.length > 0
+	);
 
 	const formatDate = (unixSeconds: number): string =>
 		new Date(unixSeconds * 1000).toLocaleString(undefined, {
@@ -447,6 +471,27 @@
 		sandbox?.id;
 		sandbox?.updated_at;
 		editableProxyConfig = cloneProxyConfig(sandbox?.proxy_config);
+		editableEnv = cloneSandboxEnv(sandbox?.env);
+		editableSecretEnv = [];
+		removedSecretEnvKeys = [];
+	});
+
+	$effect(() => {
+		const nextBackingContainerId = backingContainerId;
+		const previousBackingContainerId = lastBackingContainerId;
+		lastBackingContainerId = nextBackingContainerId;
+
+		if (
+			previousBackingContainerId.length === 0 ||
+			nextBackingContainerId.length === 0 ||
+			previousBackingContainerId === nextBackingContainerId
+		) {
+			return;
+		}
+
+		if (streaming) {
+			void startLogs();
+		}
 	});
 
 	const loadPathProgram = (pathToLoad: string): Effect.Effect<void, unknown> =>
@@ -626,6 +671,68 @@
 		logsFiber = launchedFiber;
 	}
 
+	async function saveEnvSettings(): Promise<void> {
+		if (workloadKind !== "sandbox" || !sandbox || savingEnv) {
+			return;
+		}
+
+		savingEnv = true;
+		const toastId = toast.loading("Applying environment changes...");
+		try {
+			const secretEnv = editableSecretEnvNormalized;
+			const removedSecretKeys = [...new Set(removedSecretEnvKeys.map((key) => key.trim()).filter(Boolean))];
+			const savedSandbox = await runApiEffect(
+				updateSandboxEnv(config, sandbox.id, {
+					env: normalizeSandboxEnv(editableEnv),
+					secret_env: secretEnv.length > 0 ? secretEnv : undefined,
+					remove_secret_env_keys: removedSecretKeys.length > 0 ? removedSecretKeys : undefined
+				})
+			);
+			sandbox = savedSandbox;
+			editableSecretEnv = [];
+			removedSecretEnvKeys = [];
+			Effect.runSync(invalidateWorkloadCaches(config));
+			toast.update(toastId, "ok", "Environment variables saved.");
+			await Promise.resolve(onRefresh());
+		} catch (error) {
+			toast.update(toastId, "error", formatApiFailure(error));
+		} finally {
+			savingEnv = false;
+		}
+	}
+
+	function resetEnvSettings(): void {
+		editableEnv = cloneSandboxEnv(sandbox?.env);
+		editableSecretEnv = [];
+		removedSecretEnvKeys = [];
+	}
+
+	function queueSecretReplacement(key: string): void {
+		const normalizedKey = key.trim();
+		if (normalizedKey.length === 0) {
+			return;
+		}
+
+		removedSecretEnvKeys = removedSecretEnvKeys.filter((entry) => entry !== normalizedKey);
+		if (editableSecretDraftKeys.includes(normalizedKey)) {
+			return;
+		}
+
+		editableSecretEnv = [...editableSecretEnv, serializeSandboxEnvEntry(normalizedKey, "")];
+	}
+
+	function toggleSecretRemoval(key: string): void {
+		const normalizedKey = key.trim();
+		if (normalizedKey.length === 0) {
+			return;
+		}
+
+		removedSecretEnvKeys = removedSecretEnvKeys.includes(normalizedKey)
+			? removedSecretEnvKeys.filter((entry) => entry !== normalizedKey)
+			: [...removedSecretEnvKeys, normalizedKey];
+		editableSecretEnv = editableSecretEnv.filter((entry) => parseSandboxEnvEntry(entry).key !== normalizedKey);
+	}
+
 	async function saveProxySettings(): Promise<void> {
 		if (workloadKind !== "sandbox" || !sandbox || savingProxyConfig) {
 			return;
@@ -712,6 +819,7 @@
 		...(showTerminal ? [{ id: "terminal" as const, label: "Terminal" }] : []),
 		{ id: "files", label: "Files" },
 		{ id: "logs", label: "Logs" },
+		...(workloadKind === "sandbox" ? [{ id: "env" as const, label: "Environment" }] : []),
 		...(workloadKind === "sandbox" && editablePreviews.length > 0 ? [{ id: "proxy" as const, label: "Proxy" }] : [])
 	]);
 
@@ -868,13 +976,98 @@
 							<span class="quick-btn-sub">Configure headers, auth, CORS for preview ports</span>
 						</button>
 					{/if}
+					{#if workloadKind === "sandbox"}
+						<button class="quick-btn" type="button" onclick={() => activeTab = "env"}>
+							<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
+							<span class="quick-btn-label">Environment</span>
+							<span class="quick-btn-sub">Edit runtime variables for this sandbox</span>
+						</button>
+					{/if}
+				</div>
+			</div>
+		{/if}
+
+		{#if activeTab === "env" && workloadKind === "sandbox"}
+			<div class="env-view anim-fade-up">
+				<div class="env-view-header">
+					<div>
+						<h2 class="env-view-title">Sandbox environment</h2>
+						<p class="env-view-sub">Update key/value pairs for this sandbox runtime. Saving reapplies the runtime config and may recreate the running sandbox container.</p>
+					</div>
+					<div class="env-view-actions">
+						<button class="btn-ghost btn-xs" type="button" onclick={resetEnvSettings} disabled={savingEnv || !envDirty}>
+							Reset
+						</button>
+						<button class="btn-primary btn-xs" type="button" onclick={() => void saveEnvSettings()} disabled={savingEnv || !envDirty}>
+							{savingEnv ? "Saving..." : "Save environment"}
+						</button>
+					</div>
+				</div>
+				<div class="env-view-card panel">
+					<div class="env-section">
+						<h3 class="env-section-title">Visible environment variables</h3>
+						<EnvEditor bind:value={editableEnv} addLabel="Add environment variable" emptyMessage="No environment variables configured for this sandbox." />
+						<p class="env-view-note">Rows without a key are skipped when saving. Empty values are preserved.</p>
+					</div>
+					<div class="env-section env-section--secret">
+						<div class="env-section-header">
+							<div>
+								<h3 class="env-section-title">Secret environment variables</h3>
+								<p class="env-section-sub">Secret values are write-only. Existing keys are shown below, but values cannot be viewed after save or refresh.</p>
+							</div>
+						</div>
+						<EnvEditor
+							bind:value={editableSecretEnv}
+							addLabel="Add secret"
+							emptyMessage="No pending secret changes. Add a key/value pair to create or replace a secret."
+							valuePlaceholder="Enter a secret value"
+							valueInputType="password"
+						/>
+						<p class="env-view-note">Only rows with both a key and value are saved. Pending secret values are cleared after a successful save.</p>
+						<div class="secret-keys-block">
+							<div class="secret-keys-header">
+								<span class="secret-keys-title">Current secret keys</span>
+								{#if secretEnvKeys.length > 0}
+									<span class="secret-keys-count">{secretEnvKeys.length}</span>
+								{/if}
+							</div>
+							{#if secretEnvKeys.length === 0}
+								<p class="env-view-note">No saved secret keys for this sandbox.</p>
+							{:else}
+								<div class="secret-key-list">
+									{#each secretEnvKeys as key}
+										<div class:secret-key-item--pending-remove={removedSecretEnvKeys.includes(key)} class="secret-key-item">
+											<div class="secret-key-meta">
+												<code class="inline-code">{key}</code>
+												{#if editableSecretDraftKeys.includes(key)}
+													<span class="secret-key-status">Pending replacement</span>
+												{:else if removedSecretEnvKeys.includes(key)}
+													<span class="secret-key-status">Pending removal</span>
+												{/if}
+											</div>
+											<div class="secret-key-actions">
+												<button class="btn-ghost btn-xs" type="button" onclick={() => queueSecretReplacement(key)} disabled={savingEnv || removedSecretEnvKeys.includes(key)}>
+													Replace
+												</button>
+												<button class="btn-ghost btn-xs" type="button" onclick={() => toggleSecretRemoval(key)} disabled={savingEnv}>
+													{removedSecretEnvKeys.includes(key) ? "Undo remove" : "Remove"}
+												</button>
+											</div>
+										</div>
+									{/each}
+								</div>
+							{/if}
+						</div>
+					</div>
 				</div>
 			</div>
 		{/if}
 
 		<!-- Terminal -->
 		{#if activeTab === "terminal"}
-			<SandboxTerminal targetId={targetId} targetType={workloadKind} workspaceDir={terminalWorkspaceDir} {config} />
+			{#key `${targetId}:${backingContainerId}`}
+				<SandboxTerminal targetId={targetId} targetType={workloadKind} workspaceDir={terminalWorkspaceDir} {config} />
+			{/key}
 		{/if}
 
 		<!-- Files -->
@@ -1375,6 +1568,7 @@
 	}
 
 	/* Proxy tab view */
+	.env-view,
 	.proxy-view {
 		padding: 1.5rem;
 		display: flex;
@@ -1382,6 +1576,7 @@
 		gap: 1.25rem;
 	}
 
+	.env-view-header,
 	.proxy-view-header {
 		display: flex;
 		justify-content: space-between;
@@ -1390,6 +1585,7 @@
 		flex-wrap: wrap;
 	}
 
+	.env-view-title,
 	.proxy-view-title {
 		margin: 0;
 		font-family: var(--font-display);
@@ -1400,6 +1596,7 @@
 		letter-spacing: -0.01em;
 	}
 
+	.env-view-sub,
 	.proxy-view-sub {
 		margin: 0.3rem 0 0;
 		font-family: var(--font-mono);
@@ -1407,10 +1604,127 @@
 		color: var(--text-muted);
 	}
 
+	.env-view-actions,
 	.proxy-view-actions {
 		display: flex;
 		align-items: center;
 		gap: 0.4rem;
+		flex-wrap: wrap;
+	}
+
+	.env-view-card {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+	}
+
+	.env-section {
+		display: flex;
+		flex-direction: column;
+		gap: 0.65rem;
+	}
+
+	.env-section--secret {
+		padding-top: 0.2rem;
+		border-top: 1px solid var(--border-dim);
+	}
+
+	.env-section-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: flex-start;
+		gap: 0.65rem;
+		flex-wrap: wrap;
+	}
+
+	.env-section-title {
+		margin: 0;
+		font-family: var(--font-mono);
+		font-size: 0.7rem;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-secondary);
+	}
+
+	.env-section-sub {
+		margin: 0.25rem 0 0;
+		font-family: var(--font-mono);
+		font-size: 0.64rem;
+		color: var(--text-muted);
+	}
+
+	.env-view-note {
+		margin: 0;
+		font-family: var(--font-mono);
+		font-size: 0.66rem;
+		color: var(--text-muted);
+	}
+
+	.secret-keys-block {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		padding: 0.8rem;
+		border: 1px solid var(--border-dim);
+		border-radius: var(--radius-md);
+		background: color-mix(in srgb, var(--bg-raised) 80%, transparent);
+	}
+
+	.secret-keys-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+	}
+
+	.secret-keys-title,
+	.secret-keys-count,
+	.secret-key-status {
+		font-family: var(--font-mono);
+		font-size: 0.62rem;
+	}
+
+	.secret-keys-title {
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-secondary);
+	}
+
+	.secret-keys-count,
+	.secret-key-status {
+		color: var(--text-muted);
+	}
+
+	.secret-key-list {
+		display: flex;
+		flex-direction: column;
+		gap: 0.45rem;
+	}
+
+	.secret-key-item {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 0.75rem;
+		flex-wrap: wrap;
+		padding: 0.6rem 0.7rem;
+		border: 1px solid var(--border-dim);
+		border-radius: var(--radius-sm);
+		background: color-mix(in srgb, var(--bg-elevated) 74%, transparent);
+	}
+
+	.secret-key-item--pending-remove {
+		opacity: 0.72;
+		border-color: var(--status-error-border);
+		background: color-mix(in srgb, var(--status-error-bg) 55%, var(--bg-elevated));
+	}
+
+	.secret-key-meta,
+	.secret-key-actions {
+		display: flex;
+		align-items: center;
+		gap: 0.45rem;
 		flex-wrap: wrap;
 	}
 

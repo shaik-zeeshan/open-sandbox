@@ -3,6 +3,7 @@
 	import Combobox from "./Combobox.svelte";
 	import PortsEditor from "./PortsEditor.svelte";
 	import ProxyConfigEditor from "./ProxyConfigEditor.svelte";
+	import EnvEditor from "./EnvEditor.svelte";
 	import { resolveApiUrl, type ApiConfig, type ComposeProjectPreview, type ContainerSummary, type ImageSummary, type PreviewUrl, type Sandbox, type SandboxPortProxyConfig } from "$lib/api";
 
 	let {
@@ -32,6 +33,9 @@
 		createRepoUrl = $bindable(),
 		createBranch = $bindable(),
 		createWorkdir = $bindable(),
+		createEnv = $bindable(),
+		createSecretEnv = $bindable(),
+		createSecretEnvHint = false,
 		createPorts = $bindable(),
 		createProxyConfig = $bindable(),
 		createLoading,
@@ -66,6 +70,9 @@
 		createRepoUrl: string;
 		createBranch: string;
 		createWorkdir: string;
+		createEnv: string[];
+		createSecretEnv: string[];
+		createSecretEnvHint?: boolean;
 		createPorts: string;
 		createProxyConfig: Record<string, SandboxPortProxyConfig>;
 		createLoading: boolean;
@@ -847,6 +854,25 @@
 						<input class="field" bind:value={createWorkdir} />
 						<span class="field-help">Leave empty to use the image <code class="inline-code">WORKDIR</code>. If the image does not define one, the sandbox keeps the container default working directory and skips the workspace volume.</span>
 					</label>
+					<div class="field-col">
+						<span class="section-label">Environment variables</span>
+						<EnvEditor bind:value={createEnv} addLabel="Add variable" emptyMessage="No environment variables configured yet." />
+						<span class="field-help">Set runtime variables as key/value pairs. Empty values are allowed; rows without a key are ignored.</span>
+					</div>
+					<div class="field-col">
+						<span class="section-label">Secret environment variables</span>
+						<EnvEditor
+							bind:value={createSecretEnv}
+							addLabel="Add secret"
+							emptyMessage="No secret environment variables configured yet."
+							valuePlaceholder="Enter a secret value"
+							valueInputType="password"
+						/>
+						<span class="field-help">Secret values are write-only and will not be shown again after save. Rows without both a key and value are ignored.</span>
+						{#if createSecretEnvHint}
+							<span class="field-help">Secrets are not duplicated; re-enter them manually.</span>
+						{/if}
+					</div>
 					<div class="field-col">
 						<span class="section-label">Port mappings <span class="opt">(host → container)</span></span>
 						<PortsEditor bind:value={createPorts} />
