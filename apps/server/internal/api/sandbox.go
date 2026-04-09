@@ -124,6 +124,7 @@ type sandboxProgressReporter struct {
 	c       *gin.Context
 	mu      *sync.Mutex
 	enabled bool
+	logger  *slog.Logger
 }
 
 func (r sandboxProgressReporter) writeError(status int, err error) {
@@ -168,6 +169,17 @@ func (r sandboxProgressReporter) emit(event string, payload any) {
 }
 
 func (r sandboxProgressReporter) phase(phase string, status string, message string) {
+	if r.logger != nil && strings.HasPrefix(phase, "repo_") {
+		attrs := []any{
+			slog.String("phase", strings.TrimSpace(phase)),
+			slog.String("status", strings.TrimSpace(status)),
+			slog.String("message", strings.TrimSpace(message)),
+		}
+		if r.c != nil && r.c.Request != nil {
+			attrs = append(attrs, slog.String("method", r.c.Request.Method), slog.String("route", r.c.FullPath()))
+		}
+		r.logger.Info("sandbox_repo_progress", attrs...)
+	}
 	r.emit("progress", gin.H{"phase": phase, "status": status, "message": message})
 }
 
@@ -495,7 +507,7 @@ func (s *Server) writeContainerFile(c *gin.Context) {
 // @Failure 500 {object} ErrorResponse
 // @Router /api/sandboxes [post]
 func (s *Server) createSandbox(c *gin.Context) {
-	response, ok := s.createSandboxCommon(c, sandboxProgressReporter{c: c})
+	response, ok := s.createSandboxCommon(c, sandboxProgressReporter{c: c, logger: s.logger})
 	if !ok {
 		return
 	}
@@ -504,7 +516,7 @@ func (s *Server) createSandbox(c *gin.Context) {
 
 func (s *Server) createSandboxStream(c *gin.Context) {
 	setSSEHeaders(c)
-	reporter := sandboxProgressReporter{c: c, mu: &sync.Mutex{}, enabled: true}
+	reporter := sandboxProgressReporter{c: c, mu: &sync.Mutex{}, enabled: true, logger: s.logger}
 	response, ok := s.createSandboxCommon(c, reporter)
 	if !ok {
 		return
@@ -966,7 +978,7 @@ func (s *Server) restartSandbox(c *gin.Context) {
 // @Failure 500 {object} ErrorResponse
 // @Router /api/sandboxes/{id}/reset [post]
 func (s *Server) resetSandbox(c *gin.Context) {
-	response, ok := s.resetSandboxCommon(c, sandboxProgressReporter{c: c})
+	response, ok := s.resetSandboxCommon(c, sandboxProgressReporter{c: c, logger: s.logger})
 	if !ok {
 		return
 	}
@@ -975,7 +987,7 @@ func (s *Server) resetSandbox(c *gin.Context) {
 
 func (s *Server) resetSandboxStream(c *gin.Context) {
 	setSSEHeaders(c)
-	reporter := sandboxProgressReporter{c: c, mu: &sync.Mutex{}, enabled: true}
+	reporter := sandboxProgressReporter{c: c, mu: &sync.Mutex{}, enabled: true, logger: s.logger}
 	response, ok := s.resetSandboxCommon(c, reporter)
 	if !ok {
 		return
