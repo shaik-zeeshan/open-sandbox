@@ -5,9 +5,11 @@ WORKDIR /app
 COPY package.json bun.lock ./
 COPY apps/client/package.json apps/client/package.json
 COPY apps/server/package.json apps/server/package.json
+COPY packages/sdk/package.json packages/sdk/package.json
 RUN bun install --frozen-lockfile
 
 COPY apps/client ./apps/client
+COPY packages/sdk ./packages/sdk
 
 ARG VITE_SANDBOX_BASE_URL=/
 ENV VITE_SANDBOX_BASE_URL=${VITE_SANDBOX_BASE_URL}
