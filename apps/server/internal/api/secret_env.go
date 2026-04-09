@@ -5,6 +5,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -59,6 +60,9 @@ func newSandboxSecretEnvCodecFromEnv() (*sandboxSecretEnvCodec, error) {
 
 func decodeSandboxSecretKey(raw string) ([]byte, error) {
 	if decoded, err := base64.StdEncoding.DecodeString(raw); err == nil && len(decoded) == 32 {
+		return decoded, nil
+	}
+	if decoded, err := hex.DecodeString(raw); err == nil && len(decoded) == 32 {
 		return decoded, nil
 	}
 	if len(raw) == 32 {
@@ -211,7 +215,7 @@ func sandboxSecretEnvUnavailableError() error {
 }
 
 func invalidSandboxSecretEnvConfigError(err error) error {
-	msg := "sandbox secret env is unavailable: SANDBOX_SECRETS_KEY must be a raw 32-byte string or base64-encoded 32-byte key"
+	msg := "sandbox secret env is unavailable: SANDBOX_SECRETS_KEY must be a raw 32-byte string, 64-character hex string, or base64-encoded 32-byte key"
 	if err == nil {
 		return fmt.Errorf("%w: %s", errInvalidSandboxSecretEnvConfig, msg)
 	}

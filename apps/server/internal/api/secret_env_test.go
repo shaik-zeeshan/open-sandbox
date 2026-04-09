@@ -5,6 +5,18 @@ import (
 	"testing"
 )
 
+func TestNewSandboxSecretEnvCodecFromEnvAcceptsHexEncodedKey(t *testing.T) {
+	setSandboxSecretsKey(t, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
+
+	codec, err := newSandboxSecretEnvCodecFromEnv()
+	if err != nil {
+		t.Fatalf("expected hex key to be accepted, got %v", err)
+	}
+	if codec == nil {
+		t.Fatal("expected codec for hex key")
+	}
+}
+
 func TestNewSandboxSecretEnvCodecFromEnvRejectsInvalidConfiguredKey(t *testing.T) {
 	setSandboxSecretsKey(t, "not-a-valid-key")
 

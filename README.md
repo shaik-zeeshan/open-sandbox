@@ -155,7 +155,7 @@ Important behavior:
 
 Top-level values (from `.env`):
 - `SANDBOX_JWT_SECRET` (required): set a strong secret for production
-- `SANDBOX_SECRETS_KEY` (optional): key used to encrypt sandbox secret env values at rest; must be a raw 32-byte string or base64-encoded 32-byte key, and should be left unset unless you are explicitly configuring secret env support
+- `SANDBOX_SECRETS_KEY` (optional): key used to encrypt sandbox secret env values at rest; must be a raw 32-byte string, 64-character hex string, or base64-encoded 32-byte key, and should be left unset unless you are explicitly configuring secret env support
 - `OPEN_SANDBOX_DATA_DIR` (required): absolute host path for persistent state (example: `/var/lib/open-sandbox`)
 - `OPEN_SANDBOX_HTTP_PORT` (optional, default `3000`)
 - `SANDBOX_RUNTIME_MEMORY_LIMIT` (optional, default `4g`)

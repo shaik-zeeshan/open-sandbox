@@ -127,7 +127,7 @@ fi
 
 SANDBOX_SECRETS_KEY=${SANDBOX_SECRETS_KEY:-$(grep -E '^SANDBOX_SECRETS_KEY=' "$ENV_FILE" | tail -n 1 | cut -d '=' -f 2- || true)}
 if [[ -z "$SANDBOX_SECRETS_KEY" || "$SANDBOX_SECRETS_KEY" == "change-me" ]]; then
-  SANDBOX_SECRETS_KEY=$(openssl rand -hex 32)
+  SANDBOX_SECRETS_KEY=$(openssl rand -base64 32)
   replace_env_value SANDBOX_SECRETS_KEY "$SANDBOX_SECRETS_KEY"
 fi
 

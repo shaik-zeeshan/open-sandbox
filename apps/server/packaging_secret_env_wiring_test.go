@@ -68,7 +68,7 @@ func TestInstallScriptSecretsKeyOnlyForwardsWhenConfigured(t *testing.T) {
 		wantSecretsFlag  bool
 		wantSecretsValue string
 	}{
-		{name: "unset", wantSecretsFlag: true, wantSecretsValue: "generated-jwt-secret"},
+		{name: "unset", wantSecretsFlag: true, wantSecretsValue: "generated-secrets-key-value"},
 		{name: "set", secretsKey: "0123456789abcdef0123456789abcdef", wantSecretsFlag: true, wantSecretsValue: "0123456789abcdef0123456789abcdef"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -135,7 +135,7 @@ counter=$((counter + 1))
 printf '%s' "$counter" > "$counter_file"
 case "$counter" in
   1) printf 'generated-jwt-secret\n' ;;
-  2) printf 'generated-secrets-key-0123456789ab\n' ;;
+  2) printf 'generated-secrets-key-value\n' ;;
   *) printf 'unexpected-openssl-call-%s\n' "$counter" ;;
 esac
 `)
@@ -184,7 +184,7 @@ esac
 			if hasSecretsFlag != tc.wantSecretsFlag {
 				t.Fatalf("unexpected SANDBOX_SECRETS_KEY forwarding state=%v line=%s", hasSecretsFlag, runLine)
 			}
-			if tc.wantSecretsFlag && !strings.Contains(runLine, tc.wantSecretsValue) {
+			if tc.wantSecretsFlag && !strings.Contains(runLine, "SANDBOX_SECRETS_KEY="+tc.wantSecretsValue) {
 				t.Fatalf("expected SANDBOX_SECRETS_KEY value in docker run line, got %s", runLine)
 			}
 		})
