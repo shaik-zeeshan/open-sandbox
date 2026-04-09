@@ -51,6 +51,8 @@ export interface PendingDuplicateCreateDraft {
 	repoUrl: string;
 	branch: string;
 	workdir: string;
+	env: string[];
+	secretEnvKeys: string[];
 	ports: string;
 	proxyConfig: Record<string, SandboxPortProxyConfig>;
 }

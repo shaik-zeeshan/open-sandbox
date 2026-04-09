@@ -256,6 +256,7 @@ export interface CreateSandboxRequest {
 	repo_target_path?: string;
 	use_image_default_cmd?: boolean;
 	env?: string[];
+	secret_env?: string[];
 	cmd?: string[];
 	workdir?: string;
 	tty?: boolean;
@@ -264,13 +265,22 @@ export interface CreateSandboxRequest {
 	proxy_config?: Record<string, SandboxPortProxyConfig>;
 }
 
+export interface UpdateSandboxEnvRequest {
+	env: string[];
+	secret_env?: string[];
+	remove_secret_env_keys?: string[];
+}
+
 export interface Sandbox {
 	id: string;
 	name: string;
 	image: string;
 	container_id: string;
+	worker_id?: string;
 	workspace_dir: string;
 	repo_url?: string;
+	env?: string[];
+	secret_env_keys?: string[];
 	status: string;
 	owner_username?: string;
 	proxy_config?: Record<string, SandboxPortProxyConfig>;
@@ -1174,6 +1184,12 @@ export const updateSandboxProxyConfig = (
 	proxyConfig: Record<string, SandboxPortProxyConfig>
 ): Effect.Effect<Sandbox, ApiFailure> =>
 	sdkRequest(config, SdkApi.updateSandboxProxyConfig(sandboxId, proxyConfig));
+
+export const updateSandboxEnv = (
+	config: ApiConfig,
+	sandboxId: string,
+	request: UpdateSandboxEnvRequest
+): Effect.Effect<Sandbox, ApiFailure> => sdkRequest(config, SdkApi.updateSandboxEnv(sandboxId, request));
 
 export const deleteSandbox = (
 	config: ApiConfig,

@@ -71,6 +71,7 @@ type SandboxStore interface {
 	CreateSandbox(ctx context.Context, sandbox store.Sandbox) error
 	ListSandboxes(ctx context.Context) ([]store.Sandbox, error)
 	GetSandbox(ctx context.Context, sandboxID string) (store.Sandbox, error)
+	UpdateSandboxRuntime(ctx context.Context, sandboxID string, containerID string, env []string, secretEnv []string, secretEnvKeys []string, status string) error
 	UpdateSandboxProxyConfig(ctx context.Context, sandboxID string, proxyConfig map[int]traefikcfg.ServiceProxyConfig) error
 	UpdateSandboxStatus(ctx context.Context, sandboxID string, status string) error
 	UpdateSandboxStatusByContainerID(ctx context.Context, containerID string, status string) error
@@ -120,6 +121,8 @@ type Server struct {
 	traefikWriter    *traefikcfg.ConfigWriter
 	proxyAuthLimiter *proxyAuthRateLimiter
 	execWaitTimeout  time.Duration
+	secretEnvCodec   *sandboxSecretEnvCodec
+	configErr        error
 }
 
 var commandRunner = runCommand
@@ -324,6 +327,8 @@ func NewServerWithStore(dockerClient DockerAPI, authConfig AuthConfig, sandboxSt
 	}
 	authConfig.UserStore = userStore
 
+	secretEnvCodec, configErr := newSandboxSecretEnvCodecFromEnv()
+
 	s := &Server{
 		docker:           dockerClient,
 		auth:             authConfig,
@@ -339,6 +344,8 @@ func NewServerWithStore(dockerClient DockerAPI, authConfig AuthConfig, sandboxSt
 		traefikWriter:    nil,
 		proxyAuthLimiter: newProxyAuthRateLimiter(loadProxyAuthRateLimitConfig()),
 		execWaitTimeout:  loadExecWaitTimeout(),
+		secretEnvCodec:   secretEnvCodec,
+		configErr:        configErr,
 	}
 	if traefikDir := strings.TrimSpace(os.Getenv("SANDBOX_TRAEFIK_DYNAMIC_CONFIG_DIR")); traefikDir != "" {
 		writer, writerErr := traefikcfg.NewConfigWriter(traefikDir, traefikcfg.ConfigWriterOptions{
@@ -425,6 +432,7 @@ func (s *Server) registerRoutes() {
 		api.POST("/sandboxes", s.createSandbox)
 		api.GET("/sandboxes", s.listSandboxes)
 		api.GET("/sandboxes/:id", s.getSandbox)
+		api.PATCH("/sandboxes/:id/env", s.updateSandboxEnv)
 		api.PATCH("/sandboxes/:id/proxy-config", s.updateSandboxProxyConfig)
 		api.POST("/sandboxes/:id/restart", s.restartSandbox)
 		api.POST("/sandboxes/:id/reset", s.resetSandbox)
@@ -491,6 +499,10 @@ func (s *Server) searchImages(c *gin.Context) {
 // @Success 200 {object} map[string]string
 // @Router /health [get]
 func (s *Server) health(c *gin.Context) {
+	if s.configErr != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "error", "error": s.configErr.Error()})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 

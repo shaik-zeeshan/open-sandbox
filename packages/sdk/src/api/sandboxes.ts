@@ -5,6 +5,7 @@ import {
 	type CreateSandboxRequest,
 	type ExecRequest,
 	type SandboxPortProxyConfig,
+	type UpdateSandboxEnvRequest,
 	ExecResponseSchema,
 	FileReadResponseSchema,
 	FileSavedResponseSchema,
@@ -54,6 +55,9 @@ export const updateSandboxProxyConfig = (id: string, proxyConfig: Record<string,
 		patchJsonRequest(`/api/sandboxes/${encodeURIComponent(id)}/proxy-config`, { proxy_config: proxyConfig }),
 		SandboxSchema
 	);
+
+export const updateSandboxEnv = (id: string, request: UpdateSandboxEnvRequest) =>
+	execute(patchJsonRequest(`/api/sandboxes/${encodeURIComponent(id)}/env`, request), SandboxSchema);
 
 export const readSandboxFile = (id: string, filePath: string) =>
 	execute(

@@ -23,6 +23,7 @@ Required:
 - `SANDBOX_JWT_SECRET`: HS256 secret used to sign issued JWTs
 
 Optional:
+- `SANDBOX_SECRETS_KEY`: encrypts sandbox secret env values at rest; must be a raw 32-byte string, 64-character hex string, or base64-encoded 32-byte key, and should remain unset unless secret env support is being configured
 - `SANDBOX_JWT_TTL`: token lifetime (default `15m`)
 - `SANDBOX_REFRESH_TTL`: refresh token lifetime (default `720h` / 30 days)
 - `SANDBOX_JWT_ISSUER`: issuer claim (default `open-sandbox`)

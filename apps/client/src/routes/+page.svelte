@@ -42,6 +42,7 @@
 		type Sandbox,
 		type SandboxPortProxyConfig
 	} from "$lib/api";
+	import { cloneSandboxEnv, normalizeSandboxEnv, normalizeSandboxSecretEnv } from "$lib/sandbox-env";
 	import { Effect } from "effect";
 	import {
 		clearPendingDuplicateCreateDraft,
@@ -181,6 +182,9 @@
 	let createRepoUrl = $state("");
 	let createBranch = $state("");
 	let createWorkdir = $state("");
+	let createEnv = $state<string[]>([]);
+	let createSecretEnv = $state<string[]>([]);
+	let createSecretEnvHint = $state(false);
 	let createPorts = $state("");
 	let createProxyConfig = $state<Record<string, SandboxPortProxyConfig>>({});
 	let createLoading = $state(false);
@@ -191,6 +195,9 @@
 		createRepoUrl = "";
 		createBranch = "";
 		createWorkdir = "";
+		createEnv = [];
+		createSecretEnv = [];
+		createSecretEnvHint = false;
 		createPorts = "";
 		createProxyConfig = {};
 	}
@@ -201,6 +208,9 @@
 		createRepoUrl = draft.repoUrl;
 		createBranch = draft.branch;
 		createWorkdir = draft.workdir;
+		createEnv = cloneSandboxEnv(draft.env);
+		createSecretEnv = [];
+		createSecretEnvHint = draft.secretEnvKeys.length > 0;
 		createPorts = draft.ports;
 		createProxyConfig = { ...draft.proxyConfig };
 	}
@@ -576,6 +586,8 @@
 			if (resolvedImage.length === 0) {
 				throw new Error("Choose an existing image. Create one from the Images route first.");
 			}
+			const env = normalizeSandboxEnv(createEnv);
+			const secretEnv = normalizeSandboxSecretEnv(createSecretEnv);
 
 			const created = await runApiEffect(createSandbox(clientState.config, {
 				name: sandboxName,
@@ -584,6 +596,8 @@
 				repo_url: createRepoUrl.trim() || undefined,
 				branch: createBranch.trim() || undefined,
 				workdir: workdir || undefined,
+				env: env.length > 0 ? env : undefined,
+				secret_env: secretEnv.length > 0 ? secretEnv : undefined,
 				ports: parseLines(createPorts),
 				proxy_config: Object.keys(createProxyConfig).length > 0 ? createProxyConfig : undefined
 			}));
@@ -591,6 +605,9 @@
 			createRepoUrl = "";
 			createBranch = "";
 			createWorkdir = "";
+			createEnv = [];
+			createSecretEnv = [];
+			createSecretEnvHint = false;
 			createPorts = "";
 			createProxyConfig = {};
 			await runProgram(invalidateWorkloadCaches(clientState.config));
@@ -897,6 +914,9 @@
 				bind:createRepoUrl
 				bind:createBranch
 				bind:createWorkdir
+				bind:createEnv
+				bind:createSecretEnv
+				createSecretEnvHint={createSecretEnvHint}
 				bind:createPorts
 				bind:createProxyConfig
 				{createLoading}

@@ -294,12 +294,19 @@ export interface CreateSandboxRequest {
 	repo_target_path?: string;
 	use_image_default_cmd?: boolean;
 	env?: readonly string[];
+	secret_env?: readonly string[];
 	cmd?: readonly string[];
 	workdir?: string;
 	tty?: boolean;
 	user?: string;
 	ports?: readonly string[];
 	proxy_config?: Record<string, SandboxPortProxyConfig>;
+}
+
+export interface UpdateSandboxEnvRequest {
+	env: readonly string[];
+	secret_env?: readonly string[];
+	remove_secret_env_keys?: readonly string[];
 }
 
 export interface Sandbox {
@@ -310,6 +317,8 @@ export interface Sandbox {
 	worker_id?: string;
 	workspace_dir: string;
 	repo_url?: string;
+	env?: readonly string[];
+	secret_env_keys?: readonly string[];
 	status: string;
 	owner_username?: string;
 	proxy_config?: Record<string, SandboxPortProxyConfig>;
@@ -651,6 +660,8 @@ export const SandboxSchema: Schema.Schema<Sandbox> = Schema.Struct({
 	worker_id: Schema.optional(Schema.String),
 	workspace_dir: Schema.String,
 	repo_url: Schema.optional(Schema.String),
+	env: Schema.optional(Schema.Array(Schema.String)),
+	secret_env_keys: Schema.optional(Schema.Array(Schema.String)),
 	status: Schema.String,
 	owner_username: Schema.optional(Schema.String),
 	proxy_config: Schema.optional(SandboxProxyConfigSchema),
@@ -660,6 +671,12 @@ export const SandboxSchema: Schema.Schema<Sandbox> = Schema.Struct({
 	created_at: Schema.Number,
 	updated_at: Schema.Number
 }) as Schema.Schema<Sandbox>;
+
+export const UpdateSandboxEnvRequestSchema: Schema.Schema<UpdateSandboxEnvRequest> = Schema.Struct({
+	env: Schema.Array(Schema.String),
+	secret_env: Schema.optional(Schema.Array(Schema.String)),
+	remove_secret_env_keys: Schema.optional(Schema.Array(Schema.String))
+}) as Schema.Schema<UpdateSandboxEnvRequest>;
 
 export const SandboxRestartedResponseSchema: Schema.Schema<SandboxRestartedResponse> = Schema.Struct({
 	id: Schema.String,

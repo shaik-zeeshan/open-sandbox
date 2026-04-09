@@ -33,6 +33,9 @@ type Sandbox struct {
 	WorkerID      string
 	WorkspaceDir  string
 	RepoURL       string
+	Env           []string
+	SecretEnv     []string
+	SecretEnvKeys []string
 	PortSpecs     []string
 	Status        string
 	OwnerID       string
@@ -150,6 +153,9 @@ CREATE TABLE IF NOT EXISTS sandboxes (
 	worker_id TEXT NOT NULL DEFAULT 'local',
 	workspace_dir TEXT NOT NULL,
 	repo_url TEXT NOT NULL DEFAULT '',
+	env_json TEXT NOT NULL DEFAULT '[]',
+	secret_env_json TEXT NOT NULL DEFAULT '[]',
+	secret_env_keys_json TEXT NOT NULL DEFAULT '[]',
 	status TEXT NOT NULL,
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL
@@ -227,6 +233,15 @@ CREATE INDEX IF NOT EXISTS idx_runtime_workers_last_heartbeat_at ON runtime_work
 	if err := s.ensureColumn(ctx, "sandboxes", "port_specs_json", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
 		return err
 	}
+	if err := s.ensureColumn(ctx, "sandboxes", "env_json", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "sandboxes", "secret_env_json", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "sandboxes", "secret_env_keys_json", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		return err
+	}
 	if err := s.ensureColumn(ctx, "api_keys", "name", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
@@ -291,11 +306,23 @@ func (s *SQLiteStore) CreateSandbox(ctx context.Context, sandbox Sandbox) error 
 	if err != nil {
 		return fmt.Errorf("marshal sandbox port specs: %w", err)
 	}
+	envJSON, err := marshalStringSlice(sandbox.Env)
+	if err != nil {
+		return fmt.Errorf("marshal sandbox env: %w", err)
+	}
+	secretEnvJSON, err := marshalStringSlice(sandbox.SecretEnv)
+	if err != nil {
+		return fmt.Errorf("marshal sandbox secret env: %w", err)
+	}
+	secretEnvKeysJSON, err := marshalStringSlice(sandbox.SecretEnvKeys)
+	if err != nil {
+		return fmt.Errorf("marshal sandbox secret env keys: %w", err)
+	}
 
 	_, err = s.db.ExecContext(
 		ctx,
-		`INSERT INTO sandboxes (id, name, image, container_id, worker_id, workspace_dir, repo_url, port_specs_json, status, owner_id, owner_username, proxy_config_json, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO sandboxes (id, name, image, container_id, worker_id, workspace_dir, repo_url, env_json, secret_env_json, secret_env_keys_json, port_specs_json, status, owner_id, owner_username, proxy_config_json, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sandbox.ID,
 		sandbox.Name,
 		sandbox.Image,
@@ -303,6 +330,9 @@ func (s *SQLiteStore) CreateSandbox(ctx context.Context, sandbox Sandbox) error 
 		normalizeWorkerID(sandbox.WorkerID),
 		sandbox.WorkspaceDir,
 		sandbox.RepoURL,
+		envJSON,
+		secretEnvJSON,
+		secretEnvKeysJSON,
 		portSpecsJSON,
 		sandbox.Status,
 		sandbox.OwnerID,
@@ -320,7 +350,7 @@ func (s *SQLiteStore) CreateSandbox(ctx context.Context, sandbox Sandbox) error 
 
 func (s *SQLiteStore) ListSandboxes(ctx context.Context) ([]Sandbox, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, image, container_id, worker_id, workspace_dir, repo_url, port_specs_json, status, owner_id, owner_username, proxy_config_json, created_at, updated_at
+		SELECT id, name, image, container_id, worker_id, workspace_dir, repo_url, env_json, secret_env_json, secret_env_keys_json, port_specs_json, status, owner_id, owner_username, proxy_config_json, created_at, updated_at
 		FROM sandboxes
 		ORDER BY created_at DESC`)
 	if err != nil {
@@ -347,7 +377,7 @@ func (s *SQLiteStore) ListSandboxes(ctx context.Context) ([]Sandbox, error) {
 func (s *SQLiteStore) GetSandbox(ctx context.Context, sandboxID string) (Sandbox, error) {
 	row := s.db.QueryRowContext(
 		ctx,
-		`SELECT id, name, image, container_id, worker_id, workspace_dir, repo_url, port_specs_json, status, owner_id, owner_username, proxy_config_json, created_at, updated_at
+		`SELECT id, name, image, container_id, worker_id, workspace_dir, repo_url, env_json, secret_env_json, secret_env_keys_json, port_specs_json, status, owner_id, owner_username, proxy_config_json, created_at, updated_at
 		 FROM sandboxes
 		 WHERE id = ?`,
 		sandboxID,
@@ -359,6 +389,46 @@ func (s *SQLiteStore) GetSandbox(ctx context.Context, sandboxID string) (Sandbox
 	}
 
 	return sandbox, nil
+}
+
+func (s *SQLiteStore) UpdateSandboxRuntime(ctx context.Context, sandboxID string, containerID string, env []string, secretEnv []string, secretEnvKeys []string, status string) error {
+	envJSON, err := marshalStringSlice(env)
+	if err != nil {
+		return fmt.Errorf("marshal sandbox env: %w", err)
+	}
+	secretEnvJSON, err := marshalStringSlice(secretEnv)
+	if err != nil {
+		return fmt.Errorf("marshal sandbox secret env: %w", err)
+	}
+	secretEnvKeysJSON, err := marshalStringSlice(secretEnvKeys)
+	if err != nil {
+		return fmt.Errorf("marshal sandbox secret env keys: %w", err)
+	}
+
+	result, err := s.db.ExecContext(
+		ctx,
+		`UPDATE sandboxes SET container_id = ?, env_json = ?, secret_env_json = ?, secret_env_keys_json = ?, status = ?, updated_at = ? WHERE id = ?`,
+		containerID,
+		envJSON,
+		secretEnvJSON,
+		secretEnvKeysJSON,
+		status,
+		time.Now().Unix(),
+		sandboxID,
+	)
+	if err != nil {
+		return fmt.Errorf("update sandbox runtime: %w", err)
+	}
+
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read rows affected: %w", err)
+	}
+	if changed == 0 {
+		return ErrSandboxNotFound
+	}
+
+	return nil
 }
 
 func (s *SQLiteStore) UpdateSandboxProxyConfig(ctx context.Context, sandboxID string, proxyConfig map[int]traefikcfg.ServiceProxyConfig) error {
@@ -467,6 +537,9 @@ type sandboxScanner interface {
 
 func scanSandbox(scanner sandboxScanner) (Sandbox, error) {
 	var sandbox Sandbox
+	var envJSON string
+	var secretEnvJSON string
+	var secretEnvKeysJSON string
 	var portSpecsJSON string
 	var proxyConfigJSON string
 	if err := scanner.Scan(
@@ -477,6 +550,9 @@ func scanSandbox(scanner sandboxScanner) (Sandbox, error) {
 		&sandbox.WorkerID,
 		&sandbox.WorkspaceDir,
 		&sandbox.RepoURL,
+		&envJSON,
+		&secretEnvJSON,
+		&secretEnvKeysJSON,
 		&portSpecsJSON,
 		&sandbox.Status,
 		&sandbox.OwnerID,
@@ -490,6 +566,23 @@ func scanSandbox(scanner sandboxScanner) (Sandbox, error) {
 		}
 		return Sandbox{}, fmt.Errorf("scan sandbox row: %w", err)
 	}
+
+	env, err := unmarshalStringSlice(envJSON)
+	if err != nil {
+		return Sandbox{}, fmt.Errorf("unmarshal sandbox env: %w", err)
+	}
+	sandbox.Env = env
+	secretEnv, err := unmarshalStringSlice(secretEnvJSON)
+	if err != nil {
+		return Sandbox{}, fmt.Errorf("unmarshal sandbox secret env: %w", err)
+	}
+	sandbox.SecretEnv = secretEnv
+
+	secretEnvKeys, err := unmarshalStringSlice(secretEnvKeysJSON)
+	if err != nil {
+		return Sandbox{}, fmt.Errorf("unmarshal sandbox secret env keys: %w", err)
+	}
+	sandbox.SecretEnvKeys = secretEnvKeys
 
 	portSpecs, err := unmarshalStringSlice(portSpecsJSON)
 	if err != nil {

@@ -31,6 +31,10 @@ func main() {
 	_ = godotenv.Load(".env")
 	_ = godotenv.Load("apps/server/.env")
 
+	if err := api.ValidateConfigFromEnv(); err != nil {
+		log.Fatalf("failed to load server config: %v", err)
+	}
+
 	cli, err := docker.NewClient()
 	if err != nil {
 		log.Fatalf("failed to create docker client: %v", err)

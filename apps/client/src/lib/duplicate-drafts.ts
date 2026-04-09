@@ -1,4 +1,5 @@
 import type { ContainerSummary, PortSummary, SandboxPortProxyConfig, Sandbox } from "$lib/api";
+import { cloneSandboxEnv } from "$lib/sandbox-env";
 import type { PendingDuplicateCreateDraft } from "$lib/stores.svelte";
 
 const cloneProxyConfig = (
@@ -44,6 +45,8 @@ export const buildSandboxDuplicateDraft = (sandbox: Sandbox): PendingDuplicateCr
 	repoUrl: sandbox.repo_url?.trim() ?? "",
 	branch: "",
 	workdir: sandbox.workspace_dir?.trim() ?? "",
+	env: cloneSandboxEnv(sandbox.env),
+	secretEnvKeys: [...(sandbox.secret_env_keys ?? [])],
 	ports: formatDuplicatePorts(sandbox.port_specs, sandbox.ports),
 	proxyConfig: cloneProxyConfig(sandbox.proxy_config)
 });
@@ -54,6 +57,8 @@ export const buildContainerDuplicateDraft = (container: ContainerSummary): Pendi
 	repoUrl: "",
 	branch: "",
 	workdir: "",
+	env: [],
+	secretEnvKeys: [],
 	ports: formatDuplicatePorts(container.port_specs, container.ports),
 	proxyConfig: {}
 });
