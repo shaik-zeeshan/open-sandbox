@@ -12,10 +12,7 @@ By default the UI talks to `http://localhost:8080`. Override that with `apps/cli
 
 ```sh
 VITE_SANDBOX_BASE_URL=http://localhost:8080
-VITE_ALLOWED_HOSTS=app.lvh.me,.lvh.me,my.custom.host
 ```
-
-By default the Vite dev server accepts requests from any hostname. Set `VITE_ALLOWED_HOSTS` (comma-separated) only when you want to restrict allowed hostnames.
 
 ## Production build
 

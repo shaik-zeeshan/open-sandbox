@@ -31,6 +31,12 @@ type AuthConfig struct {
 	TokenTTL   time.Duration
 	RefreshTTL time.Duration
 	Issuer     string
+	UserStore  authUserStore
+}
+
+type authUserStore interface {
+	GetAPIKeyByHash(ctx context.Context, keyHash string) (store.APIKeyRecord, error)
+	GetUserByID(ctx context.Context, userID string) (store.UserRecord, error)
 }
 
 type AuthIdentity struct {
@@ -446,6 +452,14 @@ func (s *Server) newRefreshTokenRecord(userID string, now time.Time) (string, st
 }
 
 func (a AuthConfig) authenticateRequest(r *http.Request) (AuthIdentity, *authClaims, string, error) {
+	apiKey := extractAPIKey(r)
+	if apiKey != "" {
+		identity, err := a.authenticateAPIKey(r.Context(), apiKey)
+		if err == nil {
+			return identity, &authClaims{}, "", nil
+		}
+	}
+
 	bearerToken := extractRequestToken(r)
 	if bearerToken == "" {
 		return AuthIdentity{}, nil, "token_missing", errors.New("token missing")
@@ -473,6 +487,29 @@ func (a AuthConfig) authenticateRequest(r *http.Request) (AuthIdentity, *authCla
 	}
 
 	return AuthIdentity{}, nil, reason, err
+}
+
+func (a AuthConfig) authenticateAPIKey(ctx context.Context, rawAPIKey string) (AuthIdentity, error) {
+	if a.UserStore == nil {
+		return AuthIdentity{}, errors.New("user store is not configured")
+	}
+
+	key, err := a.UserStore.GetAPIKeyByHash(ctx, hashTokenValue(rawAPIKey))
+	if err != nil {
+		return AuthIdentity{}, err
+	}
+
+	user, err := a.UserStore.GetUserByID(ctx, key.UserID)
+	if err != nil {
+		return AuthIdentity{}, err
+	}
+
+	identity := AuthIdentity{UserID: user.ID, Username: user.Username, Role: user.Role}
+	if identity.UserID == "" || identity.Username == "" || !isValidRole(identity.Role) {
+		return AuthIdentity{}, errors.New("api key is missing user identity")
+	}
+
+	return identity, nil
 }
 
 func authIdentityFromContext(c *gin.Context) (AuthIdentity, bool) {
@@ -549,6 +586,10 @@ func extractRequestToken(r *http.Request) string {
 	}
 
 	return ""
+}
+
+func extractAPIKey(r *http.Request) string {
+	return strings.TrimSpace(r.Header.Get("X-API-Key"))
 }
 
 func writeSessionCookie(c *gin.Context, token string, expiresAt time.Time) {

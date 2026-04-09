@@ -2,10 +2,13 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +16,27 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/shaik-zeeshan/open-sandbox/internal/store"
 )
+
+type authTestUserStore struct {
+	apiKeys map[string]store.APIKeyRecord
+	users   map[string]store.UserRecord
+}
+
+func (s *authTestUserStore) GetAPIKeyByHash(_ context.Context, keyHash string) (store.APIKeyRecord, error) {
+	record, ok := s.apiKeys[keyHash]
+	if !ok {
+		return store.APIKeyRecord{}, store.ErrAPIKeyNotFound
+	}
+	return record, nil
+}
+
+func (s *authTestUserStore) GetUserByID(_ context.Context, userID string) (store.UserRecord, error) {
+	user, ok := s.users[userID]
+	if !ok {
+		return store.UserRecord{}, store.ErrUserNotFound
+	}
+	return user, nil
+}
 
 func newAuthServer(t *testing.T, auth AuthConfig) *Server {
 	t.Helper()
@@ -251,6 +275,114 @@ func TestAuthMiddlewareAcceptsSessionCookie(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestAuthMiddlewareAcceptsAPIKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rawAPIKey := "osk_live_test"
+	user := store.UserRecord{User: store.User{ID: "user-1", Username: "tester", Role: roleMember}}
+	userStore := &authTestUserStore{
+		apiKeys: map[string]store.APIKeyRecord{
+			hashTokenValue(rawAPIKey): {ID: "key-1", KeyHash: hashTokenValue(rawAPIKey), UserID: user.ID},
+		},
+		users: map[string]store.UserRecord{user.ID: user},
+	}
+
+	r := gin.New()
+	r.Use(AuthConfig{JWTSecret: []byte("jwt-secret"), Issuer: "open-sandbox", UserStore: userStore}.Middleware())
+	r.GET("/protected", func(c *gin.Context) {
+		identity, ok := authIdentityFromContext(c)
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "missing identity"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"user_id": identity.UserID, "username": identity.Username, "role": identity.Role})
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("X-API-Key", rawAPIKey)
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"user_id":"user-1"`)) {
+		t.Fatalf("expected API key identity in response: %s", w.Body.String())
+	}
+}
+
+func TestAuthMiddlewareFallsBackToBearerWhenAPIKeyInvalid(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	userStore := &authTestUserStore{
+		apiKeys: map[string]store.APIKeyRecord{},
+		users:   map[string]store.UserRecord{},
+	}
+
+	r := gin.New()
+	r.Use(AuthConfig{JWTSecret: []byte("jwt-secret"), Issuer: "open-sandbox", UserStore: userStore}.Middleware())
+	r.GET("/protected", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, authClaims{
+		UserID:   "user-1",
+		Username: "tester",
+		Role:     roleMember,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    "open-sandbox",
+			Subject:   "user-1",
+			IssuedAt:  jwt.NewNumericDate(time.Now().Add(-30 * time.Second)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(2 * time.Minute)),
+		},
+	})
+	signed, err := token.SignedString([]byte("jwt-secret"))
+	if err != nil {
+		t.Fatalf("failed to sign jwt: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("X-API-Key", "invalid-key")
+	req.Header.Set("Authorization", "Bearer "+signed)
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestAuthenticateAPIKeyRequiresUserStore(t *testing.T) {
+	auth := AuthConfig{JWTSecret: []byte("jwt-secret"), Issuer: "open-sandbox"}
+
+	_, err := auth.authenticateAPIKey(t.Context(), "key")
+	if err == nil {
+		t.Fatal("expected error when user store is not configured")
+	}
+}
+
+func TestAuthenticateAPIKeyRejectsInvalidIdentity(t *testing.T) {
+	userStore := &authTestUserStore{
+		apiKeys: map[string]store.APIKeyRecord{
+			hashTokenValue("key"): {ID: "key-1", KeyHash: hashTokenValue("key"), UserID: "user-1"},
+		},
+		users: map[string]store.UserRecord{
+			"user-1": {User: store.User{ID: "user-1", Username: "tester", Role: "invalid-role"}},
+		},
+	}
+
+	auth := AuthConfig{JWTSecret: []byte("jwt-secret"), Issuer: "open-sandbox", UserStore: userStore}
+	_, err := auth.authenticateAPIKey(t.Context(), "key")
+	if err == nil {
+		t.Fatal("expected invalid identity error")
+	}
+	if errors.Is(err, store.ErrAPIKeyNotFound) {
+		t.Fatal("expected identity validation error, got key not found")
 	}
 }
 
@@ -559,6 +691,113 @@ func TestCreateUserEndpoint(t *testing.T) {
 	}
 	if !bytes.Contains(w.Body.Bytes(), []byte(`"username":"alice"`)) {
 		t.Fatalf("expected created user in response: %s", w.Body.String())
+	}
+}
+
+func TestPersonalAPIKeyLifecycle(t *testing.T) {
+	s := newAuthServer(t, AuthConfig{JWTSecret: []byte("jwt-secret"), TokenTTL: time.Minute, Issuer: "open-sandbox"})
+	member := seedUser(t, s, "alice", "test-password", roleMember)
+
+	createReq := httptest.NewRequest(http.MethodPost, "/api/api-keys", bytes.NewBufferString(`{"name":"local-cli"}`))
+	createReq.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: member.ID, Username: member.Username, Role: member.Role}))
+	createReq.Header.Set("Content-Type", "application/json")
+	createW := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(createW, createReq)
+
+	if createW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", createW.Code, createW.Body.String())
+	}
+
+	var created CreateAPIKeyResponse
+	if err := json.Unmarshal(createW.Body.Bytes(), &created); err != nil {
+		t.Fatalf("failed to decode create api key response: %v", err)
+	}
+	if strings.TrimSpace(created.Secret) == "" {
+		t.Fatal("expected secret to be returned on create")
+	}
+	if !strings.HasPrefix(created.Secret, "osk_") {
+		t.Fatalf("expected secret prefix osk_, got %q", created.Secret)
+	}
+	if created.APIKey.ID == "" {
+		t.Fatal("expected api key id in create response")
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/api-keys", nil)
+	listReq.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: member.ID, Username: member.Username, Role: member.Role}))
+	listW := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(listW, listReq)
+
+	if listW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", listW.Code, listW.Body.String())
+	}
+	if bytes.Contains(listW.Body.Bytes(), []byte("secret")) {
+		t.Fatalf("did not expect secret in list response: %s", listW.Body.String())
+	}
+
+	var listed []APIKeyResponse
+	if err := json.Unmarshal(listW.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("failed to decode list api keys response: %v", err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("expected one listed key, got %d", len(listed))
+	}
+	if listed[0].ID != created.APIKey.ID {
+		t.Fatalf("expected listed key id %q, got %q", created.APIKey.ID, listed[0].ID)
+	}
+
+	revokeReq := httptest.NewRequest(http.MethodDelete, "/api/api-keys/"+created.APIKey.ID, nil)
+	revokeReq.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: member.ID, Username: member.Username, Role: member.Role}))
+	revokeW := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(revokeW, revokeReq)
+
+	if revokeW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", revokeW.Code, revokeW.Body.String())
+	}
+
+	listAfterReq := httptest.NewRequest(http.MethodGet, "/api/api-keys", nil)
+	listAfterReq.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: member.ID, Username: member.Username, Role: member.Role}))
+	listAfterW := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(listAfterW, listAfterReq)
+
+	if listAfterW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", listAfterW.Code, listAfterW.Body.String())
+	}
+	if !bytes.Equal(bytes.TrimSpace(listAfterW.Body.Bytes()), []byte("[]")) {
+		t.Fatalf("expected empty list after revoke, got %s", listAfterW.Body.String())
+	}
+}
+
+func TestPersonalAPIKeyOwnershipEnforced(t *testing.T) {
+	s := newAuthServer(t, AuthConfig{JWTSecret: []byte("jwt-secret"), TokenTTL: time.Minute, Issuer: "open-sandbox"})
+	owner := seedUser(t, s, "owner", "test-password", roleMember)
+	other := seedUser(t, s, "other", "test-password", roleMember)
+
+	createReq := httptest.NewRequest(http.MethodPost, "/api/api-keys", bytes.NewBufferString(`{"name":"shared"}`))
+	createReq.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: owner.ID, Username: owner.Username, Role: owner.Role}))
+	createReq.Header.Set("Content-Type", "application/json")
+	createW := httptest.NewRecorder()
+	s.Router().ServeHTTP(createW, createReq)
+
+	if createW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", createW.Code, createW.Body.String())
+	}
+
+	var created CreateAPIKeyResponse
+	if err := json.Unmarshal(createW.Body.Bytes(), &created); err != nil {
+		t.Fatalf("failed to decode create api key response: %v", err)
+	}
+
+	revokeReq := httptest.NewRequest(http.MethodDelete, "/api/api-keys/"+created.APIKey.ID, nil)
+	revokeReq.Header.Set("Authorization", "Bearer "+signedTokenFor(t, AuthIdentity{UserID: other.ID, Username: other.Username, Role: other.Role}))
+	revokeW := httptest.NewRecorder()
+	s.Router().ServeHTTP(revokeW, revokeReq)
+
+	if revokeW.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 when revoking another user's key, got %d (%s)", revokeW.Code, revokeW.Body.String())
 	}
 }
 

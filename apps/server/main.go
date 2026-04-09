@@ -22,6 +22,11 @@ import (
 // @securityDefinitions.apikey BearerAuth
 // @in header
 // @name Authorization
+// @description Use format: Bearer <token>
+// @securityDefinitions.apikey APIKeyAuth
+// @in header
+// @name X-API-Key
+// @description Personal API key
 func main() {
 	_ = godotenv.Load(".env")
 	_ = godotenv.Load("apps/server/.env")

@@ -390,3 +390,95 @@ func TestUnmarshalSandboxProxyConfigRejectsMalformedPortKeys(t *testing.T) {
 		t.Fatalf("expected parsed config for port 8080, got %+v", got[8080])
 	}
 }
+
+func TestAPIKeyLifecycle(t *testing.T) {
+	s := newSQLiteStoreForTest(t)
+	now := time.Now().Unix()
+
+	if _, err := s.CreateUser(t.Context(), UserRecord{
+		User:         User{ID: "user-1", Username: "alice", Role: "member"},
+		PasswordHash: "password-hash",
+	}); err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	key := APIKeyRecord{
+		ID:        "key-1",
+		Name:      "cli",
+		Preview:   "osk_abcd...wxyz",
+		KeyHash:   "hash-1",
+		UserID:    "user-1",
+		CreatedAt: now,
+	}
+	if err := s.CreateAPIKey(t.Context(), key); err != nil {
+		t.Fatalf("failed to create api key: %v", err)
+	}
+
+	stored, err := s.GetAPIKeyByHash(t.Context(), key.KeyHash)
+	if err != nil {
+		t.Fatalf("failed to read api key by hash: %v", err)
+	}
+	if stored.ID != key.ID {
+		t.Fatalf("expected key id %q, got %q", key.ID, stored.ID)
+	}
+	if stored.KeyHash != key.KeyHash {
+		t.Fatalf("expected stored key hash %q, got %q", key.KeyHash, stored.KeyHash)
+	}
+	if stored.Name != key.Name {
+		t.Fatalf("expected stored key name %q, got %q", key.Name, stored.Name)
+	}
+	if stored.Preview != key.Preview {
+		t.Fatalf("expected stored key preview %q, got %q", key.Preview, stored.Preview)
+	}
+
+	if _, err := s.db.ExecContext(t.Context(), `UPDATE api_keys SET revoked_at = ? WHERE id = ?`, now+1, key.ID); err != nil {
+		t.Fatalf("failed to revoke api key for test: %v", err)
+	}
+
+	if _, err := s.GetAPIKeyByHash(t.Context(), key.KeyHash); !errors.Is(err, ErrAPIKeyNotFound) {
+		t.Fatalf("expected ErrAPIKeyNotFound after revoke, got %v", err)
+	}
+}
+
+func TestListAndRevokeAPIKeysByUser(t *testing.T) {
+	s := newSQLiteStoreForTest(t)
+	now := time.Now().Unix()
+
+	keys := []APIKeyRecord{
+		{ID: "key-1", Name: "cli", Preview: "osk_1111...1111", KeyHash: "hash-1", UserID: "user-1", CreatedAt: now - 10},
+		{ID: "key-2", Name: "ci", Preview: "osk_2222...2222", KeyHash: "hash-2", UserID: "user-1", CreatedAt: now - 5},
+		{ID: "key-3", Name: "other", Preview: "osk_3333...3333", KeyHash: "hash-3", UserID: "user-2", CreatedAt: now - 1},
+	}
+	for _, key := range keys {
+		if err := s.CreateAPIKey(t.Context(), key); err != nil {
+			t.Fatalf("failed to create api key %s: %v", key.ID, err)
+		}
+	}
+
+	listed, err := s.ListAPIKeysByUser(t.Context(), "user-1")
+	if err != nil {
+		t.Fatalf("failed to list api keys by user: %v", err)
+	}
+	if len(listed) != 2 {
+		t.Fatalf("expected 2 active keys for user-1, got %d", len(listed))
+	}
+	if listed[0].ID != "key-2" || listed[1].ID != "key-1" {
+		t.Fatalf("expected keys ordered by created_at desc, got %#v", []string{listed[0].ID, listed[1].ID})
+	}
+
+	if err := s.RevokeAPIKey(t.Context(), "key-2", "user-2", now+1); !errors.Is(err, ErrAPIKeyNotFound) {
+		t.Fatalf("expected ErrAPIKeyNotFound for wrong owner revoke, got %v", err)
+	}
+
+	if err := s.RevokeAPIKey(t.Context(), "key-2", "user-1", now+1); err != nil {
+		t.Fatalf("failed to revoke owned key: %v", err)
+	}
+
+	listed, err = s.ListAPIKeysByUser(t.Context(), "user-1")
+	if err != nil {
+		t.Fatalf("failed to list api keys after revoke: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != "key-1" {
+		t.Fatalf("expected only key-1 after revoke, got %#v", listed)
+	}
+}
