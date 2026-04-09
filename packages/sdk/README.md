@@ -20,11 +20,12 @@ This package lives at `packages/sdk` and is consumed through Bun workspaces.
 
 ## Authentication modes
 
-The SDK supports three auth strategies:
+The SDK supports four auth strategies:
 
 - **Session auth** (`sessionAuth()`): cookie-based auth (`credentials: "include"`)
 - **Bearer auth** (`bearerAuth(token)`): sends `Authorization: Bearer <token>`
 - **API key auth** (`apiKeyAuth(key)`): sends `X-API-Key: <key>`
+- **No auth** (`noAuth()`): sends no auth headers or cookies
 
 If you do not pass `auth`, the runtime defaults to `sessionAuth()`.
 
