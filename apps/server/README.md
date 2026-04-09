@@ -312,6 +312,8 @@ curl -X POST "$BASE_URL/api/compose/status" \
 
 ### Clone git repo inside container
 
+Use optional `base_commit` to perform a detached checkout after clone.
+
 ```bash
 curl -X POST "$BASE_URL/api/git/clone" \
   -H "$AUTH_HEADER" \
@@ -321,6 +323,7 @@ curl -X POST "$BASE_URL/api/git/clone" \
     "repo_url": "https://github.com/example/repo.git",
     "target_path": "/workspace/repo",
     "branch": "main",
+    "base_commit": "abc123deadbeef",
     "depth": 1,
     "filter": "blob:none"
   }'
@@ -363,6 +366,7 @@ curl -X POST "$BASE_URL/api/sandboxes" \
 ### Create sandbox
 
 Creates an isolated container + Docker volume + persisted sandbox record.
+Set optional `base_commit` to pin the initial checkout to a specific revision.
 
 ```bash
 curl -X POST "$BASE_URL/api/sandboxes" \
@@ -373,6 +377,7 @@ curl -X POST "$BASE_URL/api/sandboxes" \
     "image": "ubuntu:24.04",
     "repo_url": "https://github.com/example/repo.git",
     "branch": "main",
+    "base_commit": "abc123deadbeef",
     "depth": 1,
     "filter": "blob:none"
   }'

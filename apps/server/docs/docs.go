@@ -15,79 +15,6 @@ const docTemplate = `{
     "host": "{{.Host}}",
     "basePath": "{{.BasePath}}",
     "paths": {
-        "/api/sandboxes/{id}/env": {
-            "patch": {
-                "security": [
-                    {
-                        "BearerAuth": []
-                    },
-                    {
-                        "APIKeyAuth": []
-                    }
-                ],
-                "description": "Recreates the sandbox container with updated environment variables while preserving sandbox metadata and the workspace volume.",
-                "consumes": [
-                    "application/json"
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "sandboxes"
-                ],
-                "summary": "Update sandbox environment variables",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Sandbox ID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    },
-                    {
-                        "description": "Sandbox env payload",
-                        "name": "payload",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/api.UpdateSandboxEnvRequest"
-                        }
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "$ref": "#/definitions/api.SandboxResponse"
-                        }
-                    },
-                    "400": {
-                        "description": "Bad Request",
-                        "schema": {
-                            "$ref": "#/definitions/api.ErrorResponse"
-                        }
-                    },
-                    "401": {
-                        "description": "Unauthorized",
-                        "schema": {
-                            "$ref": "#/definitions/api.ErrorResponse"
-                        }
-                    },
-                    "404": {
-                        "description": "Not Found",
-                        "schema": {
-                            "$ref": "#/definitions/api.ErrorResponse"
-                        }
-                    },
-                    "500": {
-                        "description": "Internal Server Error",
-                        "schema": {
-                            "$ref": "#/definitions/api.ErrorResponse"
-                        }
-                    }
-                }
-            }
-        },
         "/api/api-keys": {
             "get": {
                 "security": [
@@ -806,6 +733,212 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/sandboxes": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    },
+                    {
+                        "APIKeyAuth": []
+                    }
+                ],
+                "description": "Creates and starts a managed sandbox container and optionally clones a repository into the workspace.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "sandboxes"
+                ],
+                "summary": "Create sandbox",
+                "parameters": [
+                    {
+                        "description": "Sandbox create payload",
+                        "name": "payload",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.CreateSandboxRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.SandboxResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/sandboxes/{id}/env": {
+            "patch": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    },
+                    {
+                        "APIKeyAuth": []
+                    }
+                ],
+                "description": "Recreates the sandbox container with updated environment variables while preserving sandbox metadata and the workspace volume.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "sandboxes"
+                ],
+                "summary": "Update sandbox environment variables",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Sandbox ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Sandbox env payload",
+                        "name": "payload",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.UpdateSandboxEnvRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.SandboxResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/sandboxes/{id}/reset": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    },
+                    {
+                        "APIKeyAuth": []
+                    }
+                ],
+                "description": "Resets a sandbox repository to its configured branch or base_commit; if refresh fails, the repository is recloned.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "sandboxes"
+                ],
+                "summary": "Reset sandbox repository",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Sandbox ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Reset payload (empty object)",
+                        "name": "payload",
+                        "in": "body",
+                        "schema": {
+                            "$ref": "#/definitions/api.ResetSandboxRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/api.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/health": {
             "get": {
                 "description": "Returns service status",
@@ -1037,6 +1170,84 @@ const docTemplate = `{
                 }
             }
         },
+        "api.CreateSandboxRequest": {
+            "type": "object",
+            "required": [
+                "image",
+                "name"
+            ],
+            "properties": {
+                "base_commit": {
+                    "type": "string"
+                },
+                "branch": {
+                    "type": "string"
+                },
+                "cmd": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "depth": {
+                    "type": "integer"
+                },
+                "env": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "filter": {
+                    "type": "string"
+                },
+                "image": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "ports": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "proxy_config": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "$ref": "#/definitions/api.SandboxPortProxyConfig"
+                    }
+                },
+                "repo_target_path": {
+                    "type": "string"
+                },
+                "repo_url": {
+                    "type": "string"
+                },
+                "secret_env": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "single_branch": {
+                    "type": "boolean"
+                },
+                "tty": {
+                    "type": "boolean"
+                },
+                "use_image_default_cmd": {
+                    "type": "boolean"
+                },
+                "user": {
+                    "type": "string"
+                },
+                "workdir": {
+                    "type": "string"
+                }
+            }
+        },
         "api.ErrorResponse": {
             "type": "object",
             "properties": {
@@ -1054,14 +1265,129 @@ const docTemplate = `{
                 }
             }
         },
-        "api.PreviewURL": {
+        "api.ExecRequest": {
+            "type": "object",
+            "required": [
+                "cmd"
+            ],
+            "properties": {
+                "cmd": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "detach": {
+                    "type": "boolean"
+                },
+                "env": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "tty": {
+                    "type": "boolean"
+                },
+                "user": {
+                    "type": "string"
+                },
+                "workdir": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.ExecResponse": {
             "type": "object",
             "properties": {
-                "private_port": {
+                "detached": {
+                    "type": "boolean"
+                },
+                "exec_id": {
+                    "type": "string"
+                },
+                "exit_code": {
                     "type": "integer"
                 },
-                "url": {
+                "stderr": {
                     "type": "string"
+                },
+                "stdout": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.GitCloneRequest": {
+            "type": "object",
+            "required": [
+                "container_id",
+                "repo_url",
+                "target_path"
+            ],
+            "properties": {
+                "base_commit": {
+                    "type": "string"
+                },
+                "branch": {
+                    "type": "string"
+                },
+                "container_id": {
+                    "type": "string"
+                },
+                "depth": {
+                    "type": "integer"
+                },
+                "filter": {
+                    "type": "string"
+                },
+                "repo_url": {
+                    "type": "string"
+                },
+                "single_branch": {
+                    "type": "boolean"
+                },
+                "target_path": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.ImageSearchResult": {
+            "type": "object",
+            "properties": {
+                "automated": {
+                    "type": "boolean"
+                },
+                "description": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "official": {
+                    "type": "boolean"
+                },
+                "stars": {
+                    "type": "integer"
+                }
+            }
+        },
+        "api.ImageSummary": {
+            "type": "object",
+            "properties": {
+                "created": {
+                    "type": "integer"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "repo_tags": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "size": {
+                    "type": "integer"
                 }
             }
         },
@@ -1081,6 +1407,45 @@ const docTemplate = `{
                     "type": "string"
                 }
             }
+        },
+        "api.PreviewURL": {
+            "type": "object",
+            "properties": {
+                "private_port": {
+                    "type": "integer"
+                },
+                "url": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.PullImageRequest": {
+            "type": "object",
+            "required": [
+                "image"
+            ],
+            "properties": {
+                "image": {
+                    "type": "string"
+                },
+                "tag": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.RemoveImageResponse": {
+            "type": "object",
+            "properties": {
+                "deleted": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/image.DeleteResponse"
+                    }
+                }
+            }
+        },
+        "api.ResetSandboxRequest": {
+            "type": "object"
         },
         "api.SandboxPortCORSConfig": {
             "type": "object",
@@ -1152,12 +1517,6 @@ const docTemplate = `{
                         "type": "string"
                     }
                 },
-                "secret_env_keys": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
                 "id": {
                     "type": "string"
                 },
@@ -1197,6 +1556,12 @@ const docTemplate = `{
                 "repo_url": {
                     "type": "string"
                 },
+                "secret_env_keys": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "status": {
                     "type": "string"
                 },
@@ -1230,154 +1595,6 @@ const docTemplate = `{
                     "type": "array",
                     "items": {
                         "type": "string"
-                    }
-                }
-            }
-        },
-        "api.ExecRequest": {
-            "type": "object",
-            "required": [
-                "cmd"
-            ],
-            "properties": {
-                "cmd": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "detach": {
-                    "type": "boolean"
-                },
-                "env": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "tty": {
-                    "type": "boolean"
-                },
-                "user": {
-                    "type": "string"
-                },
-                "workdir": {
-                    "type": "string"
-                }
-            }
-        },
-        "api.ExecResponse": {
-            "type": "object",
-            "properties": {
-                "detached": {
-                    "type": "boolean"
-                },
-                "exec_id": {
-                    "type": "string"
-                },
-                "exit_code": {
-                    "type": "integer"
-                },
-                "stderr": {
-                    "type": "string"
-                },
-                "stdout": {
-                    "type": "string"
-                }
-            }
-        },
-        "api.GitCloneRequest": {
-            "type": "object",
-            "required": [
-                "container_id",
-                "repo_url",
-                "target_path"
-            ],
-            "properties": {
-                "branch": {
-                    "type": "string"
-                },
-                "container_id": {
-                    "type": "string"
-                },
-                "depth": {
-                    "type": "integer"
-                },
-                "filter": {
-                    "type": "string"
-                },
-                "repo_url": {
-                    "type": "string"
-                },
-                "single_branch": {
-                    "type": "boolean"
-                },
-                "target_path": {
-                    "type": "string"
-                }
-            }
-        },
-        "api.ImageSearchResult": {
-            "type": "object",
-            "properties": {
-                "automated": {
-                    "type": "boolean"
-                },
-                "description": {
-                    "type": "string"
-                },
-                "name": {
-                    "type": "string"
-                },
-                "official": {
-                    "type": "boolean"
-                },
-                "stars": {
-                    "type": "integer"
-                }
-            }
-        },
-        "api.ImageSummary": {
-            "type": "object",
-            "properties": {
-                "created": {
-                    "type": "integer"
-                },
-                "id": {
-                    "type": "string"
-                },
-                "repo_tags": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "size": {
-                    "type": "integer"
-                }
-            }
-        },
-        "api.PullImageRequest": {
-            "type": "object",
-            "required": [
-                "image"
-            ],
-            "properties": {
-                "image": {
-                    "type": "string"
-                },
-                "tag": {
-                    "type": "string"
-                }
-            }
-        },
-        "api.RemoveImageResponse": {
-            "type": "object",
-            "properties": {
-                "deleted": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/image.DeleteResponse"
                     }
                 }
             }

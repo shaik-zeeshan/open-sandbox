@@ -104,10 +104,6 @@ definitions:
         items:
           type: string
         type: array
-      secret_env_keys:
-        items:
-          type: string
-        type: array
       image:
         type: string
       name:
@@ -140,6 +136,58 @@ definitions:
           type: string
         type: array
     type: object
+  api.CreateSandboxRequest:
+    properties:
+      base_commit:
+        type: string
+      branch:
+        type: string
+      cmd:
+        items:
+          type: string
+        type: array
+      depth:
+        type: integer
+      env:
+        items:
+          type: string
+        type: array
+      filter:
+        type: string
+      image:
+        type: string
+      name:
+        type: string
+      ports:
+        items:
+          type: string
+        type: array
+      proxy_config:
+        additionalProperties:
+          $ref: '#/definitions/api.SandboxPortProxyConfig'
+        type: object
+      repo_target_path:
+        type: string
+      repo_url:
+        type: string
+      secret_env:
+        items:
+          type: string
+        type: array
+      single_branch:
+        type: boolean
+      tty:
+        type: boolean
+      use_image_default_cmd:
+        type: boolean
+      user:
+        type: string
+      workdir:
+        type: string
+    required:
+    - image
+    - name
+    type: object
   api.ErrorResponse:
     properties:
       error:
@@ -151,12 +199,88 @@ definitions:
       stderr:
         type: string
     type: object
-  api.PreviewURL:
+  api.ExecRequest:
     properties:
-      private_port:
-        type: integer
-      url:
+      cmd:
+        items:
+          type: string
+        type: array
+      detach:
+        type: boolean
+      env:
+        items:
+          type: string
+        type: array
+      tty:
+        type: boolean
+      user:
         type: string
+      workdir:
+        type: string
+    required:
+    - cmd
+    type: object
+  api.ExecResponse:
+    properties:
+      detached:
+        type: boolean
+      exec_id:
+        type: string
+      exit_code:
+        type: integer
+      stderr:
+        type: string
+      stdout:
+        type: string
+    type: object
+  api.GitCloneRequest:
+    properties:
+      base_commit:
+        type: string
+      branch:
+        type: string
+      container_id:
+        type: string
+      depth:
+        type: integer
+      filter:
+        type: string
+      repo_url:
+        type: string
+      single_branch:
+        type: boolean
+      target_path:
+        type: string
+    required:
+    - container_id
+    - repo_url
+    - target_path
+    type: object
+  api.ImageSearchResult:
+    properties:
+      automated:
+        type: boolean
+      description:
+        type: string
+      name:
+        type: string
+      official:
+        type: boolean
+      stars:
+        type: integer
+    type: object
+  api.ImageSummary:
+    properties:
+      created:
+        type: integer
+      id:
+        type: string
+      repo_tags:
+        items:
+          type: string
+        type: array
+      size:
+        type: integer
     type: object
   api.PortSummary:
     properties:
@@ -168,6 +292,31 @@ definitions:
         type: integer
       type:
         type: string
+    type: object
+  api.PreviewURL:
+    properties:
+      private_port:
+        type: integer
+      url:
+        type: string
+    type: object
+  api.PullImageRequest:
+    properties:
+      image:
+        type: string
+      tag:
+        type: string
+    required:
+    - image
+    type: object
+  api.RemoveImageResponse:
+    properties:
+      deleted:
+        items:
+          $ref: '#/definitions/image.DeleteResponse'
+        type: array
+    type: object
+  api.ResetSandboxRequest:
     type: object
   api.SandboxPortCORSConfig:
     properties:
@@ -241,6 +390,10 @@ definitions:
         type: object
       repo_url:
         type: string
+      secret_env_keys:
+        items:
+          type: string
+        type: array
       status:
         type: string
       updated_at:
@@ -265,103 +418,6 @@ definitions:
           type: string
         type: array
     type: object
-  api.ExecRequest:
-    properties:
-      cmd:
-        items:
-          type: string
-        type: array
-      detach:
-        type: boolean
-      env:
-        items:
-          type: string
-        type: array
-      tty:
-        type: boolean
-      user:
-        type: string
-      workdir:
-        type: string
-    required:
-    - cmd
-    type: object
-  api.ExecResponse:
-    properties:
-      detached:
-        type: boolean
-      exec_id:
-        type: string
-      exit_code:
-        type: integer
-      stderr:
-        type: string
-      stdout:
-        type: string
-    type: object
-  api.GitCloneRequest:
-    properties:
-      branch:
-        type: string
-      container_id:
-        type: string
-      depth:
-        type: integer
-      filter:
-        type: string
-      repo_url:
-        type: string
-      single_branch:
-        type: boolean
-      target_path:
-        type: string
-    required:
-    - container_id
-    - repo_url
-    - target_path
-    type: object
-  api.ImageSearchResult:
-    properties:
-      automated:
-        type: boolean
-      description:
-        type: string
-      name:
-        type: string
-      official:
-        type: boolean
-      stars:
-        type: integer
-    type: object
-  api.ImageSummary:
-    properties:
-      created:
-        type: integer
-      id:
-        type: string
-      repo_tags:
-        items:
-          type: string
-        type: array
-      size:
-        type: integer
-    type: object
-  api.PullImageRequest:
-    properties:
-      image:
-        type: string
-      tag:
-        type: string
-    required:
-    - image
-    type: object
-  api.RemoveImageResponse:
-    properties:
-      deleted:
-        items:
-          $ref: '#/definitions/image.DeleteResponse'
-        type: array
-    type: object
   image.DeleteResponse:
     properties:
       Deleted:
@@ -377,52 +433,6 @@ info:
   title: Open Sandbox API
   version: "1.0"
 paths:
-  /api/sandboxes/{id}/env:
-    patch:
-      consumes:
-      - application/json
-      description: Recreates the sandbox container with updated environment variables while preserving sandbox metadata and the workspace volume.
-      parameters:
-      - description: Sandbox ID
-        in: path
-        name: id
-        required: true
-        type: string
-      - description: Sandbox env payload
-        in: body
-        name: payload
-        required: true
-        schema:
-          $ref: '#/definitions/api.UpdateSandboxEnvRequest'
-      produces:
-      - application/json
-      responses:
-        "200":
-          description: OK
-          schema:
-            $ref: '#/definitions/api.SandboxResponse'
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/api.ErrorResponse'
-        "401":
-          description: Unauthorized
-          schema:
-            $ref: '#/definitions/api.ErrorResponse'
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/api.ErrorResponse'
-        "500":
-          description: Internal Server Error
-          schema:
-            $ref: '#/definitions/api.ErrorResponse'
-      security:
-      - BearerAuth: []
-      - APIKeyAuth: []
-      summary: Update sandbox environment variables
-      tags:
-      - sandboxes
   /api/api-keys:
     get:
       description: Returns the current user's active personal API keys.
@@ -890,6 +900,138 @@ paths:
       summary: Search Docker Hub images
       tags:
       - images
+  /api/sandboxes:
+    post:
+      consumes:
+      - application/json
+      description: Creates and starts a managed sandbox container and optionally clones
+        a repository into the workspace.
+      parameters:
+      - description: Sandbox create payload
+        in: body
+        name: payload
+        required: true
+        schema:
+          $ref: '#/definitions/api.CreateSandboxRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SandboxResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      - APIKeyAuth: []
+      summary: Create sandbox
+      tags:
+      - sandboxes
+  /api/sandboxes/{id}/env:
+    patch:
+      consumes:
+      - application/json
+      description: Recreates the sandbox container with updated environment variables
+        while preserving sandbox metadata and the workspace volume.
+      parameters:
+      - description: Sandbox ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Sandbox env payload
+        in: body
+        name: payload
+        required: true
+        schema:
+          $ref: '#/definitions/api.UpdateSandboxEnvRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SandboxResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      - APIKeyAuth: []
+      summary: Update sandbox environment variables
+      tags:
+      - sandboxes
+  /api/sandboxes/{id}/reset:
+    post:
+      consumes:
+      - application/json
+      description: Resets a sandbox repository to its configured branch or base_commit;
+        if refresh fails, the repository is recloned.
+      parameters:
+      - description: Sandbox ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Reset payload (empty object)
+        in: body
+        name: payload
+        schema:
+          $ref: '#/definitions/api.ResetSandboxRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.ErrorResponse'
+      security:
+      - BearerAuth: []
+      - APIKeyAuth: []
+      summary: Reset sandbox repository
+      tags:
+      - sandboxes
   /health:
     get:
       description: Returns service status

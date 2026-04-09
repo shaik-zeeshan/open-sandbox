@@ -27,6 +27,7 @@ type workloadRuntime interface {
 	StopWorkload(ctx context.Context, workerID string, workloadID string, options container.StopOptions) error
 	RemoveWorkload(ctx context.Context, workerID string, workloadID string, options container.RemoveOptions) error
 	CreateVolume(ctx context.Context, workerID string, options volume.CreateOptions) (volume.Volume, error)
+	RemoveVolume(ctx context.Context, workerID string, volumeID string, force bool) error
 	ExecCreate(ctx context.Context, workerID string, workloadID string, options container.ExecOptions) (container.ExecCreateResponse, error)
 	ExecAttach(ctx context.Context, workerID string, execID string, options container.ExecAttachOptions) (dockertypes.HijackedResponse, error)
 	ExecResize(ctx context.Context, workerID string, execID string, options container.ResizeOptions) error
@@ -66,6 +67,7 @@ type runtimeWorkerBackend interface {
 	StopWorkload(ctx context.Context, workloadID string, options container.StopOptions) error
 	RemoveWorkload(ctx context.Context, workloadID string, options container.RemoveOptions) error
 	CreateVolume(ctx context.Context, options volume.CreateOptions) (volume.Volume, error)
+	RemoveVolume(ctx context.Context, volumeID string, force bool) error
 	ExecCreate(ctx context.Context, workloadID string, options container.ExecOptions) (container.ExecCreateResponse, error)
 	ExecAttach(ctx context.Context, execID string, options container.ExecAttachOptions) (dockertypes.HijackedResponse, error)
 	ExecResize(ctx context.Context, execID string, options container.ResizeOptions) error
@@ -188,6 +190,14 @@ func (r *delegatingRuntime) CreateVolume(ctx context.Context, workerID string, o
 		return volume.Volume{}, err
 	}
 	return backend.CreateVolume(ctx, options)
+}
+
+func (r *delegatingRuntime) RemoveVolume(ctx context.Context, workerID string, volumeID string, force bool) error {
+	backend, err := r.backendForWorker(ctx, workerID)
+	if err != nil {
+		return err
+	}
+	return backend.RemoveVolume(ctx, volumeID, force)
 }
 
 func (r *delegatingRuntime) ExecCreate(ctx context.Context, workerID string, workloadID string, options container.ExecOptions) (container.ExecCreateResponse, error) {
@@ -364,6 +374,10 @@ func (r *dockerRuntime) RemoveWorkload(ctx context.Context, workloadID string, o
 
 func (r *dockerRuntime) CreateVolume(ctx context.Context, options volume.CreateOptions) (volume.Volume, error) {
 	return r.docker.VolumeCreate(ctx, options)
+}
+
+func (r *dockerRuntime) RemoveVolume(ctx context.Context, volumeID string, force bool) error {
+	return r.docker.VolumeRemove(ctx, volumeID, force)
 }
 
 func (r *dockerRuntime) ExecCreate(ctx context.Context, workloadID string, options container.ExecOptions) (container.ExecCreateResponse, error) {

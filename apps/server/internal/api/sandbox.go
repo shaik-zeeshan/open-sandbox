@@ -95,6 +95,8 @@ type UpdateSandboxEnvRequest struct {
 	RemoveSecretEnvKeys []string `json:"remove_secret_env_keys,omitempty"`
 }
 
+type ResetSandboxRequest struct{}
+
 type CreateSandboxRequest struct {
 	Name               string                             `json:"name" binding:"required"`
 	Image              string                             `json:"image" binding:"required"`
@@ -103,6 +105,7 @@ type CreateSandboxRequest struct {
 	SingleBranch       bool                               `json:"single_branch"`
 	Depth              *int                               `json:"depth"`
 	Filter             string                             `json:"filter"`
+	BaseCommit         string                             `json:"base_commit"`
 	RepoTargetPath     string                             `json:"repo_target_path"`
 	UseImageDefaultCmd bool                               `json:"use_image_default_cmd"`
 	Env                []string                           `json:"env"`
@@ -477,6 +480,20 @@ func (s *Server) writeContainerFile(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"id": target.ID, "container_id": target.ContainerID, "path": targetPath, "uploaded": true})
 }
 
+// createSandbox godoc
+// @Summary Create sandbox
+// @Description Creates and starts a managed sandbox container and optionally clones a repository into the workspace.
+// @Tags sandboxes
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Security APIKeyAuth
+// @Param payload body CreateSandboxRequest true "Sandbox create payload"
+// @Success 200 {object} SandboxResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 401 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /api/sandboxes [post]
 func (s *Server) createSandbox(c *gin.Context) {
 	response, ok := s.createSandboxCommon(c, sandboxProgressReporter{c: c})
 	if !ok {
@@ -510,6 +527,11 @@ func (s *Server) createSandboxCommon(c *gin.Context, reporter sandboxProgressRep
 
 	depth, err := validateCloneDepth(req.Depth)
 	if err != nil {
+		reporter.writeError(http.StatusBadRequest, err)
+		return SandboxResponse{}, false
+	}
+	repoBaseCommit := strings.TrimSpace(req.BaseCommit)
+	if err := validateBaseCommitRevision(repoBaseCommit); err != nil {
 		reporter.writeError(http.StatusBadRequest, err)
 		return SandboxResponse{}, false
 	}
@@ -576,6 +598,7 @@ func (s *Server) createSandboxCommon(c *gin.Context, reporter sandboxProgressRep
 			"open-sandbox.repo_url":                  repoURL,
 			"open-sandbox.repo_branch":               strings.TrimSpace(req.Branch),
 			"open-sandbox.repo_filter":               strings.TrimSpace(req.Filter),
+			"open-sandbox.repo_base_commit":          repoBaseCommit,
 			"open-sandbox.repo_target_path":          repoTargetPath,
 			"open-sandbox.repo_cache_reference_path": repoReferencePath,
 			"open-sandbox.repo_single_branch": func() string {
@@ -622,6 +645,7 @@ func (s *Server) createSandboxCommon(c *gin.Context, reporter sandboxProgressRep
 	reporter.phase("container_create", "running", "creating sandbox container")
 	created, err := s.createContainerWithAutoPull(c.Request.Context(), workerID, req.Image, containerConfig, hostConfig, containerName)
 	if err != nil {
+		s.cleanupCreatedSandboxArtifacts(c.Request.Context(), workerID, "", volumeName, sandboxID)
 		s.logLifecycleFailure("create_sandbox", err, slog.String("sandbox_id", sandboxID), slog.String("image", req.Image))
 		reporter.writeError(http.StatusInternalServerError, err)
 		return SandboxResponse{}, false
@@ -630,6 +654,7 @@ func (s *Server) createSandboxCommon(c *gin.Context, reporter sandboxProgressRep
 
 	reporter.phase("container_start", "running", "starting sandbox container")
 	if err := s.runtime.StartWorkload(c.Request.Context(), workerID, created.ID, container.StartOptions{}); err != nil {
+		s.cleanupCreatedSandboxArtifacts(c.Request.Context(), workerID, created.ID, volumeName, sandboxID)
 		s.logLifecycleFailure("start_sandbox", err, slog.String("sandbox_id", sandboxID), slog.String("container_id", created.ID))
 		reporter.writeError(http.StatusInternalServerError, fmt.Errorf("start sandbox container: %w", err))
 		return SandboxResponse{}, false
@@ -639,9 +664,18 @@ func (s *Server) createSandboxCommon(c *gin.Context, reporter sandboxProgressRep
 	if repoURL != "" {
 		reporter.phase("repo_clone", "running", "cloning sandbox repository")
 		if err := s.runSandboxGitPhase(c.Request.Context(), workerID, created.ID, "create", "clone", gitCloneCommand(repoURL, repoTargetPath, strings.TrimSpace(req.Branch), req.SingleBranch, depth, strings.TrimSpace(req.Filter), repoReferencePath)); err != nil {
+			s.cleanupCreatedSandboxArtifacts(c.Request.Context(), workerID, created.ID, volumeName, sandboxID)
 			s.logLifecycleFailure("clone_sandbox_repo", err, slog.String("sandbox_id", sandboxID), slog.String("container_id", created.ID))
 			reporter.writeErrorWithDetails(http.StatusBadRequest, "clone repository failed", "git_clone_failed", err.Error())
 			return SandboxResponse{}, false
+		}
+		if repoBaseCommit != "" {
+			if err := s.runSandboxGitPhase(c.Request.Context(), workerID, created.ID, "create", "checkout", gitCheckoutCommand(repoTargetPath, repoBaseCommit)); err != nil {
+				s.cleanupCreatedSandboxArtifacts(c.Request.Context(), workerID, created.ID, volumeName, sandboxID)
+				s.logLifecycleFailure("checkout_sandbox_repo", err, slog.String("sandbox_id", sandboxID), slog.String("container_id", created.ID))
+				reporter.writeErrorWithDetails(http.StatusBadRequest, "checkout repository failed", "git_checkout_failed", err.Error())
+				return SandboxResponse{}, false
+			}
 		}
 		reporter.phase("repo_clone", "done", "sandbox repository cloned")
 	}
@@ -668,7 +702,7 @@ func (s *Server) createSandboxCommon(c *gin.Context, reporter sandboxProgressRep
 	}
 
 	if err := s.sandboxStore.CreateSandbox(c.Request.Context(), sandboxRecord); err != nil {
-		_ = s.runtime.RemoveWorkload(c.Request.Context(), workerID, created.ID, container.RemoveOptions{Force: true, RemoveVolumes: true})
+		s.cleanupCreatedSandboxWorkload(c.Request.Context(), workerID, created.ID, sandboxID)
 		s.logLifecycleFailure("persist_sandbox", err, slog.String("sandbox_id", sandboxID), slog.String("container_id", created.ID))
 		reporter.writeError(http.StatusInternalServerError, fmt.Errorf("persist sandbox: %w", err))
 		return SandboxResponse{}, false
@@ -676,6 +710,27 @@ func (s *Server) createSandboxCommon(c *gin.Context, reporter sandboxProgressRep
 	s.syncTraefikRoutes(c.Request.Context())
 	s.logLifecycleSuccess("create_sandbox", slog.String("sandbox_id", sandboxID), slog.String("container_id", created.ID), slog.String("owner_id", identity.UserID))
 	return sandboxToResponse(sandboxRecord), true
+}
+
+func (s *Server) cleanupCreatedSandboxWorkload(ctx context.Context, workerID string, containerID string, sandboxID string) {
+	if err := s.runtime.RemoveWorkload(ctx, workerID, containerID, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil {
+		s.logger.Warn("cleanup_sandbox_workload_failed", slog.String("sandbox_id", sandboxID), slog.String("container_id", containerID), slog.Any("error", err))
+	}
+}
+
+func (s *Server) cleanupCreatedSandboxArtifacts(ctx context.Context, workerID string, containerID string, volumeName string, sandboxID string) {
+	if strings.TrimSpace(containerID) != "" {
+		s.cleanupCreatedSandboxWorkload(ctx, workerID, containerID, sandboxID)
+	}
+	if strings.TrimSpace(volumeName) == "" {
+		return
+	}
+	if err := s.runtime.RemoveVolume(ctx, workerID, volumeName, true); err != nil {
+		if isMissingVolumeError(err) {
+			return
+		}
+		s.logger.Warn("cleanup_sandbox_volume_failed", slog.String("sandbox_id", sandboxID), slog.String("volume_name", volumeName), slog.Any("error", err))
+	}
 }
 
 func (s *Server) listSandboxes(c *gin.Context) {
@@ -811,6 +866,22 @@ func (s *Server) updateSandboxProxyConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
+// updateSandboxEnv godoc
+// @Summary Update sandbox environment variables
+// @Description Recreates the sandbox container with updated environment variables while preserving sandbox metadata and the workspace volume.
+// @Tags sandboxes
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Security APIKeyAuth
+// @Param id path string true "Sandbox ID"
+// @Param payload body UpdateSandboxEnvRequest true "Sandbox env payload"
+// @Success 200 {object} SandboxResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 401 {object} ErrorResponse
+// @Failure 404 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /api/sandboxes/{id}/env [patch]
 func (s *Server) updateSandboxEnv(c *gin.Context) {
 	sandbox, ok := s.loadSandbox(c)
 	if !ok {
@@ -878,6 +949,22 @@ func (s *Server) restartSandbox(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"id": sandbox.ID, "restarted": true})
 }
 
+// resetSandbox godoc
+// @Summary Reset sandbox repository
+// @Description Resets a sandbox repository to its configured branch or base_commit; if refresh fails, the repository is recloned.
+// @Tags sandboxes
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Security APIKeyAuth
+// @Param id path string true "Sandbox ID"
+// @Param payload body ResetSandboxRequest false "Reset payload (empty object)"
+// @Success 200 {object} map[string]any
+// @Failure 400 {object} ErrorResponse
+// @Failure 401 {object} ErrorResponse
+// @Failure 404 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /api/sandboxes/{id}/reset [post]
 func (s *Server) resetSandbox(c *gin.Context) {
 	response, ok := s.resetSandboxCommon(c, sandboxProgressReporter{c: c})
 	if !ok {
@@ -923,6 +1010,11 @@ func (s *Server) resetSandboxCommon(c *gin.Context, reporter sandboxProgressRepo
 	repoURL := strings.TrimSpace(inspect.Config.Labels["open-sandbox.repo_url"])
 	repoTargetPath := strings.TrimSpace(inspect.Config.Labels["open-sandbox.repo_target_path"])
 	repoBranch := strings.TrimSpace(inspect.Config.Labels["open-sandbox.repo_branch"])
+	repoBaseCommit := strings.TrimSpace(inspect.Config.Labels["open-sandbox.repo_base_commit"])
+	if err := validateBaseCommitRevision(repoBaseCommit); err != nil {
+		reporter.writeError(http.StatusInternalServerError, fmt.Errorf("invalid stored base_commit: %w", err))
+		return nil, false
+	}
 	repoSingleBranch, _ := strconv.ParseBool(strings.TrimSpace(inspect.Config.Labels["open-sandbox.repo_single_branch"]))
 	repoFilter := strings.TrimSpace(inspect.Config.Labels["open-sandbox.repo_filter"])
 	repoReferencePath := strings.TrimSpace(inspect.Config.Labels["open-sandbox.repo_cache_reference_path"])
@@ -950,7 +1042,7 @@ func (s *Server) resetSandboxCommon(c *gin.Context, reporter sandboxProgressRepo
 			if refreshErr == nil {
 				reporter.phase("repo_fetch", "done", "sandbox repository fetched")
 				reporter.phase("repo_reset", "running", "resetting sandbox repository")
-				refreshErr = s.runSandboxGitPhase(c.Request.Context(), workerID, sandbox.ContainerID, "reset", "reset", sandboxGitResetCommand(repoTargetPath, repoBranch))
+				refreshErr = s.runSandboxGitPhase(c.Request.Context(), workerID, sandbox.ContainerID, "reset", "reset", sandboxGitResetCommand(repoTargetPath, repoBranch, repoBaseCommit))
 			}
 			if refreshErr == nil {
 				reporter.phase("repo_reset", "done", "sandbox repository reset")
@@ -961,12 +1053,23 @@ func (s *Server) resetSandboxCommon(c *gin.Context, reporter sandboxProgressRepo
 				reporter.phase("repo_clean", "done", "sandbox repository cleaned")
 			} else {
 				reporter.phase("repo_clone_fallback", "running", "refresh failed; re-cloning sandbox repository")
-				if err := s.runSandboxGitPhase(c.Request.Context(), workerID, sandbox.ContainerID, "reset", "cleanup", sandboxGitTargetCleanupCommand(repoTargetPath)); err != nil {
-					reporter.writeErrorWithDetails(http.StatusInternalServerError, "reset repository failed", "git_refresh_failed", err.Error())
+				tempRepoPath := repoTargetPath + ".reclone"
+				if err := s.runSandboxGitPhase(c.Request.Context(), workerID, sandbox.ContainerID, "reset", "clone_prepare", sandboxGitTargetCleanupCommand(tempRepoPath)); err != nil {
+					reporter.writeErrorWithDetails(http.StatusInternalServerError, "re-clone repository failed", "git_cleanup_failed", err.Error())
 					return nil, false
 				}
-				if err := s.runSandboxGitPhase(c.Request.Context(), workerID, sandbox.ContainerID, "reset", "clone", gitCloneCommand(repoURL, repoTargetPath, repoBranch, repoSingleBranch, repoDepth, repoFilter, repoReferencePath)); err != nil {
+				if err := s.runSandboxGitPhase(c.Request.Context(), workerID, sandbox.ContainerID, "reset", "clone", gitCloneCommand(repoURL, tempRepoPath, repoBranch, repoSingleBranch, repoDepth, repoFilter, repoReferencePath)); err != nil {
 					reporter.writeErrorWithDetails(http.StatusInternalServerError, "re-clone repository failed", "git_clone_failed", err.Error())
+					return nil, false
+				}
+				if repoBaseCommit != "" {
+					if err := s.runSandboxGitPhase(c.Request.Context(), workerID, sandbox.ContainerID, "reset", "checkout", gitCheckoutCommand(tempRepoPath, repoBaseCommit)); err != nil {
+						reporter.writeErrorWithDetails(http.StatusInternalServerError, "re-clone repository failed", "git_checkout_failed", err.Error())
+						return nil, false
+					}
+				}
+				if err := s.runSandboxGitPhase(c.Request.Context(), workerID, sandbox.ContainerID, "reset", "swap", sandboxGitSwapRepoCommand(repoTargetPath, tempRepoPath)); err != nil {
+					reporter.writeErrorWithDetails(http.StatusInternalServerError, "re-clone repository failed", "git_swap_failed", err.Error())
 					return nil, false
 				}
 				reporter.phase("repo_clone_fallback", "done", "sandbox repository re-cloned")
@@ -980,6 +1083,12 @@ func (s *Server) resetSandboxCommon(c *gin.Context, reporter sandboxProgressRepo
 			if err := s.runSandboxGitPhase(c.Request.Context(), workerID, sandbox.ContainerID, "reset", "clone", gitCloneCommand(repoURL, repoTargetPath, repoBranch, repoSingleBranch, repoDepth, repoFilter, repoReferencePath)); err != nil {
 				reporter.writeErrorWithDetails(http.StatusInternalServerError, "re-clone repository failed", "git_clone_failed", err.Error())
 				return nil, false
+			}
+			if repoBaseCommit != "" {
+				if err := s.runSandboxGitPhase(c.Request.Context(), workerID, sandbox.ContainerID, "reset", "checkout", gitCheckoutCommand(repoTargetPath, repoBaseCommit)); err != nil {
+					reporter.writeErrorWithDetails(http.StatusInternalServerError, "re-clone repository failed", "git_checkout_failed", err.Error())
+					return nil, false
+				}
 			}
 			reporter.phase("repo_clone", "done", "sandbox repository cloned")
 		}
@@ -2299,15 +2408,38 @@ func sandboxGitFetchCommand(repoTargetPath string, repoURL string, branch string
 	return []string{"sh", "-lc", command.String()}
 }
 
-func sandboxGitResetCommand(repoTargetPath string, branch string) []string {
+func sandboxGitResetCommand(repoTargetPath string, branch string, baseCommit string) []string {
+	if strings.TrimSpace(baseCommit) != "" {
+		baseCommit = strings.TrimSpace(baseCommit)
+		return []string{"sh", "-lc", fmt.Sprintf("%s && git -C %s checkout --detach %s && git -C %s reset --hard %s", gitEnsureRevisionScript(repoTargetPath, baseCommit), shellQuote(repoTargetPath), shellQuote(baseCommit), shellQuote(repoTargetPath), shellQuote(baseCommit))}
+	}
 	if strings.TrimSpace(branch) != "" {
 		return []string{"sh", "-lc", fmt.Sprintf("git -C %s checkout -B %s origin/%s && git -C %s reset --hard origin/%s", shellQuote(repoTargetPath), shellQuote(branch), shellQuote(branch), shellQuote(repoTargetPath), shellQuote(branch))}
 	}
 	return []string{"sh", "-lc", fmt.Sprintf("default_branch=$(git -C %s symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true); default_branch=${default_branch#origin/}; if [ -n \"$default_branch\" ]; then git -C %s checkout -B \"$default_branch\" \"origin/$default_branch\" && git -C %s reset --hard \"origin/$default_branch\"; else git -C %s reset --hard FETCH_HEAD; fi", shellQuote(repoTargetPath), shellQuote(repoTargetPath), shellQuote(repoTargetPath), shellQuote(repoTargetPath))}
 }
 
+func gitEnsureRevisionScript(repoTargetPath string, revision string) string {
+	revision = strings.TrimSpace(revision)
+	return fmt.Sprintf("if ! git -C %s cat-file -e %s 2>/dev/null; then git -C %s fetch --no-tags origin %s; fi", shellQuote(repoTargetPath), shellQuote(revision+"^{commit}"), shellQuote(repoTargetPath), shellQuote(revision))
+}
+
 func sandboxGitTargetCleanupCommand(repoTargetPath string) []string {
 	return []string{"sh", "-lc", fmt.Sprintf("rm -rf %s && mkdir -p %s", shellQuote(repoTargetPath), shellQuote(path.Dir(repoTargetPath)))}
+}
+
+func sandboxGitSwapRepoCommand(repoTargetPath string, tempRepoPath string) []string {
+	backupPath := repoTargetPath + ".backup"
+	return []string{"sh", "-lc", fmt.Sprintf(`set -e
+target=%s
+tmp=%s
+backup=%s
+rm -rf "$backup"
+if [ -e "$target" ]; then mv "$target" "$backup"; fi
+trap 'status=$?; if [ -e "$backup" ] && [ ! -e "$target" ]; then mv "$backup" "$target"; fi; exit $status' EXIT INT TERM
+mv "$tmp" "$target"
+rm -rf "$backup"
+trap - EXIT INT TERM`, shellQuote(repoTargetPath), shellQuote(tempRepoPath), shellQuote(backupPath))}
 }
 
 func shellQuote(value string) string {

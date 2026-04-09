@@ -60,6 +60,7 @@ type mockDocker struct {
 	copyFromContainerFn    func(context.Context, string, string) (io.ReadCloser, container.PathStat, error)
 	copyToContainerFn      func(context.Context, string, string, io.Reader, container.CopyToContainerOptions) error
 	volumeCreateFn         func(context.Context, volume.CreateOptions) (volume.Volume, error)
+	volumeRemoveFn         func(context.Context, string, bool) error
 }
 
 type mockSandboxStore struct {
@@ -212,6 +213,13 @@ func (m *mockDocker) VolumeCreate(ctx context.Context, options volume.CreateOpti
 		return volume.Volume{}, errors.New("not implemented")
 	}
 	return m.volumeCreateFn(ctx, options)
+}
+
+func (m *mockDocker) VolumeRemove(ctx context.Context, volumeID string, force bool) error {
+	if m.volumeRemoveFn == nil {
+		return errors.New("not implemented")
+	}
+	return m.volumeRemoveFn(ctx, volumeID, force)
 }
 
 func (m *mockSandboxStore) CreateSandbox(ctx context.Context, sandbox store.Sandbox) error {
@@ -2022,6 +2030,126 @@ func TestCreateSandboxEndpoint(t *testing.T) {
 	}
 }
 
+func TestCreateSandboxEndpointRollsBackWorkspaceVolumeWhenContainerCreateFails(t *testing.T) {
+	createdVolume := ""
+	removedVolume := ""
+	removedVolumeForce := false
+	containerRemoved := false
+
+	m := &mockDocker{
+		imageInspectFn: func(_ context.Context, _ string) (image.InspectResponse, error) {
+			return image.InspectResponse{Config: &dockerspec.DockerOCIImageConfig{ImageConfig: ocispec.ImageConfig{WorkingDir: "/workspace"}}}, nil
+		},
+		volumeCreateFn: func(_ context.Context, options volume.CreateOptions) (volume.Volume, error) {
+			createdVolume = options.Name
+			return volume.Volume{Name: options.Name}, nil
+		},
+		containerCreateFn: func(_ context.Context, _ *container.Config, _ *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, _ string) (container.CreateResponse, error) {
+			return container.CreateResponse{}, errors.New("create boom")
+		},
+		containerRemoveFn: func(_ context.Context, _ string, _ container.RemoveOptions) error {
+			containerRemoved = true
+			return nil
+		},
+		volumeRemoveFn: func(_ context.Context, volumeID string, force bool) error {
+			removedVolume = volumeID
+			removedVolumeForce = force
+			return nil
+		},
+	}
+
+	s := newTestServerWithStore(m, &mockSandboxStore{createSandboxFn: func(context.Context, store.Sandbox) error {
+		t.Fatal("expected sandbox not to be persisted")
+		return nil
+	}})
+	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes", bytes.NewBufferString(`{"name":"workspace","image":"ubuntu:24.04"}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d (%s)", w.Code, w.Body.String())
+	}
+	if createdVolume == "" {
+		t.Fatal("expected workspace volume to be created")
+	}
+	if containerRemoved {
+		t.Fatal("did not expect container rollback when create failed")
+	}
+	if removedVolume != createdVolume {
+		t.Fatalf("expected rollback remove for workspace volume %q, got %q", createdVolume, removedVolume)
+	}
+	if !removedVolumeForce {
+		t.Fatal("expected rollback volume remove with force=true")
+	}
+}
+
+func TestCreateSandboxEndpointRollsBackContainerAndVolumeWhenStartFails(t *testing.T) {
+	createdVolume := ""
+	removedVolume := ""
+	removedVolumeForce := false
+	removedContainer := ""
+	removeOptions := container.RemoveOptions{}
+
+	m := &mockDocker{
+		imageInspectFn: func(_ context.Context, _ string) (image.InspectResponse, error) {
+			return image.InspectResponse{Config: &dockerspec.DockerOCIImageConfig{ImageConfig: ocispec.ImageConfig{WorkingDir: "/workspace"}}}, nil
+		},
+		volumeCreateFn: func(_ context.Context, options volume.CreateOptions) (volume.Volume, error) {
+			createdVolume = options.Name
+			return volume.Volume{Name: options.Name}, nil
+		},
+		containerCreateFn: func(_ context.Context, _ *container.Config, _ *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, _ string) (container.CreateResponse, error) {
+			return container.CreateResponse{ID: "sandbox-container-id"}, nil
+		},
+		containerStartFn: func(_ context.Context, _ string, _ container.StartOptions) error {
+			return errors.New("start boom")
+		},
+		containerRemoveFn: func(_ context.Context, containerID string, options container.RemoveOptions) error {
+			removedContainer = containerID
+			removeOptions = options
+			return nil
+		},
+		volumeRemoveFn: func(_ context.Context, volumeID string, force bool) error {
+			removedVolume = volumeID
+			removedVolumeForce = force
+			return nil
+		},
+	}
+
+	s := newTestServerWithStore(m, &mockSandboxStore{createSandboxFn: func(context.Context, store.Sandbox) error {
+		t.Fatal("expected sandbox not to be persisted")
+		return nil
+	}})
+	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes", bytes.NewBufferString(`{"name":"workspace","image":"ubuntu:24.04"}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d (%s)", w.Code, w.Body.String())
+	}
+	if removedContainer != "sandbox-container-id" {
+		t.Fatalf("expected rollback remove for sandbox-container-id, got %q", removedContainer)
+	}
+	if !removeOptions.Force || !removeOptions.RemoveVolumes {
+		t.Fatalf("expected rollback remove options force+volumes, got %+v", removeOptions)
+	}
+	if createdVolume == "" {
+		t.Fatal("expected workspace volume to be created")
+	}
+	if removedVolume != createdVolume {
+		t.Fatalf("expected rollback remove for workspace volume %q, got %q", createdVolume, removedVolume)
+	}
+	if !removedVolumeForce {
+		t.Fatal("expected rollback volume remove with force=true")
+	}
+}
+
 func TestCreateSandboxEndpointLeavesWorkdirUnsetWhenImageHasNoWorkdir(t *testing.T) {
 	createdSandbox := store.Sandbox{}
 	volumeCreated := false
@@ -3593,6 +3721,132 @@ func TestGitCloneEndpointRejectsNonPositiveDepth(t *testing.T) {
 	}
 }
 
+func TestGitCloneEndpointRejectsInvalidBaseCommit(t *testing.T) {
+	execCalled := false
+	m := &mockDocker{
+		containerExecCreateFn: func(context.Context, string, container.ExecOptions) (container.ExecCreateResponse, error) {
+			execCalled = true
+			return container.ExecCreateResponse{}, nil
+		},
+	}
+
+	s := newTestServer(m)
+	req := httptest.NewRequest(http.MethodPost, "/api/git/clone", bytes.NewBufferString(`{"container_id":"cid","repo_url":"https://github.com/example/repo.git","target_path":"/workspace/repo","base_commit":"abc123; touch /tmp/pwned"}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (%s)", w.Code, w.Body.String())
+	}
+	if execCalled {
+		t.Fatal("expected clone exec not to run")
+	}
+	if !strings.Contains(w.Body.String(), "base_commit must be a valid git revision") {
+		t.Fatalf("expected base_commit validation error, got %s", w.Body.String())
+	}
+}
+
+func TestGitCloneEndpointChecksOutBaseCommitWhenProvided(t *testing.T) {
+	var capturedCmds [][]string
+	hijacked := fakeHijackedResponse([]byte(""), []byte(""))
+	m := &mockDocker{
+		containerExecCreateFn: func(_ context.Context, _ string, options container.ExecOptions) (container.ExecCreateResponse, error) {
+			capturedCmds = append(capturedCmds, append([]string{}, options.Cmd...))
+			return container.ExecCreateResponse{ID: fmt.Sprintf("exec-%d", len(capturedCmds))}, nil
+		},
+		containerExecAttachFn: func(context.Context, string, container.ExecAttachOptions) (dockertypes.HijackedResponse, error) {
+			return hijacked, nil
+		},
+		containerExecInspectFn: func(context.Context, string) (container.ExecInspect, error) {
+			return container.ExecInspect{ExitCode: 0, Running: false}, nil
+		},
+	}
+
+	s := newTestServer(m)
+	req := httptest.NewRequest(http.MethodPost, "/api/git/clone", bytes.NewBufferString(`{"container_id":"cid","repo_url":"https://github.com/example/repo.git","target_path":"/workspace/repo","base_commit":"abc123"}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if len(capturedCmds) != 2 {
+		t.Fatalf("expected clone and checkout commands, got %d", len(capturedCmds))
+	}
+	if got := capturedCmds[0]; len(got) != 4 || got[0] != "git" || got[1] != "clone" || got[2] != "https://github.com/example/repo.git" || got[3] != "/workspace/repo" {
+		t.Fatalf("expected clone command, got %v", got)
+	}
+	if got := capturedCmds[1]; len(got) < 3 || got[0] != "sh" || got[1] != "-lc" || !strings.Contains(got[2], "git -C '/workspace/repo' fetch --no-tags origin 'abc123'") || !strings.Contains(got[2], "git -C '/workspace/repo' checkout --detach 'abc123'") {
+		t.Fatalf("expected checkout command, got %v", got)
+	}
+}
+
+func TestCreateSandboxEndpointMaterializesBaseCommitForShallowSingleBranchClone(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return "", "", nil
+	}
+
+	var capturedCmds [][]string
+	m := &mockDocker{
+		imageInspectFn: func(_ context.Context, imageID string) (image.InspectResponse, error) {
+			if imageID != "ubuntu:24.04" {
+				t.Fatalf("expected image inspect for ubuntu:24.04, got %q", imageID)
+			}
+			return image.InspectResponse{Config: &dockerspec.DockerOCIImageConfig{ImageConfig: ocispec.ImageConfig{WorkingDir: "/workspace"}}}, nil
+		},
+		volumeCreateFn: func(_ context.Context, options volume.CreateOptions) (volume.Volume, error) {
+			return volume.Volume{Name: options.Name}, nil
+		},
+		containerCreateFn: func(_ context.Context, _ *container.Config, _ *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, _ string) (container.CreateResponse, error) {
+			return container.CreateResponse{ID: "sandbox-container-id"}, nil
+		},
+		containerStartFn: func(_ context.Context, _ string, _ container.StartOptions) error {
+			return nil
+		},
+		containerExecCreateFn: func(_ context.Context, _ string, options container.ExecOptions) (container.ExecCreateResponse, error) {
+			capturedCmds = append(capturedCmds, append([]string{}, options.Cmd...))
+			return container.ExecCreateResponse{ID: fmt.Sprintf("exec-%d", len(capturedCmds))}, nil
+		},
+		containerExecAttachFn: func(context.Context, string, container.ExecAttachOptions) (dockertypes.HijackedResponse, error) {
+			return fakeHijackedResponse([]byte(""), []byte("")), nil
+		},
+		containerExecInspectFn: func(context.Context, string) (container.ExecInspect, error) {
+			return container.ExecInspect{ExitCode: 0, Running: false}, nil
+		},
+	}
+
+	sandboxStore := &mockSandboxStore{createSandboxFn: func(context.Context, store.Sandbox) error { return nil }}
+
+	s := newTestServerWithStore(m, sandboxStore)
+	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes", bytes.NewBufferString(`{"name":"workspace","image":"ubuntu:24.04","repo_url":"https://github.com/example/repo.git","branch":"main","single_branch":true,"depth":1,"base_commit":"abc123"}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if len(capturedCmds) != 2 {
+		t.Fatalf("expected clone and checkout commands, got %d", len(capturedCmds))
+	}
+	if got := capturedCmds[0]; len(got) < 8 || got[0] != "git" || got[1] != "clone" || got[2] != "--branch" || got[3] != "main" || got[4] != "--single-branch" || got[5] != "--depth" || got[6] != "1" {
+		t.Fatalf("expected shallow single-branch clone command, got %v", got)
+	}
+	if got := capturedCmds[1]; len(got) < 3 || got[0] != "sh" || got[1] != "-lc" || !strings.Contains(got[2], "git -C '/workspace/repo' fetch --no-tags origin 'abc123'") || !strings.Contains(got[2], "git -C '/workspace/repo' checkout --detach 'abc123'") {
+		t.Fatalf("expected base commit materialization before checkout, got %v", got)
+	}
+}
+
 func TestCreateSandboxEndpointBuildsCloneCommandWithDepthAndFilter(t *testing.T) {
 	original := commandRunner
 	defer func() { commandRunner = original }()
@@ -3703,6 +3957,34 @@ func TestCreateSandboxEndpointRejectsNonPositiveDepth(t *testing.T) {
 	}
 }
 
+func TestCreateSandboxEndpointRejectsInvalidBaseCommit(t *testing.T) {
+	containerCreated := false
+	m := &mockDocker{
+		containerCreateFn: func(_ context.Context, _ *container.Config, _ *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, _ string) (container.CreateResponse, error) {
+			containerCreated = true
+			return container.CreateResponse{}, nil
+		},
+	}
+
+	s := newTestServerWithStore(m, &mockSandboxStore{})
+	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes", bytes.NewBufferString(`{"name":"workspace","image":"ubuntu:24.04","repo_url":"https://github.com/example/repo.git","base_commit":"abc123; touch /tmp/pwned"}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (%s)", w.Code, w.Body.String())
+	}
+	if containerCreated {
+		t.Fatal("expected sandbox container not to be created")
+	}
+	if !strings.Contains(w.Body.String(), "base_commit must be a valid git revision") {
+		t.Fatalf("expected base_commit validation error, got %s", w.Body.String())
+	}
+}
+
 func TestResetSandboxEndpointBuildsCloneCommandWithDepthAndFilter(t *testing.T) {
 	original := commandRunner
 	defer func() { commandRunner = original }()
@@ -3773,6 +4055,212 @@ func TestResetSandboxEndpointBuildsCloneCommandWithDepthAndFilter(t *testing.T) 
 	}
 	if got := capturedCmds[3]; len(got) != 5 || got[0] != "git" || got[1] != "-C" || got[2] != "/workspace/repo" || got[3] != "clean" || got[4] != "-fdx" {
 		t.Fatalf("expected clean command, got %v", got)
+	}
+}
+
+func TestResetSandboxEndpointUsesBaseCommitWhenStored(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return "", "", nil
+	}
+
+	var capturedCmds [][]string
+	m := &mockDocker{
+		containerInspectFn: func(_ context.Context, containerID string) (container.InspectResponse, error) {
+			if containerID != "sandbox-container" {
+				t.Fatalf("expected sandbox container, got %q", containerID)
+			}
+			return container.InspectResponse{
+				Config: &container.Config{Labels: map[string]string{
+					"open-sandbox.repo_url":           "https://github.com/example/repo.git",
+					"open-sandbox.repo_branch":        "main",
+					"open-sandbox.repo_single_branch": "true",
+					"open-sandbox.repo_depth":         "1",
+					"open-sandbox.repo_base_commit":   "abc123",
+					"open-sandbox.repo_target_path":   "/workspace/repo",
+				}},
+				ContainerJSONBase: &container.ContainerJSONBase{State: &container.State{Running: true}},
+			}, nil
+		},
+		containerExecCreateFn: func(_ context.Context, _ string, options container.ExecOptions) (container.ExecCreateResponse, error) {
+			captured := append([]string{}, options.Cmd...)
+			capturedCmds = append(capturedCmds, captured)
+			return container.ExecCreateResponse{ID: fmt.Sprintf("exec-reset-%d", len(capturedCmds))}, nil
+		},
+		containerExecAttachFn: func(context.Context, string, container.ExecAttachOptions) (dockertypes.HijackedResponse, error) {
+			return fakeHijackedResponse([]byte(""), []byte("")), nil
+		},
+		containerExecInspectFn: func(context.Context, string) (container.ExecInspect, error) {
+			return container.ExecInspect{ExitCode: 0, Running: false}, nil
+		},
+	}
+
+	sandboxStore := &mockSandboxStore{
+		getSandboxFn: func(context.Context, string) (store.Sandbox, error) {
+			return store.Sandbox{ID: "sandbox-1", ContainerID: "sandbox-container", WorkspaceDir: "/workspace", OwnerID: "admin-user", OwnerUsername: "admin"}, nil
+		},
+		updateSandboxStatusFn: func(context.Context, string, string) error { return nil },
+	}
+
+	s := newTestServerWithStore(m, sandboxStore)
+	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes/sandbox-1/reset", bytes.NewBufferString(`{}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if len(capturedCmds) != 4 {
+		t.Fatalf("expected repo check, fetch, reset, and clean commands, got %d", len(capturedCmds))
+	}
+	if got := capturedCmds[2]; len(got) < 3 || !strings.Contains(got[2], "git -C '/workspace/repo' fetch --no-tags origin 'abc123'") || !strings.Contains(got[2], "git -C '/workspace/repo' checkout --detach 'abc123' && git -C '/workspace/repo' reset --hard 'abc123'") {
+		t.Fatalf("expected base-commit reset command, got %v", got)
+	}
+}
+
+func TestResetSandboxEndpointRejectsInvalidStoredBaseCommit(t *testing.T) {
+	execCalled := false
+	m := &mockDocker{
+		containerInspectFn: func(_ context.Context, _ string) (container.InspectResponse, error) {
+			return container.InspectResponse{
+				Config: &container.Config{Labels: map[string]string{
+					"open-sandbox.repo_url":         "https://github.com/example/repo.git",
+					"open-sandbox.repo_target_path": "/workspace/repo",
+					"open-sandbox.repo_base_commit": "abc123; touch /tmp/pwned",
+				}},
+				ContainerJSONBase: &container.ContainerJSONBase{State: &container.State{Running: true}},
+			}, nil
+		},
+		containerExecCreateFn: func(context.Context, string, container.ExecOptions) (container.ExecCreateResponse, error) {
+			execCalled = true
+			return container.ExecCreateResponse{}, nil
+		},
+	}
+
+	sandboxStore := &mockSandboxStore{
+		getSandboxFn: func(context.Context, string) (store.Sandbox, error) {
+			return store.Sandbox{ID: "sandbox-1", ContainerID: "sandbox-container", WorkspaceDir: "/workspace", OwnerID: "admin-user", OwnerUsername: "admin"}, nil
+		},
+	}
+
+	s := newTestServerWithStore(m, sandboxStore)
+	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes/sandbox-1/reset", bytes.NewBufferString(`{}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d (%s)", w.Code, w.Body.String())
+	}
+	if execCalled {
+		t.Fatal("expected reset exec not to run")
+	}
+	if !strings.Contains(w.Body.String(), "invalid stored base_commit") {
+		t.Fatalf("expected stored base_commit validation error, got %s", w.Body.String())
+	}
+}
+
+func TestResetSandboxEndpointRecloneFallbackMaterializesBaseCommit(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return "", "", nil
+	}
+
+	var capturedCmds [][]string
+	execCount := 0
+	m := &mockDocker{
+		containerInspectFn: func(_ context.Context, _ string) (container.InspectResponse, error) {
+			return container.InspectResponse{
+				Config: &container.Config{Labels: map[string]string{
+					"open-sandbox.repo_url":           "https://github.com/example/repo.git",
+					"open-sandbox.repo_branch":        "main",
+					"open-sandbox.repo_single_branch": "true",
+					"open-sandbox.repo_depth":         "1",
+					"open-sandbox.repo_base_commit":   "abc123",
+					"open-sandbox.repo_target_path":   "/workspace/repo",
+				}},
+				ContainerJSONBase: &container.ContainerJSONBase{State: &container.State{Running: true}},
+			}, nil
+		},
+		containerExecCreateFn: func(_ context.Context, _ string, options container.ExecOptions) (container.ExecCreateResponse, error) {
+			execCount++
+			capturedCmds = append(capturedCmds, append([]string{}, options.Cmd...))
+			return container.ExecCreateResponse{ID: fmt.Sprintf("exec-reset-%d", execCount)}, nil
+		},
+		containerExecAttachFn: func(context.Context, string, container.ExecAttachOptions) (dockertypes.HijackedResponse, error) {
+			return fakeHijackedResponse([]byte(""), []byte("")), nil
+		},
+		containerExecInspectFn: func(_ context.Context, execID string) (container.ExecInspect, error) {
+			if execID == "exec-reset-2" {
+				return container.ExecInspect{ExitCode: 1, Running: false}, nil
+			}
+			return container.ExecInspect{ExitCode: 0, Running: false}, nil
+		},
+	}
+
+	sandboxStore := &mockSandboxStore{
+		getSandboxFn: func(context.Context, string) (store.Sandbox, error) {
+			return store.Sandbox{ID: "sandbox-1", ContainerID: "sandbox-container", WorkspaceDir: "/workspace", OwnerID: "admin-user", OwnerUsername: "admin"}, nil
+		},
+		updateSandboxStatusFn: func(context.Context, string, string) error { return nil },
+	}
+
+	s := newTestServerWithStore(m, sandboxStore)
+	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes/sandbox-1/reset", bytes.NewBufferString(`{}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	cloneSeen := false
+	checkoutSeen := false
+	swapSeen := false
+	for _, got := range capturedCmds {
+		if len(got) < 3 {
+			continue
+		}
+		if got[0] == "git" && got[1] == "clone" {
+			joined := strings.Join(got, " ")
+			if !strings.Contains(joined, "--single-branch") || !strings.Contains(joined, "--depth 1") {
+				t.Fatalf("expected shallow single-branch clone in fallback, got %v", got)
+			}
+			if got[len(got)-1] != "/workspace/repo.reclone" {
+				t.Fatalf("expected fallback clone into temp path, got %v", got)
+			}
+			cloneSeen = true
+		}
+		if got[0] == "sh" && got[1] == "-lc" && strings.Contains(got[2], "checkout --detach 'abc123'") {
+			if !strings.Contains(got[2], "git -C '/workspace/repo.reclone' fetch --no-tags origin 'abc123'") {
+				t.Fatalf("expected base commit materialization in fallback checkout, got %v", got)
+			}
+			checkoutSeen = true
+		}
+		if got[0] == "sh" && got[1] == "-lc" && strings.Contains(got[2], "tmp='/workspace/repo.reclone'") {
+			if !strings.Contains(got[2], "mv \"$tmp\" \"$target\"") {
+				t.Fatalf("expected safe swap command in fallback, got %v", got)
+			}
+			swapSeen = true
+		}
+	}
+	if !cloneSeen {
+		t.Fatalf("expected fallback clone command, got %v", capturedCmds)
+	}
+	if !checkoutSeen {
+		t.Fatalf("expected fallback checkout command, got %v", capturedCmds)
+	}
+	if !swapSeen {
+		t.Fatalf("expected fallback swap command, got %v", capturedCmds)
 	}
 }
 
@@ -3999,6 +4487,11 @@ func TestCreateSandboxEndpointReturnsJSONErrorOnCloneFailure(t *testing.T) {
 		return "", "", nil
 	}
 
+	removedContainer := ""
+	removeOptions := container.RemoveOptions{}
+	removedVolume := ""
+	removedVolumeForce := false
+
 	m := &mockDocker{
 		imageInspectFn: func(_ context.Context, _ string) (image.InspectResponse, error) {
 			return image.InspectResponse{Config: &dockerspec.DockerOCIImageConfig{ImageConfig: ocispec.ImageConfig{WorkingDir: "/workspace"}}}, nil
@@ -4019,6 +4512,16 @@ func TestCreateSandboxEndpointReturnsJSONErrorOnCloneFailure(t *testing.T) {
 		containerExecInspectFn: func(context.Context, string) (container.ExecInspect, error) {
 			return container.ExecInspect{ExitCode: 1, Running: false}, nil
 		},
+		containerRemoveFn: func(_ context.Context, containerID string, options container.RemoveOptions) error {
+			removedContainer = containerID
+			removeOptions = options
+			return nil
+		},
+		volumeRemoveFn: func(_ context.Context, volumeID string, force bool) error {
+			removedVolume = volumeID
+			removedVolumeForce = force
+			return nil
+		},
 	}
 	s := newTestServerWithStore(m, &mockSandboxStore{createSandboxFn: func(context.Context, store.Sandbox) error { return nil }})
 	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes", bytes.NewBufferString(`{"name":"workspace","image":"ubuntu:24.04","repo_url":"https://github.com/example/repo.git"}`))
@@ -4031,8 +4534,102 @@ func TestCreateSandboxEndpointReturnsJSONErrorOnCloneFailure(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d (%s)", w.Code, w.Body.String())
 	}
+	if removedContainer != "sandbox-container-id" {
+		t.Fatalf("expected rollback remove for sandbox-container-id, got %q", removedContainer)
+	}
+	if !removeOptions.Force || !removeOptions.RemoveVolumes {
+		t.Fatalf("expected rollback remove options force+volumes, got %+v", removeOptions)
+	}
+	if removedVolume == "" {
+		t.Fatal("expected workspace volume rollback to run")
+	}
+	if !removedVolumeForce {
+		t.Fatal("expected workspace volume rollback to force removal")
+	}
 	if got := strings.TrimSpace(w.Body.String()); got != `{"error":"clone repository failed","reason":"git_clone_failed","stderr":"fatal: no such repo"}` {
 		t.Fatalf("expected structured JSON error, got %s", got)
+	}
+}
+
+func TestCreateSandboxEndpointRollsBackOnBaseCommitCheckoutFailure(t *testing.T) {
+	original := commandRunner
+	defer func() { commandRunner = original }()
+	commandRunner = func(context.Context, string, ...string) (string, string, error) {
+		return "", "", nil
+	}
+
+	execCount := 0
+	removedContainer := ""
+	removeOptions := container.RemoveOptions{}
+	removedVolume := ""
+	removedVolumeForce := false
+	createdVolume := ""
+
+	m := &mockDocker{
+		imageInspectFn: func(_ context.Context, _ string) (image.InspectResponse, error) {
+			return image.InspectResponse{Config: &dockerspec.DockerOCIImageConfig{ImageConfig: ocispec.ImageConfig{WorkingDir: "/workspace"}}}, nil
+		},
+		volumeCreateFn: func(_ context.Context, options volume.CreateOptions) (volume.Volume, error) {
+			createdVolume = options.Name
+			return volume.Volume{Name: options.Name}, nil
+		},
+		containerCreateFn: func(_ context.Context, _ *container.Config, _ *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, _ string) (container.CreateResponse, error) {
+			return container.CreateResponse{ID: "sandbox-container-id"}, nil
+		},
+		containerStartFn: func(_ context.Context, _ string, _ container.StartOptions) error { return nil },
+		containerExecCreateFn: func(context.Context, string, container.ExecOptions) (container.ExecCreateResponse, error) {
+			execCount++
+			return container.ExecCreateResponse{ID: fmt.Sprintf("exec-%d", execCount)}, nil
+		},
+		containerExecAttachFn: func(_ context.Context, execID string, _ container.ExecAttachOptions) (dockertypes.HijackedResponse, error) {
+			if execID == "exec-1" {
+				return fakeHijackedResponse([]byte(""), []byte("")), nil
+			}
+			return fakeHijackedResponse([]byte(""), []byte("fatal: bad revision\n")), nil
+		},
+		containerExecInspectFn: func(_ context.Context, execID string) (container.ExecInspect, error) {
+			if execID == "exec-1" {
+				return container.ExecInspect{ExitCode: 0, Running: false}, nil
+			}
+			return container.ExecInspect{ExitCode: 1, Running: false}, nil
+		},
+		containerRemoveFn: func(_ context.Context, containerID string, options container.RemoveOptions) error {
+			removedContainer = containerID
+			removeOptions = options
+			return nil
+		},
+		volumeRemoveFn: func(_ context.Context, volumeID string, force bool) error {
+			removedVolume = volumeID
+			removedVolumeForce = force
+			return nil
+		},
+	}
+
+	s := newTestServerWithStore(m, &mockSandboxStore{createSandboxFn: func(context.Context, store.Sandbox) error { return nil }})
+	req := httptest.NewRequest(http.MethodPost, "/api/sandboxes", bytes.NewBufferString(`{"name":"workspace","image":"ubuntu:24.04","repo_url":"https://github.com/example/repo.git","base_commit":"abc123"}`))
+	setAuthHeader(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (%s)", w.Code, w.Body.String())
+	}
+	if removedContainer != "sandbox-container-id" {
+		t.Fatalf("expected rollback remove for sandbox-container-id, got %q", removedContainer)
+	}
+	if !removeOptions.Force || !removeOptions.RemoveVolumes {
+		t.Fatalf("expected rollback remove options force+volumes, got %+v", removeOptions)
+	}
+	if removedVolume != createdVolume {
+		t.Fatalf("expected rollback remove for workspace volume %q, got %q", createdVolume, removedVolume)
+	}
+	if !removedVolumeForce {
+		t.Fatal("expected workspace volume rollback to force removal")
+	}
+	if got := strings.TrimSpace(w.Body.String()); got != `{"error":"checkout repository failed","reason":"git_checkout_failed","stderr":"fatal: bad revision"}` {
+		t.Fatalf("expected checkout failure payload, got %s", got)
 	}
 }
 

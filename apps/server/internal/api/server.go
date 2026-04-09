@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -65,6 +66,7 @@ type DockerAPI interface {
 	CopyFromContainer(ctx context.Context, containerID, srcPath string) (io.ReadCloser, container.PathStat, error)
 	CopyToContainer(ctx context.Context, containerID, dstPath string, content io.Reader, options container.CopyToContainerOptions) error
 	VolumeCreate(ctx context.Context, options volume.CreateOptions) (volume.Volume, error)
+	VolumeRemove(ctx context.Context, volumeID string, force bool) error
 }
 
 type SandboxStore interface {
@@ -252,6 +254,7 @@ type GitCloneRequest struct {
 	SingleBranch bool   `json:"single_branch"`
 	Depth        *int   `json:"depth"`
 	Filter       string `json:"filter"`
+	BaseCommit   string `json:"base_commit"`
 }
 
 func validateCloneDepth(depth *int) (int, error) {
@@ -262,6 +265,18 @@ func validateCloneDepth(depth *int) (int, error) {
 		return 0, errors.New("depth must be a positive integer")
 	}
 	return *depth, nil
+}
+
+var gitRevisionPattern = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z._/-]{0,254}$`)
+
+func validateBaseCommitRevision(baseCommit string) error {
+	if strings.TrimSpace(baseCommit) == "" {
+		return nil
+	}
+	if !gitRevisionPattern.MatchString(baseCommit) {
+		return errors.New("base_commit must be a valid git revision")
+	}
+	return nil
 }
 
 func gitCloneCommand(repoURL, targetPath, branch string, singleBranch bool, depth int, filter string, referencePath string) []string {
@@ -282,6 +297,11 @@ func gitCloneCommand(repoURL, targetPath, branch string, singleBranch bool, dept
 		cmd = append(cmd, "--reference-if-able", referencePath)
 	}
 	return append(cmd, repoURL, targetPath)
+}
+
+func gitCheckoutCommand(targetPath string, revision string) []string {
+	revision = strings.TrimSpace(revision)
+	return []string{"sh", "-lc", fmt.Sprintf("%s && git -C %s checkout --detach %s", gitEnsureRevisionScript(targetPath, revision), shellQuote(targetPath), shellQuote(revision))}
 }
 
 type CreateContainerRequest struct {
@@ -1195,6 +1215,11 @@ func (s *Server) gitClone(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, err)
 		return
 	}
+	baseCommit := strings.TrimSpace(req.BaseCommit)
+	if err := validateBaseCommitRevision(baseCommit); err != nil {
+		writeError(c, http.StatusBadRequest, err)
+		return
+	}
 
 	cmd := gitCloneCommand(req.RepoURL, req.TargetPath, strings.TrimSpace(req.Branch), req.SingleBranch, depth, strings.TrimSpace(req.Filter), "")
 
@@ -1202,6 +1227,12 @@ func (s *Server) gitClone(c *gin.Context) {
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
+	}
+	if baseCommit != "" {
+		if _, err := s.runContainerExec(c.Request.Context(), localRuntimeWorkerID, req.ContainerID, ExecRequest{Cmd: gitCheckoutCommand(req.TargetPath, baseCommit)}); err != nil {
+			writeError(c, http.StatusInternalServerError, err)
+			return
+		}
 	}
 
 	c.JSON(http.StatusOK, execResp)
@@ -1283,6 +1314,15 @@ func isMissingWorkloadError(err error) bool {
 
 	errText := strings.ToLower(err.Error())
 	return strings.Contains(errText, "no such container") || strings.Contains(errText, "container not found")
+}
+
+func isMissingVolumeError(err error) bool {
+	if errdefs.IsNotFound(err) {
+		return true
+	}
+
+	errText := strings.ToLower(err.Error())
+	return strings.Contains(errText, "no such volume") || strings.Contains(errText, "volume not found")
 }
 
 // execInContainer godoc
